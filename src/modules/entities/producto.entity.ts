@@ -2,7 +2,7 @@ import { Column, Entity } from 'typeorm';
 import { BaseAuditEntity } from '../../common/entities/base-audit.entity';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-@Entity({ schema: 'kpi_maintenance', name: 'tb_producto' })
+@Entity({ schema: 'kpi_inventory', name: 'tb_producto' })
 export class Producto extends BaseAuditEntity {
   @Column({ type: 'varchar', length: 60, unique: true })
   @ApiProperty({ description: 'codigo' })

@@ -2,7 +2,7 @@ import { Column, Entity } from 'typeorm';
 import { BaseAuditEntity } from '../../common/entities/base-audit.entity';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-@Entity({ schema: 'kpi_maintenance', name: 'tb_kardex' })
+@Entity({ schema: 'kpi_inventory', name: 'tb_kardex' })
 export class Kardex extends BaseAuditEntity {
   @Column({ type: 'timestamp without time zone', default: () => 'now()' })
   @ApiProperty({ description: 'fecha' })

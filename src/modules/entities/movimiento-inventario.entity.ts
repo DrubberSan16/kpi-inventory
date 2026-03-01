@@ -2,7 +2,7 @@ import { Column, Entity } from 'typeorm';
 import { BaseAuditEntity } from '../../common/entities/base-audit.entity';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-@Entity({ schema: 'kpi_maintenance', name: 'tb_movimiento_inventario' })
+@Entity({ schema: 'kpi_inventory', name: 'tb_movimiento_inventario' })
 export class MovimientoInventario extends BaseAuditEntity {
   @Column({ type: 'text' })
   @ApiProperty({ description: 'tipo movimiento' })
