@@ -68,13 +68,12 @@ export class KardexController extends CrudController<Kardex> {
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['tipo_movimiento', 'bodega_id', 'producto_id', 'cantidad', 'costo_unitario'],
+      required: ['tipo_movimiento', 'bodega_id', 'producto_id', 'cantidad'],
       properties: {
         tipo_movimiento: { type: 'string', example: 'INGRESO' },
         bodega_id: { type: 'string', format: 'uuid' },
         producto_id: { type: 'string', format: 'uuid' },
         cantidad: { type: 'number', example: 5 },
-        costo_unitario: { type: 'number', example: 25.5 },
         observacion: { type: 'string', nullable: true },
         created_by: { type: 'string', nullable: true },
         updated_by: { type: 'string', nullable: true },

@@ -27,7 +27,6 @@ type ManualMovementPayload = {
   bodega_id?: string;
   producto_id?: string;
   cantidad?: string | number;
-  costo_unitario?: string | number;
   observacion?: string | null;
   created_by?: string | null;
   updated_by?: string | null;
@@ -79,7 +78,6 @@ export class KardexService extends CrudService<Kardex> {
     const bodegaId = this.toText(payload.bodega_id);
     const productoId = this.toText(payload.producto_id);
     const cantidad = this.toNumber(payload.cantidad, -1);
-    const costoUnitario = this.toNumber(payload.costo_unitario, -1);
     const userName =
       this.toText(payload.updated_by) || this.toText(payload.created_by) || 'SYSTEM';
 
@@ -97,10 +95,6 @@ export class KardexService extends CrudService<Kardex> {
     if (!(cantidad > 0)) {
       throw new BadRequestException('La cantidad debe ser mayor a cero.');
     }
-    if (!(costoUnitario >= 0)) {
-      throw new BadRequestException('El costo unitario no es válido.');
-    }
-
     const changedStockIds = new Set<string>();
 
     const result = await this.dataSource.transaction(async (manager) => {
@@ -121,9 +115,10 @@ export class KardexService extends CrudService<Kardex> {
       const stockRow = await this.getOrCreateStockRow(manager, {
         bodegaId,
         productoId,
-        costoPromedio: costoUnitario,
+        costoPromedio: this.resolveProductoUnitCost(producto),
         userName,
       });
+      const costoUnitario = this.resolveProductoUnitCost(producto, stockRow);
 
       const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
       const delta = tipo === 'INGRESO' ? cantidad : -cantidad;
@@ -310,6 +305,19 @@ export class KardexService extends CrudService<Kardex> {
 
   private toFixedText(value: number, decimals: number) {
     return Number.isFinite(value) ? value.toFixed(decimals) : '0';
+  }
+
+  private resolveProductoUnitCost(producto: Producto, stock?: StockBodega | null) {
+    const productCost = this.toNumber(
+      producto.costo_promedio ?? producto.ultimo_costo,
+      0,
+    );
+    if (productCost > 0) return productCost;
+
+    const stockCost = this.toNumber(stock?.costo_promedio_bodega, 0);
+    if (stockCost > 0) return stockCost;
+
+    return 0;
   }
 
   private normalizeHeader(value: string) {
