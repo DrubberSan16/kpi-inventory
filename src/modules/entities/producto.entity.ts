@@ -17,6 +17,10 @@ export class Producto extends BaseAuditEntity {
   descripcion?: string | null;
 
   @Column({ type: 'uuid', nullable: true })
+  @ApiPropertyOptional({ description: 'bodega id principal' })
+  bodega_id?: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
   @ApiPropertyOptional({ description: 'linea id' })
   linea_id?: string | null;
 

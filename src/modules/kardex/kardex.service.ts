@@ -638,6 +638,7 @@ export class KardexService extends CrudService<Kardex> {
             status: 'ACTIVE',
             codigo: codItem,
             nombre: nomItem,
+            bodega_id: bodega.id,
             linea_id: linea.id,
             categoria_id: categoria.id,
             unidad_medida_id: unidad.id,
@@ -656,6 +657,7 @@ export class KardexService extends CrudService<Kardex> {
         summary.creados += 1;
       } else {
         producto.nombre = nomItem;
+        producto.bodega_id = bodega.id;
         producto.linea_id = linea.id;
         producto.categoria_id = categoria.id;
         producto.unidad_medida_id = unidad.id;
