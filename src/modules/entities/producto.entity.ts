@@ -24,6 +24,10 @@ export class Producto extends BaseAuditEntity {
   @ApiPropertyOptional({ description: 'categoria id' })
   categoria_id?: string | null;
 
+  @Column({ type: 'uuid', nullable: true })
+  @ApiPropertyOptional({ description: 'marca id' })
+  marca_id?: string | null;
+
   @Column({ type: 'varchar', length: 100, nullable: true })
   @ApiPropertyOptional({ description: 'registro sanitario' })
   registro_sanitario?: string | null;

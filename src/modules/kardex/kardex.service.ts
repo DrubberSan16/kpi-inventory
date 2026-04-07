@@ -18,6 +18,7 @@ import { Bodega } from '../entities/bodega.entity';
 import { Sucursal } from '../entities/sucursal.entity';
 import { Linea } from '../entities/linea.entity';
 import { Categoria } from '../entities/categoria.entity';
+import { Marca } from '../entities/marca.entity';
 import { UnidadMedida } from '../entities/unidad-medida.entity';
 
 type MovementType = 'INGRESO' | 'SALIDA';
@@ -160,9 +161,13 @@ export class KardexService extends CrudService<Kardex> {
 
   async importInventoryWorkbook(
     buffer: Buffer,
-    options?: { requestedBy?: string | null },
+    options?: {
+      requestedBy?: string | null;
+      originalName?: string | null;
+      mimeType?: string | null;
+    },
   ) {
-    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const workbook = this.readInventoryWorkbook(buffer, options);
     const firstSheetName = workbook.SheetNames[0];
     if (!firstSheetName) {
       throw new BadRequestException(
@@ -200,7 +205,7 @@ export class KardexService extends CrudService<Kardex> {
       const row = rows[index];
 
       try {
-        const processed = await this.importInventoryRow(
+        const processed = await this.importInventoryRowNormalized(
           row,
           userName,
           summary,
@@ -230,13 +235,22 @@ export class KardexService extends CrudService<Kardex> {
       'Sucursal',
       'Cod. Bodega',
       'Bodega',
+      'Cod. Línea',
       'Linea',
+      'Tipo',
       'Categoria',
+      'Reg. Sanitario',
+      'Marca',
       'Cod. Item',
       'Item',
+      'Sección',
+      'Nivel',
+      'Último costo',
       'Costo promedio',
       'Precio',
       '% UTILIDAD',
+      '% TC',
+      'VALOR TC',
       'Tipo de unidad',
       'Por contenedores',
       'Stock',
@@ -251,20 +265,30 @@ export class KardexService extends CrudService<Kardex> {
       Sucursal: 'Matriz',
       'Cod. Bodega': 'BOD-001',
       Bodega: 'Bodega Principal',
+      'Cod. Línea': 'SUM',
       Linea: 'MANTENIMIENTO',
+      Tipo: 'Mercadería',
       Categoria: 'HERRAMIENTAS',
+      'Reg. Sanitario': '',
+      Marca: 'GULF',
       'Cod. Item': '175',
       Item: 'PROBADOR DE TIERRA DIGITAL',
+      'Sección': 'MATERIAL VARIOS',
+      Nivel: '',
+      'Último costo': 25.5,
       'Costo promedio': 25.5,
       Precio: 35,
       '% UTILIDAD': 37.25,
+      '% TC': 0,
+      'VALOR TC': 0,
       'Tipo de unidad': 'UNIDAD',
       'Por contenedores': 'N',
       Stock: 80,
-      'Stock min. bodega': 20,
-      'Stock max. bodega': 120,
+      'Stock min. bodega': 5,
+      'Stock max. bodega': 10000,
       'Stock contenedores': 0,
-      'Stock minimo': 20,
+      'Stock minimo': 5,
+      Costo: 2040,
     };
 
     const worksheet = XLSX.utils.json_to_sheet([sample], {
@@ -294,13 +318,31 @@ export class KardexService extends CrudService<Kardex> {
 
   private toNumber(value: unknown, fallback = 0) {
     if (value === null || value === undefined) return fallback;
-    const raw = String(value).replace(/,/g, '.').replace(/[^0-9.-]/g, '');
+    const normalizedText = this.toText(value).replace(/\s+/g, '');
+    if (!normalizedText) return fallback;
+
+    const hasComma = normalizedText.includes(',');
+    const hasDot = normalizedText.includes('.');
+    let raw = normalizedText;
+
+    if (hasComma && hasDot) {
+      const lastComma = normalizedText.lastIndexOf(',');
+      const lastDot = normalizedText.lastIndexOf('.');
+      raw =
+        lastComma > lastDot
+          ? normalizedText.replace(/\./g, '').replace(/,/g, '.')
+          : normalizedText.replace(/,/g, '');
+    } else if (hasComma) {
+      raw = normalizedText.replace(/,/g, '.');
+    }
+
+    raw = raw.replace(/[^0-9.-]/g, '');
     const parsed = Number(raw);
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
   private toText(value: unknown) {
-    return String(value ?? '').trim();
+    return this.repairText(String(value ?? ''));
   }
 
   private toFixedText(value: number, decimals: number) {
@@ -321,7 +363,7 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private normalizeHeader(value: string) {
-    return value
+    return this.repairText(value)
       .toLowerCase()
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
@@ -341,7 +383,7 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private buildCodeFromLabel(value: string, prefix: string) {
-    const normalized = value
+    const normalized = this.repairText(value)
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toUpperCase()
@@ -350,6 +392,74 @@ export class KardexService extends CrudService<Kardex> {
 
     const compact = normalized.slice(0, 24) || 'GENERAL';
     return `${prefix}_${compact}`;
+  }
+
+  private mojibakeScore(value: string) {
+    if (!value) return 0;
+    const matches = value.match(/Ã.|Â.|â.|�/g);
+    return matches?.length ?? 0;
+  }
+
+  private repairText(value: string) {
+    let text = String(value ?? '').replace(/\u0000/g, '').replace(/^\uFEFF/, '').trim();
+    if (!text) return '';
+
+    const candidates = [text];
+    try {
+      candidates.push(Buffer.from(text, 'latin1').toString('utf8').trim());
+    } catch {
+      /* noop */
+    }
+
+    const best = candidates
+      .filter(Boolean)
+      .sort((a, b) => this.mojibakeScore(a) - this.mojibakeScore(b))[0];
+
+    return String(best || text).trim();
+  }
+
+  private decodeDelimitedText(buffer: Buffer) {
+    const utf8 = this.repairText(buffer.toString('utf8'));
+    const latin1 = this.repairText(buffer.toString('latin1'));
+    return this.mojibakeScore(utf8) <= this.mojibakeScore(latin1)
+      ? utf8
+      : latin1;
+  }
+
+  private readInventoryWorkbook(
+    buffer: Buffer,
+    options?: { originalName?: string | null; mimeType?: string | null },
+  ) {
+    const originalName = this.toText(options?.originalName).toLowerCase();
+    const mimeType = this.toText(options?.mimeType).toLowerCase();
+    const isCsv =
+      originalName.endsWith('.csv') ||
+      mimeType.includes('csv') ||
+      mimeType.includes('text/plain');
+
+    if (isCsv) {
+      const csvText = this.decodeDelimitedText(buffer);
+      return XLSX.read(csvText, {
+        type: 'string',
+        raw: false,
+      });
+    }
+
+    return XLSX.read(buffer, { type: 'buffer', raw: false });
+  }
+
+  private resolveInventoryUnitCost(args: {
+    costoPromedio: number;
+    ultimoCosto: number;
+    costoTotal: number;
+    stockObjetivo: number;
+  }) {
+    if (args.costoPromedio > 0) return args.costoPromedio;
+    if (args.ultimoCosto > 0) return args.ultimoCosto;
+    if (args.costoTotal > 0 && args.stockObjetivo > 0) {
+      return args.costoTotal / args.stockObjetivo;
+    }
+    return 0;
   }
 
   private async getOrCreateStockRow(
@@ -715,6 +825,310 @@ export class KardexService extends CrudService<Kardex> {
     });
 
     return result;
+  }
+
+  private async importInventoryRowNormalized(
+    row: Record<string, unknown>,
+    userName: string,
+    summary: ImportInventorySummary,
+    changedStockIds: Set<string>,
+  ) {
+    const codSucursal = this.toText(this.rowValue(row, ['Cod. Sucursal']));
+    const nomSucursal = this.toText(this.rowValue(row, ['Sucursal']));
+    const codBodega = this.toText(this.rowValue(row, ['Cod. Bodega']));
+    const nomBodega = this.toText(this.rowValue(row, ['Bodega']));
+    const codLinea = this.toText(
+      this.rowValue(row, ['Cod. Línea', 'Cod. Linea']),
+    );
+    const nomLinea = this.toText(this.rowValue(row, ['Línea', 'Linea']));
+    const tipoProducto = this.toText(this.rowValue(row, ['Tipo']));
+    const nomCategoria = this.toText(
+      this.rowValue(row, ['Categoría', 'Categoria']),
+    );
+    const registroSanitario = this.toText(
+      this.rowValue(row, [
+        'Reg. Sanitario',
+        'Reg Sanitario',
+        'Registro sanitario',
+      ]),
+    );
+    const marcaNombre = this.toText(this.rowValue(row, ['Marca']));
+    const codItem = this.toText(
+      this.rowValue(row, ['Cod. Ítem', 'Cod. Item']),
+    ).replace(/^['"]+/, '');
+    const nomItem = this.toText(this.rowValue(row, ['Ítem', 'Item']));
+    const seccion = this.toText(this.rowValue(row, ['Sección', 'Seccion']));
+    const nivel = this.toText(this.rowValue(row, ['Nivel']));
+    const ultimoCosto = this.toNumber(
+      this.rowValue(row, ['Último costo', 'Ultimo costo']),
+      0,
+    );
+    const costoPromedioOrigen = this.toNumber(
+      this.rowValue(row, ['Costo promedio']),
+      0,
+    );
+    const costoTotal = this.toNumber(this.rowValue(row, ['Costo']), 0);
+    const precio = this.toNumber(this.rowValue(row, ['Precio']), 0);
+    const utilidad = this.toNumber(
+      this.rowValue(row, ['% UTILIDAD', '% utilidad', 'Utilidad']),
+      0,
+    );
+    const tipoUnidad = this.toText(this.rowValue(row, ['Tipo de unidad']));
+    const porContenedoresRaw = this.toText(
+      this.rowValue(row, ['Por contenedores']),
+    ).toUpperCase();
+    const stockObjetivo = this.toNumber(this.rowValue(row, ['Stock']), 0);
+    const stockMinBodega = this.toNumber(
+      this.rowValue(row, ['Stock min. bodega', 'Stock min bodega']),
+      0,
+    );
+    const stockMaxBodega = this.toNumber(
+      this.rowValue(row, ['Stock max. bodega', 'Stock max bodega']),
+      0,
+    );
+    const stockContenedores = this.toNumber(
+      this.rowValue(row, ['Stock contenedores']),
+      0,
+    );
+    const stockMinimo = this.toNumber(
+      this.rowValue(row, ['Stock minimo', 'Stock mínimo']),
+      0,
+    );
+
+    if (!codSucursal || !codBodega || !codItem || !nomItem) {
+      return false;
+    }
+
+    const porContenedores = ['S', 'SI', 'TRUE', '1'].includes(
+      porContenedoresRaw,
+    );
+    const descripcion =
+      [tipoProducto, seccion, nivel].filter(Boolean).join(' / ') || null;
+    const costoUnitario = this.resolveInventoryUnitCost({
+      costoPromedio: costoPromedioOrigen,
+      ultimoCosto,
+      costoTotal,
+      stockObjetivo,
+    });
+    const normalizedStockMinGlobal = stockMinimo > 0 ? stockMinimo : 5;
+    const normalizedStockMinBodega =
+      stockMinBodega > 0 ? stockMinBodega : normalizedStockMinGlobal;
+    const normalizedStockMaxBodega =
+      stockMaxBodega > 0 ? stockMaxBodega : 10000;
+
+    return this.dataSource.transaction(async (manager) => {
+      let sucursal = await manager.findOne(Sucursal, {
+        where: { codigo: codSucursal, is_deleted: false },
+      });
+      if (!sucursal) {
+        sucursal = await manager.save(
+          Sucursal,
+          manager.create(Sucursal, {
+            status: 'ACTIVE',
+            codigo: codSucursal,
+            nombre: nomSucursal || codSucursal,
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+      }
+
+      let bodega = await manager.findOne(Bodega, {
+        where: {
+          codigo: codBodega,
+          sucursal_id: sucursal.id,
+          is_deleted: false,
+        },
+      });
+      if (!bodega) {
+        bodega = await manager.save(
+          Bodega,
+          manager.create(Bodega, {
+            status: 'ACTIVE',
+            sucursal_id: sucursal.id,
+            codigo: codBodega,
+            nombre: nomBodega || codBodega,
+            es_principal: false,
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+      }
+
+      const lineaNombre = nomLinea || 'GENERAL';
+      const lineaCodigo = codLinea || this.buildCodeFromLabel(lineaNombre, 'LIN');
+      let linea = await manager.findOne(Linea, {
+        where: [
+          { codigo: lineaCodigo, is_deleted: false },
+          { nombre: lineaNombre, is_deleted: false },
+        ],
+      });
+      if (!linea) {
+        linea = await manager.save(
+          Linea,
+          manager.create(Linea, {
+            status: 'ACTIVE',
+            codigo: lineaCodigo,
+            nombre: lineaNombre,
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+      }
+
+      const categoriaNombre = nomCategoria || 'GENERAL';
+      const categoriaCodigo = this.buildCodeFromLabel(categoriaNombre, 'CAT');
+      let categoria = await manager.findOne(Categoria, {
+        where: [
+          { codigo: categoriaCodigo, is_deleted: false },
+          { nombre: categoriaNombre, is_deleted: false },
+        ],
+      });
+      if (!categoria) {
+        categoria = await manager.save(
+          Categoria,
+          manager.create(Categoria, {
+            status: 'ACTIVE',
+            codigo: categoriaCodigo,
+            nombre: categoriaNombre,
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+      }
+
+      let marca: Marca | null = null;
+      if (marcaNombre) {
+        marca =
+          (await manager.findOne(Marca, {
+            where: { nombre: marcaNombre, is_deleted: false },
+          })) ?? null;
+        if (!marca) {
+          marca = await manager.save(
+            Marca,
+            manager.create(Marca, {
+              status: 'ACTIVE',
+              nombre: marcaNombre,
+              created_by: userName,
+              updated_by: userName,
+            }),
+          );
+        }
+      }
+
+      const unidadNombre = tipoUnidad || 'UNIDAD';
+      const unidadCodigo = this.buildCodeFromLabel(unidadNombre, 'UM');
+      let unidad = await manager.findOne(UnidadMedida, {
+        where: [
+          { codigo: unidadCodigo, is_deleted: false },
+          { nombre: unidadNombre, is_deleted: false },
+        ],
+      });
+      if (!unidad) {
+        unidad = await manager.save(
+          UnidadMedida,
+          manager.create(UnidadMedida, {
+            status: 'ACTIVE',
+            codigo: unidadCodigo,
+            nombre: unidadNombre,
+            es_base: true,
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+      }
+
+      let producto = await manager.findOne(Producto, {
+        where: { codigo: codItem, is_deleted: false },
+      });
+      if (!producto) {
+        producto = await manager.save(
+          Producto,
+          manager.create(Producto, {
+            status: 'ACTIVE',
+            codigo: codItem,
+            nombre: nomItem,
+            descripcion,
+            linea_id: linea.id,
+            categoria_id: categoria.id,
+            marca_id: marca?.id ?? null,
+            registro_sanitario: registroSanitario || null,
+            unidad_medida_id: unidad.id,
+            por_contenedores: porContenedores,
+            es_servicio: false,
+            requiere_lote: false,
+            requiere_serie: false,
+            ultimo_costo: this.toFixedText(ultimoCosto || costoUnitario, 4),
+            costo_promedio: this.toFixedText(costoUnitario, 4),
+            precio_venta: this.toFixedText(precio, 4),
+            porcentaje_utilidad: this.toFixedText(utilidad, 4),
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+        summary.creados += 1;
+      } else {
+        producto.nombre = nomItem;
+        producto.descripcion = descripcion ?? producto.descripcion ?? null;
+        producto.linea_id = linea.id;
+        producto.categoria_id = categoria.id;
+        producto.marca_id = marca?.id ?? null;
+        producto.registro_sanitario = registroSanitario || null;
+        producto.unidad_medida_id = unidad.id;
+        producto.por_contenedores = porContenedores;
+        producto.ultimo_costo = this.toFixedText(ultimoCosto || costoUnitario, 4);
+        producto.costo_promedio = this.toFixedText(costoUnitario, 4);
+        producto.precio_venta = this.toFixedText(precio, 4);
+        producto.porcentaje_utilidad = this.toFixedText(utilidad, 4);
+        producto.updated_by = userName;
+        await manager.save(Producto, producto);
+        summary.actualizados += 1;
+      }
+
+      const stockRow = await this.getOrCreateStockRow(manager, {
+        bodegaId: bodega.id,
+        productoId: producto.id,
+        costoPromedio: costoUnitario,
+        userName,
+      });
+      const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
+      const delta = stockObjetivo - stockAnterior;
+
+      stockRow.stock_min_bodega = this.toFixedText(normalizedStockMinBodega, 6);
+      stockRow.stock_max_bodega = this.toFixedText(normalizedStockMaxBodega, 6);
+      stockRow.stock_min_global = this.toFixedText(normalizedStockMinGlobal, 6);
+      stockRow.stock_contenedores = this.toFixedText(stockContenedores, 6);
+      stockRow.costo_promedio_bodega = this.toFixedText(costoUnitario, 4);
+      stockRow.updated_by = userName;
+
+      if (delta !== 0) {
+        const tipo = delta > 0 ? 'INGRESO' : 'SALIDA';
+        const stockNuevo = stockAnterior + delta;
+        stockRow.stock_actual = this.toFixedText(stockNuevo, 6);
+        await manager.save(StockBodega, stockRow);
+        changedStockIds.add(stockRow.id);
+
+        await this.createMovementArtifacts(manager, {
+          tipo,
+          bodegaId: bodega.id,
+          productoId: producto.id,
+          cantidad: Math.abs(delta),
+          costoUnitario,
+          stockNuevo,
+          observacion: 'Ajuste por carga masiva CSV/XLSX',
+          userName,
+        });
+
+        if (delta > 0) summary.ingresos += 1;
+        else summary.salidas += 1;
+      } else {
+        stockRow.stock_actual = this.toFixedText(stockObjetivo, 6);
+        await manager.save(StockBodega, stockRow);
+        changedStockIds.add(stockRow.id);
+      }
+
+      return true;
+    });
   }
 
   private getMaintenanceRecalcUrl() {

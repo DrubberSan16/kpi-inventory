@@ -87,7 +87,7 @@ export class KardexController extends CrudController<Kardex> {
   @Post('import/upload')
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({
-    summary: 'Importar inventario desde Excel y ajustar stock por diferencia',
+    summary: 'Importar inventario desde CSV/Excel y ajustar stock por diferencia',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -101,15 +101,23 @@ export class KardexController extends CrudController<Kardex> {
     },
   })
   async uploadInventoryWorkbook(
-    @UploadedFile() file?: { buffer?: Buffer },
+    @UploadedFile() file?: {
+      buffer?: Buffer;
+      originalname?: string;
+      mimetype?: string;
+    },
     @Body('requested_by') requestedBy?: string,
   ) {
     if (!file?.buffer?.length) {
-      throw new BadRequestException('Debes adjuntar un archivo Excel válido.');
+      throw new BadRequestException(
+        'Debes adjuntar un archivo CSV o Excel válido.',
+      );
     }
 
     const summary = await this.service.importInventoryWorkbook(file.buffer, {
       requestedBy,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
     });
 
     return {
