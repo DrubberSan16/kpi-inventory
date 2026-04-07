@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   Param,
   Patch,
   Post,
@@ -114,15 +115,30 @@ export class KardexController extends CrudController<Kardex> {
       );
     }
 
-    const summary = await this.service.importInventoryWorkbook(file.buffer, {
+    const job = await this.service.startInventoryImport(file, {
       requestedBy,
-      originalName: file.originalname,
-      mimeType: file.mimetype,
     });
 
     return {
-      message: 'Carga de inventario procesada correctamente.',
-      data: summary,
+      message:
+        'Carga de inventario recibida. El procesamiento continúa en segundo plano.',
+      data: job,
+    };
+  }
+
+  @Get('import/:jobId')
+  @ApiOperation({
+    summary: 'Consultar el estado de una carga masiva de inventario',
+  })
+  @ApiParam({
+    name: 'jobId',
+    type: String,
+    description: 'Identificador del job de importación',
+  })
+  getInventoryImportJob(@Param('jobId') jobId: string) {
+    return {
+      message: 'Estado de la carga obtenido correctamente.',
+      data: this.service.getInventoryImportJob(jobId),
     };
   }
 

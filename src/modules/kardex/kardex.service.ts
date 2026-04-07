@@ -4,9 +4,12 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { CrudService } from '../../common/crud/crud.service';
+import { mkdir, writeFile } from 'fs/promises';
+import { join } from 'path';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import * as XLSX from 'xlsx';
 import { Kardex } from '../entities/kardex.entity';
@@ -43,9 +46,45 @@ type ImportInventorySummary = {
   errores: string[];
 };
 
+type InventoryImportProgress = {
+  currentIndex: number;
+  totalRows: number;
+  currentStep: string;
+};
+
+type InventoryImportResult = ImportInventorySummary & {
+  hoja: string;
+  total_filas: number;
+};
+
+type InventoryImportJobStatus =
+  | 'QUEUED'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'FAILED';
+
+type InventoryImportJobState = {
+  id: string;
+  status: InventoryImportJobStatus;
+  progress: number;
+  source_file_name: string | null;
+  stored_file_name: string | null;
+  requested_by: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  current_step: string | null;
+  current_index: number;
+  total_rows: number;
+  summary: InventoryImportResult | null;
+  error_message: string | null;
+};
+
 @Injectable()
 export class KardexService extends CrudService<Kardex> {
   private readonly logger = new Logger(KardexService.name);
+  private readonly importJobs = new Map<string, InventoryImportJobState>();
+  private readonly importRoot: string;
 
   constructor(
     @InjectRepository(Kardex)
@@ -72,6 +111,11 @@ export class KardexService extends CrudService<Kardex> {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {
     super(repository);
+    const configuredImportRoot = String(
+      this.configService.get('INVENTORY_IMPORT_DIR') || '',
+    ).trim();
+    this.importRoot =
+      configuredImportRoot || join(process.cwd(), 'storage', 'inventory-imports');
   }
 
   async registerManualMovement(payload: ManualMovementPayload) {
@@ -165,6 +209,7 @@ export class KardexService extends CrudService<Kardex> {
       requestedBy?: string | null;
       originalName?: string | null;
       mimeType?: string | null;
+      onProgress?: (progress: InventoryImportProgress) => Promise<void> | void;
     },
   ) {
     const workbook = this.readInventoryWorkbook(buffer, options);
@@ -201,6 +246,12 @@ export class KardexService extends CrudService<Kardex> {
     const userName = this.toText(options?.requestedBy) || 'SYSTEM';
     const changedStockIds = new Set<string>();
 
+    await options?.onProgress?.({
+      currentIndex: 0,
+      totalRows: rows.length,
+      currentStep: `Preparando ${rows.length} fila(s) para importar.`,
+    });
+
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
 
@@ -218,6 +269,12 @@ export class KardexService extends CrudService<Kardex> {
           `Fila ${index + 2}: ${error?.message ?? 'No se pudo importar.'}`,
         );
       }
+
+      await options?.onProgress?.({
+        currentIndex: index + 1,
+        totalRows: rows.length,
+        currentStep: `Procesando fila ${index + 2} de ${rows.length + 1}.`,
+      });
     }
 
     await this.notifyMaintenanceRecalculationForStocks(changedStockIds, 'import');
@@ -227,6 +284,68 @@ export class KardexService extends CrudService<Kardex> {
       hoja: firstSheetName,
       total_filas: rows.length,
     };
+  }
+
+  async startInventoryImport(
+    file: {
+      buffer?: Buffer;
+      originalname?: string | null;
+      mimetype?: string | null;
+    },
+    options?: {
+      requestedBy?: string | null;
+    },
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException(
+        'Debes adjuntar un archivo CSV o Excel válido.',
+      );
+    }
+
+    const jobId = randomUUID();
+    const sourceFileName =
+      this.toText(file.originalname) || `inventario-${jobId}.csv`;
+    const storedFileName = sourceFileName.replace(/[\\/:*?"<>|]+/g, '_');
+    const targetDir = join(this.importRoot, jobId);
+    await mkdir(targetDir, { recursive: true });
+    await writeFile(join(targetDir, storedFileName), file.buffer);
+
+    const job: InventoryImportJobState = {
+      id: jobId,
+      status: 'QUEUED',
+      progress: 0,
+      source_file_name: sourceFileName,
+      stored_file_name: storedFileName,
+      requested_by: this.toText(options?.requestedBy) || 'SYSTEM',
+      created_at: new Date().toISOString(),
+      started_at: null,
+      finished_at: null,
+      current_step: 'Archivo recibido. Esperando procesamiento.',
+      current_index: 0,
+      total_rows: 0,
+      summary: null,
+      error_message: null,
+    };
+
+    this.importJobs.set(jobId, job);
+
+    setImmediate(() => {
+      void this.runInventoryImportJob(jobId, file.buffer!, {
+        requestedBy: options?.requestedBy,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+      });
+    });
+
+    return job;
+  }
+
+  getInventoryImportJob(jobId: string) {
+    const job = this.importJobs.get(jobId);
+    if (!job) {
+      throw new NotFoundException('La carga de inventario solicitada no existe.');
+    }
+    return job;
   }
 
   getImportTemplateBuffer() {
@@ -460,6 +579,63 @@ export class KardexService extends CrudService<Kardex> {
       return args.costoTotal / args.stockObjetivo;
     }
     return 0;
+  }
+
+  private async runInventoryImportJob(
+    jobId: string,
+    buffer: Buffer,
+    options?: {
+      requestedBy?: string | null;
+      originalName?: string | null;
+      mimeType?: string | null;
+    },
+  ) {
+    const job = this.importJobs.get(jobId);
+    if (!job) return;
+
+    job.status = 'PROCESSING';
+    job.progress = 5;
+    job.started_at = new Date().toISOString();
+    job.current_step = 'Leyendo archivo y preparando importación.';
+    job.error_message = null;
+
+    try {
+      const summary = await this.importInventoryWorkbook(buffer, {
+        ...options,
+        onProgress: async ({ currentIndex, totalRows, currentStep }) => {
+          const currentJob = this.importJobs.get(jobId);
+          if (!currentJob) return;
+          currentJob.current_index = currentIndex;
+          currentJob.total_rows = totalRows;
+          currentJob.current_step = currentStep;
+          const completion =
+            totalRows > 0 ? Math.round((currentIndex / totalRows) * 90) : 0;
+          currentJob.progress = Math.min(95, Math.max(10, completion));
+        },
+      });
+
+      job.status = 'COMPLETED';
+      job.progress = 100;
+      job.finished_at = new Date().toISOString();
+      job.current_step = 'Importación finalizada correctamente.';
+      job.summary = summary;
+      job.current_index = summary.total_filas;
+      job.total_rows = summary.total_filas;
+      job.error_message = null;
+      this.logger.log(
+        `Carga de inventario completada. Job=${jobId} Archivo=${job.source_file_name} Procesados=${summary.procesados} Errores=${summary.errores.length}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      job.status = 'FAILED';
+      job.progress = 100;
+      job.finished_at = new Date().toISOString();
+      job.current_step = 'La importación finalizó con error.';
+      job.error_message = message;
+      this.logger.error(
+        `Carga de inventario fallida. Job=${jobId} Archivo=${job.source_file_name}: ${message}`,
+      );
+    }
   }
 
   private async getOrCreateStockRow(
