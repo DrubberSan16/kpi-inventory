@@ -328,6 +328,7 @@ export class KardexService extends CrudService<Kardex> {
     };
 
     this.importJobs.set(jobId, job);
+    void this.notifyMaintenanceImportLifecycle('started', jobId);
 
     setImmediate(() => {
       void this.runInventoryImportJob(jobId, file.buffer!, {
@@ -346,6 +347,32 @@ export class KardexService extends CrudService<Kardex> {
       throw new NotFoundException('La carga de inventario solicitada no existe.');
     }
     return job;
+  }
+
+  getActiveInventoryImportSummary() {
+    const activeJobs = [...this.importJobs.values()]
+      .filter((job) => ['QUEUED', 'PROCESSING'].includes(job.status))
+      .sort(
+        (a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+
+    return {
+      active: activeJobs.length > 0,
+      total_jobs: activeJobs.length,
+      jobs: activeJobs.map((job) => ({
+        id: job.id,
+        status: job.status,
+        progress: job.progress,
+        source_file_name: job.source_file_name,
+        requested_by: job.requested_by,
+        created_at: job.created_at,
+        started_at: job.started_at,
+        current_step: job.current_step,
+        current_index: job.current_index,
+        total_rows: job.total_rows,
+      })),
+    };
   }
 
   getImportTemplateBuffer() {
@@ -635,6 +662,7 @@ export class KardexService extends CrudService<Kardex> {
       this.logger.error(
         `Carga de inventario fallida. Job=${jobId} Archivo=${job.source_file_name}: ${message}`,
       );
+      await this.notifyMaintenanceImportLifecycle('failed', jobId);
     }
   }
 
@@ -1329,7 +1357,35 @@ export class KardexService extends CrudService<Kardex> {
     const url = this.getMaintenanceRecalcUrl();
     if (!url) return;
 
-    for (const stockId of stockIds) {
+    const stockIdList = [...new Set([...stockIds].filter(Boolean))];
+    if (!stockIdList.length) return;
+
+    if (source === 'import') {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source: 'inventory-kardex-import-completed',
+            stock_count: stockIdList.length,
+          }),
+        });
+
+        if (!response.ok) {
+          this.logger.warn(
+            `No se pudo disparar el recálculo de alertas (import:bulk). HTTP ${response.status}`,
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Error notificando recálculo de alertas desde kardex (import:bulk): ${message}`,
+        );
+      }
+      return;
+    }
+
+    for (const stockId of stockIdList) {
       if (!stockId) continue;
       try {
         const response = await fetch(url, {
@@ -1352,6 +1408,36 @@ export class KardexService extends CrudService<Kardex> {
           `Error notificando recálculo de alertas desde kardex (${source}:${stockId}): ${message}`,
         );
       }
+    }
+  }
+
+  private async notifyMaintenanceImportLifecycle(
+    stage: 'started' | 'failed',
+    jobId: string,
+  ) {
+    const url = this.getMaintenanceRecalcUrl();
+    if (!url) return;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: `inventory-kardex-import-${stage}`,
+          job_id: jobId,
+        }),
+      });
+
+      if (!response.ok) {
+        this.logger.warn(
+          `No se pudo notificar el ciclo de importación (${stage}:${jobId}). HTTP ${response.status}`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Error notificando ciclo de importación (${stage}:${jobId}): ${message}`,
+      );
     }
   }
 }

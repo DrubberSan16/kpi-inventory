@@ -126,6 +126,17 @@ export class KardexController extends CrudController<Kardex> {
     };
   }
 
+  @Get('import/active/summary')
+  @ApiOperation({
+    summary: 'Consultar si existe una carga masiva de inventario en proceso',
+  })
+  getActiveInventoryImportSummary() {
+    return {
+      message: 'Estado global de cargas obtenido correctamente.',
+      data: this.service.getActiveInventoryImportSummary(),
+    };
+  }
+
   @Get('import/:jobId')
   @ApiOperation({
     summary: 'Consultar el estado de una carga masiva de inventario',
