@@ -1086,7 +1086,7 @@ export class KardexService extends CrudService<Kardex> {
       costoTotal,
       stockObjetivo,
     });
-    const normalizedStockMinGlobal = stockMinimo > 0 ? stockMinimo : 5;
+    const normalizedStockMinGlobal = stockMinimo > 0 ? stockMinimo : 2;
     const normalizedStockMinBodega =
       stockMinBodega > 0 ? stockMinBodega : normalizedStockMinGlobal;
     const normalizedStockMaxBodega =
