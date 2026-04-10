@@ -39,12 +39,13 @@ export abstract class CrudController<
   @ApiOperation({ summary: 'Listar registros con paginación' })
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 10 })
+  @ApiQuery({ name: 'search', required: false, type: String })
   @ApiResponse({
     status: 200,
     description: 'Listado paginado de registros',
   })
   findAll(@Query() query: PaginationQueryDto) {
-    return this.service.findAll(query.page, query.limit);
+    return this.service.findAll(query.page, query.limit, query.search);
   }
 
   @Get(':id')

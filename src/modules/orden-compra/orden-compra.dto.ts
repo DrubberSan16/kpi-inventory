@@ -140,11 +140,6 @@ export class OrdenCompraQueryDto extends PaginationQueryDto {
   @IsString()
   estado?: string;
 
-  @ApiPropertyOptional({ description: 'buscar por codigo, proveedor o referencia' })
-  @IsOptional()
-  @IsString()
-  search?: string;
-
   @ApiPropertyOptional({ description: 'proveedor id', format: 'uuid' })
   @IsOptional()
   @IsUUID()

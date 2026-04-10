@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { DeepPartial, FindOptionsWhere, Repository } from 'typeorm';
+import { DeepPartial, FindOptionsWhere, Repository, Brackets } from 'typeorm';
 
 @Injectable()
 export class CrudService<
@@ -18,17 +18,54 @@ export class CrudService<
     return this.repository.save(entity);
   }
 
-  async findAll(page = 1, limit = 10) {
+  async findAll(page = 1, limit = 10, search?: string) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
       Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+    const normalizedSearch = String(search ?? '').trim();
 
-    const [data, total] = await this.repository.findAndCount({
-      where: { is_deleted: false } as FindOptionsWhere<T>,
-      skip: (safePage - 1) * safeLimit,
-      take: safeLimit,
-      order: { created_at: 'DESC' } as never,
-    });
+    const qb = this.repository
+      .createQueryBuilder('item')
+      .where('item.is_deleted = false');
+
+    if (normalizedSearch) {
+      const searchableColumns = this.repository.metadata.columns.filter((column) => {
+        if (column.propertyName === 'id' || column.propertyName === 'is_deleted') {
+          return false;
+        }
+        const type = String(column.type ?? '').toLowerCase();
+        return (
+          column.propertyName === 'codigo' ||
+          column.propertyName === 'nombre' ||
+          column.propertyName === 'descripcion' ||
+          column.propertyName === 'status' ||
+          type.includes('char') ||
+          type === 'text' ||
+          type === 'varchar'
+        );
+      });
+
+      if (searchableColumns.length) {
+        qb.andWhere(
+          new Brackets((whereQb) => {
+            searchableColumns.forEach((column, index) => {
+              const statement = `CAST(item.${column.propertyPath} AS TEXT) ILIKE :search`;
+              if (index === 0) {
+                whereQb.where(statement, { search: `%${normalizedSearch}%` });
+                return;
+              }
+              whereQb.orWhere(statement, { search: `%${normalizedSearch}%` });
+            });
+          }),
+        );
+      }
+    }
+
+    const [data, total] = await qb
+      .orderBy('item.created_at', 'DESC')
+      .skip((safePage - 1) * safeLimit)
+      .take(safeLimit)
+      .getManyAndCount();
 
     return {
       data,

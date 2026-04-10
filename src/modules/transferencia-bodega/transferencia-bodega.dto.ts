@@ -77,9 +77,4 @@ export class CreateTransferenciaBodegaDto {
   detalles?: TransferenciaBodegaDetalleDto[];
 }
 
-export class TransferenciaBodegaQueryDto extends PaginationQueryDto {
-  @ApiPropertyOptional({ description: 'buscar por codigo u orden de compra' })
-  @IsOptional()
-  @IsString()
-  search?: string;
-}
+export class TransferenciaBodegaQueryDto extends PaginationQueryDto {}
