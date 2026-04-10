@@ -259,7 +259,7 @@ export class OrdenCompraService {
     const entity =
       current ??
       manager.create(OrdenCompra, {
-        codigo: await this.generateCode(manager, 'OC', OrdenCompra),
+        codigo: await this.generateCode(manager, 'OC'),
         created_by: userName,
       });
 
@@ -278,7 +278,8 @@ export class OrdenCompraService {
       this.toText(dto.vendedor) || current?.vendedor || warehouse.nombre || null;
     entity.condicion_pago =
       this.toText(dto.condicion_pago) || current?.condicion_pago || null;
-    entity.referencia = this.toText(dto.referencia) || null;
+    entity.referencia =
+      this.toText(dto.referencia) || current?.referencia || (await this.generateReference(manager));
     entity.observacion = this.toText(dto.observacion) || null;
     entity.moneda = this.toText(dto.moneda) || current?.moneda || 'USD';
     entity.tipo_cambio = this.toFixedText(
@@ -316,7 +317,8 @@ export class OrdenCompraService {
     );
     await manager.save(OrdenCompraDet, detailEntities);
 
-    return this.findOne(savedOrder.id);
+    const [hydrated] = await this.hydrateOrdersWithManager(manager, [savedOrder], true);
+    return hydrated;
   }
 
   private async hydrateOrders(rows: OrdenCompra[], includeDetails = false) {
@@ -334,6 +336,55 @@ export class OrdenCompraService {
           .map((bodegaId) => ({ id: bodegaId, is_deleted: false })),
       }),
       this.transferenciaRepo.find({
+        where: ids.map((ordenId) => ({ orden_compra_id: ordenId, is_deleted: false })),
+      }),
+    ]);
+
+    const detailMap = details.reduce((acc, item) => {
+      (acc[item.orden_compra_id] ??= []).push(item);
+      return acc;
+    }, {} as Record<string, OrdenCompraDet[]>);
+    const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
+    const transferMap = new Map(transfers.map((item) => [item.orden_compra_id, item]));
+
+    return rows.map((item) => {
+      const warehouse = item.bodega_destino_id
+        ? warehouseMap.get(item.bodega_destino_id)
+        : null;
+      const transfer = transferMap.get(item.id);
+      return {
+        ...item,
+        proveedor_label: item.proveedor_nombre || 'Sin proveedor',
+        bodega_label: warehouse
+          ? `${warehouse.codigo || ''} - ${warehouse.nombre || ''}`.trim()
+          : 'Sin bodega',
+        transferencia_id: transfer?.id ?? null,
+        transferencia_codigo: transfer?.codigo ?? null,
+        tiene_transferencia: Boolean(transfer),
+        detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
+      };
+    });
+  }
+
+  private async hydrateOrdersWithManager(
+    manager: EntityManager,
+    rows: OrdenCompra[],
+    includeDetails = false,
+  ) {
+    if (!rows.length) return [];
+    const ids = rows.map((item) => item.id);
+    const [details, warehouses, transfers] = await Promise.all([
+      manager.find(OrdenCompraDet, {
+        where: ids.map((ordenId) => ({ orden_compra_id: ordenId, is_deleted: false })),
+        order: { created_at: 'ASC' },
+      }),
+      manager.find(Bodega, {
+        where: ids
+          .map((id) => rows.find((item) => item.id === id)?.bodega_destino_id)
+          .filter((value): value is string => Boolean(value))
+          .map((bodegaId) => ({ id: bodegaId, is_deleted: false })),
+      }),
+      manager.find(TransferenciaBodega, {
         where: ids.map((ordenId) => ({ orden_compra_id: ordenId, is_deleted: false })),
       }),
     ]);
@@ -465,25 +516,58 @@ export class OrdenCompraService {
     return warehouse?.id || null;
   }
 
-  private async generateCode(
-    manager: EntityManager,
-    prefix: string,
-    entity: typeof OrdenCompra,
-  ) {
-    const rows = await manager.find(entity, {
+  private async generateCode(manager: EntityManager, prefix: string) {
+    const rows = await manager.find(OrdenCompra, {
       where: { is_deleted: false } as any,
       select: { codigo: true } as any,
       take: 200,
       order: { created_at: 'DESC' } as any,
     });
+    const lastCode = rows
+      .map((item: any) => String(item?.codigo || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => this.getCodeRank(b, prefix) - this.getCodeRank(a, prefix))[0];
+
+    if (!lastCode) return `${prefix}-A00001`;
+    const match = new RegExp(`^${prefix}-([A-Z])(\\d{5})$`, 'i').exec(lastCode);
+    if (!match) return `${prefix}-A00001`;
+    const currentLetter = (match[1] ?? 'A').toUpperCase();
+    const currentNumber = Number(match[2] ?? '0');
+    if (currentNumber >= 99999) {
+      return `${prefix}-${this.incrementAlphaPrefix(currentLetter)}00001`;
+    }
+    return `${prefix}-${currentLetter}${String(currentNumber + 1).padStart(5, '0')}`;
+  }
+
+  private async generateReference(manager: EntityManager) {
+    const rows = await manager.find(OrdenCompra, {
+      where: { is_deleted: false } as any,
+      select: { referencia: true } as any,
+      take: 200,
+      order: { created_at: 'DESC' } as any,
+    });
     const maxNumber = rows.reduce((max, item: any) => {
-      const match = String(item?.codigo || '')
-        .trim()
-        .match(/(\d+)$/);
+      const match = /^IB-(\d{8})$/i.exec(String(item?.referencia || '').trim());
       const numeric = match ? Number(match[1]) : 0;
       return numeric > max ? numeric : max;
     }, 0);
-    return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
+    return `IB-${String(maxNumber + 1).padStart(8, '0')}`;
+  }
+
+  private incrementAlphaPrefix(letter: string) {
+    const nextCharCode = letter.toUpperCase().charCodeAt(0) + 1;
+    if (nextCharCode > 90) return 'A';
+    return String.fromCharCode(nextCharCode);
+  }
+
+  private getCodeRank(code: string, prefix: string) {
+    const match = new RegExp(`^${prefix}-([A-Z])(\\d{5})$`, 'i').exec(
+      String(code || '').trim(),
+    );
+    if (!match) return -1;
+    const letter = (match[1] ?? 'A').toUpperCase();
+    const number = Number(match[2] ?? '0');
+    return (letter.charCodeAt(0) - 64) * 100000 + number;
   }
 
   private resolveUserName(dto: CreateOrdenCompraDto | UpdateOrdenCompraDto) {
