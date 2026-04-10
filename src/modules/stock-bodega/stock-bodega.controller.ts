@@ -1,8 +1,9 @@
-import { Body, Controller, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -10,6 +11,7 @@ import { CrudController } from '../../common/crud/crud.controller';
 import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
 import { StockBodega } from '../entities/stock-bodega.entity';
 import { StockBodegaService } from './stock-bodega.service';
+import { StockBodegaQueryDto } from './stock-bodega-query.dto';
 
 const { CreateDto: CreateStockBodegaDto, UpdateDto: UpdateStockBodegaDto } =
   buildCrudRequestDtos(StockBodega);
@@ -19,6 +21,20 @@ const { CreateDto: CreateStockBodegaDto, UpdateDto: UpdateStockBodegaDto } =
 export class StockBodegaController extends CrudController<StockBodega> {
   constructor(protected readonly service: StockBodegaService) {
     super(service);
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'Listar stock por bodega con paginacion y filtros' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'bodega_id', required: false, type: String })
+  @ApiResponse({
+    status: 200,
+    description: 'Listado paginado de stock por bodega',
+  })
+  findAll(@Query() query: StockBodegaQueryDto) {
+    return this.service.findAllPaginated(query);
   }
 
   @Post()

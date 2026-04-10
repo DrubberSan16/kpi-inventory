@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DeepPartial, Repository } from 'typeorm';
+import { DeepPartial, Repository, Brackets } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { StockBodega } from '../entities/stock-bodega.entity';
+import { StockBodegaQueryDto } from './stock-bodega-query.dto';
 
 @Injectable()
 export class StockBodegaService extends CrudService<StockBodega> {
@@ -33,6 +34,86 @@ export class StockBodegaService extends CrudService<StockBodega> {
     const removed = await super.remove(id, deletedBy);
     void this.notifyMaintenanceAlertRecalculation('remove', id);
     return removed;
+  }
+
+  async findAllPaginated(query: StockBodegaQueryDto) {
+    const page = Number.isFinite(Number(query.page)) && Number(query.page) > 0
+      ? Number(query.page)
+      : 1;
+    const limit = Number.isFinite(Number(query.limit)) && Number(query.limit) > 0
+      ? Math.min(Number(query.limit), 100)
+      : 20;
+    const search = String(query.search || '').trim();
+    const warehouseId = String(query.bodega_id || '').trim();
+
+    const baseQuery = this.repository
+      .createQueryBuilder('stock')
+      .leftJoin(
+        'kpi_inventory.tb_producto',
+        'producto',
+        'producto.id = stock.producto_id AND producto.is_deleted = false',
+      )
+      .leftJoin(
+        'kpi_inventory.tb_bodega',
+        'bodega',
+        'bodega.id = stock.bodega_id AND bodega.is_deleted = false',
+      )
+      .where('stock.is_deleted = false');
+
+    if (warehouseId) {
+      baseQuery.andWhere('stock.bodega_id = :warehouseId', { warehouseId });
+    }
+
+    if (search) {
+      baseQuery.andWhere(
+        new Brackets((qb) => {
+          qb.where('producto.nombre ILIKE :search', { search: `%${search}%` })
+            .orWhere('producto.codigo ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('bodega.nombre ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('bodega.codigo ILIKE :search', {
+              search: `%${search}%`,
+            });
+        }),
+      );
+    }
+
+    const total = await baseQuery.clone().getCount();
+    const { entities, raw } = await baseQuery
+      .clone()
+      .select('stock')
+      .addSelect(
+        `TRIM(CONCAT(COALESCE(producto.codigo || ' - ', ''), COALESCE(producto.nombre, 'Sin material')))`,
+        'producto_label',
+      )
+      .addSelect(
+        `TRIM(CONCAT(COALESCE(bodega.codigo || ' - ', ''), COALESCE(bodega.nombre, 'Sin bodega')))`,
+        'bodega_label',
+      )
+      .orderBy('stock.updated_at', 'DESC')
+      .addOrderBy('stock.created_at', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getRawAndEntities();
+
+    const data = entities.map((item, index) => ({
+      ...item,
+      producto_label: raw[index]?.producto_label ?? null,
+      bodega_label: raw[index]?.bodega_label ?? null,
+    }));
+
+    return {
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    };
   }
 
   private getMaintenanceRecalcUrl() {
