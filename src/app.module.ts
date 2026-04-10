@@ -12,6 +12,8 @@ import { ProductoModule } from './modules/producto/producto.module';
 import { StockBodegaModule } from './modules/stock-bodega/stock-bodega.module';
 import { SucursalModule } from './modules/sucursal/sucursal.module';
 import { TerceroModule } from './modules/tercero/tercero.module';
+import { OrdenCompraModule } from './modules/orden-compra/orden-compra.module';
+import { TransferenciaBodegaModule } from './modules/transferencia-bodega/transferencia-bodega.module';
 import { UnidadMedidaModule } from './modules/unidad-medida/unidad-medida.module';
 import { ENTITIES } from './modules/entities';
 
@@ -55,6 +57,8 @@ import { ENTITIES } from './modules/entities';
     MovimientoInventarioModule,
     MovimientoInventarioDetModule,
     KardexModule,
+    OrdenCompraModule,
+    TransferenciaBodegaModule,
   ],
 })
 export class AppModule {}

@@ -11,7 +11,7 @@ export class CrudService<
     created_at?: Date;
   },
 > {
-  constructor(private readonly repository: Repository<T>) {}
+  constructor(protected readonly repository: Repository<T>) {}
 
   create(payload: DeepPartial<T>) {
     const entity = this.repository.create(payload);

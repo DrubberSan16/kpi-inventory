@@ -23,4 +23,8 @@ export class Bodega extends BaseAuditEntity {
   @Column({ type: 'boolean', default: false })
   @ApiProperty({ description: 'es principal' })
   es_principal: boolean;
+
+  @Column({ type: 'boolean', default: false })
+  @ApiProperty({ description: 'es default para compras' })
+  es_default_compra: boolean;
 }
