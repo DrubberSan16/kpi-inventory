@@ -25,6 +25,16 @@ import {
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
 
+type PreparedTransferDetail = {
+  orderDetail: OrdenCompraDet | null;
+  product: Producto;
+  cantidad: number;
+  observacion: string | null;
+  codigoProducto: string | null;
+  nombreProducto: string;
+  orderUnitCost: number;
+};
+
 @Injectable()
 export class TransferenciaBodegaService {
   private readonly logger = new Logger(TransferenciaBodegaService.name);
@@ -119,30 +129,35 @@ export class TransferenciaBodegaService {
   async create(dto: CreateTransferenciaBodegaDto) {
     return this.dataSource.transaction(async (manager) => {
       const userName = this.resolveUserName(dto);
-      const order = await manager.findOne(OrdenCompra, {
-        where: { id: dto.orden_compra_id, is_deleted: false },
-      });
-      if (!order) {
+      const orderId = this.toText(dto.orden_compra_id) || null;
+      const order = orderId
+        ? await manager.findOne(OrdenCompra, {
+            where: { id: orderId, is_deleted: false },
+          })
+        : null;
+      if (orderId && !order) {
         throw new NotFoundException('La orden de compra seleccionada no existe.');
       }
-      if (String(order.estado || '').toUpperCase() === 'TRANSFERIDA') {
+      if (order && String(order.estado || '').toUpperCase() === 'TRANSFERIDA') {
         throw new BadRequestException(
           'La orden de compra ya fue transferida.',
         );
       }
-      const existingTransfer = await manager.findOne(TransferenciaBodega, {
-        where: { orden_compra_id: order.id, is_deleted: false },
-      });
-      if (existingTransfer) {
-        throw new BadRequestException(
-          'La orden de compra ya tiene una transferencia registrada.',
-        );
+      if (order) {
+        const existingTransfer = await manager.findOne(TransferenciaBodega, {
+          where: { orden_compra_id: order.id, is_deleted: false },
+        });
+        if (existingTransfer) {
+          throw new BadRequestException(
+            'La orden de compra ya tiene una transferencia registrada.',
+          );
+        }
       }
 
-      const sourceWarehouseId = this.toText(order.bodega_destino_id);
+      const sourceWarehouseId = this.toText(order?.bodega_destino_id || dto.bodega_origen_id);
       if (!sourceWarehouseId) {
         throw new BadRequestException(
-          'La orden de compra no tiene una bodega origen configurada.',
+          'La bodega origen es obligatoria cuando la transferencia no proviene de una orden de compra.',
         );
       }
       const destinationWarehouseId = this.toText(dto.bodega_destino_id);
@@ -169,20 +184,21 @@ export class TransferenciaBodegaService {
         );
       }
 
-      const orderDetails = await manager.find(OrdenCompraDet, {
-        where: { orden_compra_id: order.id, is_deleted: false },
-        order: { created_at: 'ASC' },
-      });
-      if (!orderDetails.length) {
+      const orderDetails = order
+        ? await manager.find(OrdenCompraDet, {
+            where: { orden_compra_id: order.id, is_deleted: false },
+            order: { created_at: 'ASC' },
+          })
+        : [];
+      if (order && !orderDetails.length) {
         throw new BadRequestException(
           'La orden de compra no tiene materiales para transferir.',
         );
       }
 
-      const requestedDetails = this.prepareTransferDetails(
-        dto.detalles,
-        orderDetails,
-      );
+      const requestedDetails = order
+        ? this.prepareTransferDetails(dto.detalles, orderDetails)
+        : await this.prepareManualTransferDetails(manager, dto.detalles);
       const code = await this.generateCode(manager, 'TRB');
       const fechaTransferencia = dto.fecha_transferencia
         ? new Date(dto.fecha_transferencia)
@@ -195,7 +211,7 @@ export class TransferenciaBodegaService {
           fecha_movimiento: fechaTransferencia,
           tipo_documento: 'TRANSFERENCIA_BODEGA',
           numero_documento: code,
-          referencia: order.codigo,
+          referencia: order?.codigo || null,
           observacion: this.toText(dto.observacion) || `Transferencia ${code}`,
           bodega_origen_id: sourceWarehouse.id,
           tipo_cambio: '1',
@@ -213,7 +229,7 @@ export class TransferenciaBodegaService {
           fecha_movimiento: fechaTransferencia,
           tipo_documento: 'TRANSFERENCIA_BODEGA',
           numero_documento: code,
-          referencia: order.codigo,
+          referencia: order?.codigo || null,
           observacion: this.toText(dto.observacion) || `Transferencia ${code}`,
           bodega_destino_id: destinationWarehouse.id,
           tipo_cambio: '1',
@@ -228,7 +244,7 @@ export class TransferenciaBodegaService {
         TransferenciaBodega,
         manager.create(TransferenciaBodega, {
           codigo: code,
-          orden_compra_id: order.id,
+          orden_compra_id: order?.id ?? null,
           bodega_origen_id: sourceWarehouse.id,
           bodega_destino_id: destinationWarehouse.id,
           fecha_transferencia: fechaTransferencia,
@@ -255,19 +271,11 @@ export class TransferenciaBodegaService {
 
       for (const detail of requestedDetails) {
         const orderDetail = detail.orderDetail;
-        const product = await manager.findOne(Producto, {
-          where: { id: orderDetail.producto_id, is_deleted: false },
-        });
-        if (!product) {
-          throw new BadRequestException(
-            `El material ${orderDetail.nombre_producto} no existe.`,
-          );
-        }
-
+        const product = detail.product;
         const quantity = this.toNumber(detail.cantidad, 0);
         if (!(quantity > 0)) {
           throw new BadRequestException(
-            `La cantidad a transferir de ${orderDetail.nombre_producto} debe ser mayor a cero.`,
+            `La cantidad a transferir de ${detail.nombreProducto} debe ser mayor a cero.`,
           );
         }
 
@@ -275,7 +283,7 @@ export class TransferenciaBodegaService {
           bodegaId: sourceWarehouse.id,
           productoId: product.id,
           costoPromedio: this.toNumber(
-            orderDetail.costo_unitario,
+            detail.orderUnitCost,
             this.toNumber(product.costo_promedio ?? product.ultimo_costo, 0),
           ),
           userName,
@@ -407,10 +415,10 @@ export class TransferenciaBodegaService {
         transferDetailEntities.push(
           manager.create(TransferenciaBodegaDet, {
             transferencia_bodega_id: transfer.id,
-            orden_compra_det_id: orderDetail.id,
+            orden_compra_det_id: orderDetail?.id ?? null,
             producto_id: product.id,
-            codigo_producto: orderDetail.codigo_producto,
-            nombre_producto: orderDetail.nombre_producto,
+            codigo_producto: detail.codigoProducto,
+            nombre_producto: detail.nombreProducto,
             cantidad: this.toFixedText(quantity, 6),
             costo_unitario: this.toFixedText(unitCost, 4),
             subtotal: this.toFixedText(subtotal, 4),
@@ -445,9 +453,11 @@ export class TransferenciaBodegaService {
       transfer.updated_by = userName;
       await manager.save(TransferenciaBodega, transfer);
 
-      order.estado = 'TRANSFERIDA';
-      order.updated_by = userName;
-      await manager.save(OrdenCompra, order);
+      if (order) {
+        order.estado = 'TRANSFERIDA';
+        order.updated_by = userName;
+        await manager.save(OrdenCompra, order);
+      }
 
       await this.notifyMaintenanceRecalculationForStocks(changedStockIds, 'transfer');
       return this.findOne(transfer.id);
@@ -460,7 +470,9 @@ export class TransferenciaBodegaService {
   ) {
     if (!rows.length) return [];
     const ids = rows.map((item) => item.id);
-    const orderIds = rows.map((item) => item.orden_compra_id);
+    const orderIds = rows
+      .map((item) => item.orden_compra_id)
+      .filter((value): value is string => Boolean(value));
     const warehouseIds = rows.flatMap((item) => [
       item.bodega_origen_id,
       item.bodega_destino_id,
@@ -470,9 +482,11 @@ export class TransferenciaBodegaService {
         where: ids.map((id) => ({ transferencia_bodega_id: id, is_deleted: false })),
         order: { created_at: 'ASC' },
       }),
-      this.ordenRepo.find({
-        where: orderIds.map((id) => ({ id, is_deleted: false })),
-      }),
+      orderIds.length
+        ? this.ordenRepo.find({
+            where: orderIds.map((id) => ({ id, is_deleted: false })),
+          })
+        : Promise.resolve([] as OrdenCompra[]),
       this.bodegaRepo.find({
         where: [...new Set(warehouseIds.filter(Boolean))].map((id) => ({
           id,
@@ -490,7 +504,7 @@ export class TransferenciaBodegaService {
     return rows.map((item) => {
       const source = warehouseMap.get(item.bodega_origen_id);
       const destination = warehouseMap.get(item.bodega_destino_id);
-      const order = orderMap.get(item.orden_compra_id);
+      const order = item.orden_compra_id ? orderMap.get(item.orden_compra_id) : null;
       return {
         ...item,
         orden_compra_codigo: order?.codigo ?? null,
@@ -509,12 +523,20 @@ export class TransferenciaBodegaService {
   private prepareTransferDetails(
     dtoDetails: TransferenciaBodegaDetalleDto[] | undefined,
     orderDetails: OrdenCompraDet[],
-  ) {
+  ): PreparedTransferDetail[] {
     if (!dtoDetails?.length) {
       return orderDetails.map((item) => ({
         orderDetail: item,
+        product: {
+          id: item.producto_id,
+          codigo: item.codigo_producto || '',
+          nombre: item.nombre_producto,
+        } as Producto,
         cantidad: this.toNumber(item.cantidad, 0),
-        observacion: item.observacion,
+        observacion: item.observacion ?? null,
+        codigoProducto: item.codigo_producto || null,
+        nombreProducto: item.nombre_producto,
+        orderUnitCost: this.toNumber(item.costo_unitario, 0),
       }));
     }
 
@@ -536,20 +558,70 @@ export class TransferenciaBodegaService {
       }
       return {
         orderDetail,
+        product: {
+          id: orderDetail.producto_id,
+          codigo: orderDetail.codigo_producto || '',
+          nombre: orderDetail.nombre_producto,
+        } as Producto,
         cantidad: quantity,
         observacion: this.toText(detail.observacion) || null,
+        codigoProducto: orderDetail.codigo_producto || null,
+        nombreProducto: orderDetail.nombre_producto,
+        orderUnitCost: this.toNumber(orderDetail.costo_unitario, 0),
       };
     });
   }
 
+  private async prepareManualTransferDetails(
+    manager: EntityManager,
+    dtoDetails: TransferenciaBodegaDetalleDto[] | undefined,
+  ): Promise<PreparedTransferDetail[]> {
+    if (!dtoDetails?.length) {
+      throw new BadRequestException(
+        'Debes agregar al menos un material para registrar la transferencia.',
+      );
+    }
+
+    const prepared: PreparedTransferDetail[] = [];
+    for (const detail of dtoDetails) {
+      const product = await manager.findOne(Producto, {
+        where: { id: detail.producto_id, is_deleted: false },
+      });
+      if (!product) {
+        throw new BadRequestException(
+          'Uno de los materiales seleccionados no existe.',
+        );
+      }
+      const quantity = this.toNumber(detail.cantidad, 0);
+      if (!(quantity > 0)) {
+        throw new BadRequestException(
+          `La cantidad a transferir de ${product.nombre} debe ser mayor a cero.`,
+        );
+      }
+      prepared.push({
+        orderDetail: null,
+        product,
+        cantidad: quantity,
+        observacion: this.toText(detail.observacion) || null,
+        codigoProducto: product.codigo || null,
+        nombreProducto: product.nombre,
+        orderUnitCost: this.toNumber(
+          product.costo_promedio ?? product.ultimo_costo,
+          0,
+        ),
+      });
+    }
+    return prepared;
+  }
+
   private resolveUnitCost(
-    orderDetail: OrdenCompraDet,
+    orderDetail: OrdenCompraDet | null,
     product: Producto,
     stock: StockBodega,
   ) {
     const stockCost = this.toNumber(stock.costo_promedio_bodega, 0);
     if (stockCost > 0) return stockCost;
-    const orderCost = this.toNumber(orderDetail.costo_unitario, 0);
+    const orderCost = this.toNumber(orderDetail?.costo_unitario, 0);
     if (orderCost > 0) return orderCost;
     const productCost = this.toNumber(product.costo_promedio ?? product.ultimo_costo, 0);
     return productCost > 0 ? productCost : 0;

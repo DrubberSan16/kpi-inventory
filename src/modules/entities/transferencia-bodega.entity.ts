@@ -8,9 +8,9 @@ export class TransferenciaBodega extends BaseAuditEntity {
   @ApiProperty({ description: 'codigo de transferencia' })
   codigo: string;
 
-  @Column({ type: 'uuid' })
-  @ApiProperty({ description: 'orden compra id' })
-  orden_compra_id: string;
+  @Column({ type: 'uuid', nullable: true })
+  @ApiPropertyOptional({ description: 'orden compra id' })
+  orden_compra_id?: string | null;
 
   @Column({ type: 'uuid' })
   @ApiProperty({ description: 'bodega origen id' })

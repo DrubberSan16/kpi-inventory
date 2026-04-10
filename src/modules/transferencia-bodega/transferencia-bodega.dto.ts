@@ -35,9 +35,15 @@ export class TransferenciaBodegaDetalleDto {
 }
 
 export class CreateTransferenciaBodegaDto {
-  @ApiProperty({ description: 'orden compra id', format: 'uuid' })
+  @ApiPropertyOptional({ description: 'orden compra id', format: 'uuid' })
+  @IsOptional()
   @IsUUID()
-  orden_compra_id: string;
+  orden_compra_id?: string;
+
+  @ApiPropertyOptional({ description: 'bodega origen id', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  bodega_origen_id?: string;
 
   @ApiProperty({ description: 'bodega destino id', format: 'uuid' })
   @IsUUID()
