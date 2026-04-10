@@ -24,6 +24,14 @@ export class OrdenCompraDet extends BaseAuditEntity {
   @ApiProperty({ description: 'cantidad' })
   cantidad: string;
 
+  @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
+  @ApiProperty({ description: 'cantidad preaprobada para transferencia' })
+  cantidad_preaprobada: string;
+
+  @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
+  @ApiProperty({ description: 'cantidad ya transferida' })
+  cantidad_transferida: string;
+
   @Column({ type: 'numeric', precision: 14, scale: 4, default: 0 })
   @ApiProperty({ description: 'costo unitario' })
   costo_unitario: string;

@@ -302,6 +302,8 @@ export class OrdenCompraService {
         codigo_producto: detail.producto.codigo,
         nombre_producto: detail.producto.nombre,
         cantidad: this.toFixedText(detail.cantidad, 6),
+        cantidad_preaprobada: this.toFixedText(detail.cantidad, 6),
+        cantidad_transferida: '0.000000',
         costo_unitario: this.toFixedText(detail.costoUnitario, 4),
         descuento: this.toFixedText(detail.descuento, 4),
         porcentaje_descuento: this.toFixedText(detail.porcentajeDescuento, 4),
@@ -341,9 +343,26 @@ export class OrdenCompraService {
     ]);
 
     const detailMap = details.reduce((acc, item) => {
-      (acc[item.orden_compra_id] ??= []).push(item);
+      const cantidadPreaprobada = this.toNumber(
+        item.cantidad_preaprobada,
+        this.toNumber(item.cantidad, 0),
+      );
+      const cantidadTransferida = this.toNumber(item.cantidad_transferida, 0);
+      const cantidadDisponible = Math.max(
+        0,
+        cantidadPreaprobada - cantidadTransferida,
+      );
+      (acc[item.orden_compra_id] ??= []).push({
+        ...item,
+        cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
+        cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
+        cantidad_preaprobada_disponible: this.toFixedText(
+          cantidadDisponible,
+          6,
+        ),
+      });
       return acc;
-    }, {} as Record<string, OrdenCompraDet[]>);
+    }, {} as Record<string, any[]>);
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const transferMap = new Map(transfers.map((item) => [item.orden_compra_id, item]));
 
@@ -390,9 +409,26 @@ export class OrdenCompraService {
     ]);
 
     const detailMap = details.reduce((acc, item) => {
-      (acc[item.orden_compra_id] ??= []).push(item);
+      const cantidadPreaprobada = this.toNumber(
+        item.cantidad_preaprobada,
+        this.toNumber(item.cantidad, 0),
+      );
+      const cantidadTransferida = this.toNumber(item.cantidad_transferida, 0);
+      const cantidadDisponible = Math.max(
+        0,
+        cantidadPreaprobada - cantidadTransferida,
+      );
+      (acc[item.orden_compra_id] ??= []).push({
+        ...item,
+        cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
+        cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
+        cantidad_preaprobada_disponible: this.toFixedText(
+          cantidadDisponible,
+          6,
+        ),
+      });
       return acc;
-    }, {} as Record<string, OrdenCompraDet[]>);
+    }, {} as Record<string, any[]>);
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const transferMap = new Map(transfers.map((item) => [item.orden_compra_id, item]));
 

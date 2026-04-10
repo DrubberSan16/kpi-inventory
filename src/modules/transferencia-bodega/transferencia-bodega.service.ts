@@ -199,10 +199,39 @@ export class TransferenciaBodegaService {
       const requestedDetails = order
         ? this.prepareTransferDetails(dto.detalles, orderDetails)
         : await this.prepareManualTransferDetails(manager, dto.detalles);
+      if (!requestedDetails.length) {
+        throw new BadRequestException(
+          order
+            ? 'La orden de compra no tiene saldo preaprobado disponible para transferir.'
+            : 'Debes agregar al menos un material para registrar la transferencia.',
+        );
+      }
       const code = await this.generateCode(manager, 'TRB');
       const fechaTransferencia = dto.fecha_transferencia
         ? new Date(dto.fecha_transferencia)
         : new Date();
+      const baseObservation =
+        this.toText(dto.observacion) || `Transferencia ${code}`;
+
+      const movementReceipt = order
+        ? await manager.save(
+            MovimientoInventario,
+            manager.create(MovimientoInventario, {
+              tipo_movimiento: 'INGRESO',
+              fecha_movimiento: fechaTransferencia,
+              tipo_documento: 'ORDEN_COMPRA',
+              numero_documento: order.codigo || code,
+              referencia: code,
+              observacion: `Ingreso preaprobado por ${order.codigo || 'orden de compra'} para transferencia ${code}`,
+              bodega_destino_id: sourceWarehouse.id,
+              tipo_cambio: '1',
+              total_costos: '0.0000',
+              estado: 'CONFIRMADO',
+              created_by: userName,
+              updated_by: userName,
+            }),
+          )
+        : null;
 
       const movementOut = await manager.save(
         MovimientoInventario,
@@ -212,7 +241,7 @@ export class TransferenciaBodegaService {
           tipo_documento: 'TRANSFERENCIA_BODEGA',
           numero_documento: code,
           referencia: order?.codigo || null,
-          observacion: this.toText(dto.observacion) || `Transferencia ${code}`,
+          observacion: baseObservation,
           bodega_origen_id: sourceWarehouse.id,
           tipo_cambio: '1',
           total_costos: '0.0000',
@@ -230,7 +259,7 @@ export class TransferenciaBodegaService {
           tipo_documento: 'TRANSFERENCIA_BODEGA',
           numero_documento: code,
           referencia: order?.codigo || null,
-          observacion: this.toText(dto.observacion) || `Transferencia ${code}`,
+          observacion: baseObservation,
           bodega_destino_id: destinationWarehouse.id,
           tipo_cambio: '1',
           total_costos: '0.0000',
@@ -288,8 +317,16 @@ export class TransferenciaBodegaService {
           ),
           userName,
         });
-        const currentSourceStock = this.toNumber(sourceStock.stock_actual, 0);
-        if (currentSourceStock < quantity) {
+        let currentSourceStock = this.toNumber(sourceStock.stock_actual, 0);
+        const approvedAvailable = this.getApprovedAvailableQuantity(orderDetail);
+        if (order && approvedAvailable < quantity) {
+          throw new BadRequestException(
+            `La cantidad solicitada de ${product.nombre} supera el saldo preaprobado de la orden de compra. Disponible ${approvedAvailable.toFixed(
+              2,
+            )}, requerido ${quantity.toFixed(2)}.`,
+          );
+        }
+        if (!order && currentSourceStock < quantity) {
           throw new BadRequestException(
             `Stock insuficiente en ${sourceWarehouse.nombre} para ${product.nombre}. Disponible ${currentSourceStock.toFixed(
               2,
@@ -300,6 +337,60 @@ export class TransferenciaBodegaService {
         const unitCost = this.resolveUnitCost(orderDetail, product, sourceStock);
         const subtotal = quantity * unitCost;
         totalCost += subtotal;
+
+        if (order && movementReceipt) {
+          currentSourceStock += quantity;
+          sourceStock.stock_actual = this.toFixedText(currentSourceStock, 6);
+          sourceStock.costo_promedio_bodega = this.toFixedText(unitCost, 4);
+          sourceStock.updated_by = userName;
+          await manager.save(StockBodega, sourceStock);
+          changedStockIds.add(sourceStock.id);
+
+          const receiptDet = await manager.save(
+            MovimientoInventarioDet,
+            manager.create(MovimientoInventarioDet, {
+              movimiento_id: movementReceipt.id,
+              producto_id: product.id,
+              cantidad: this.toFixedText(quantity, 6),
+              costo_unitario: this.toFixedText(unitCost, 4),
+              subtotal_costo: this.toFixedText(subtotal, 4),
+              observacion:
+                this.toText(detail.observacion) ||
+                baseObservation ||
+                `Ingreso preaprobado ${order.codigo || code}`,
+              created_by: userName,
+              updated_by: userName,
+            }),
+          );
+
+          await manager.save(
+            Kardex,
+            manager.create(Kardex, {
+              fecha: fechaTransferencia,
+              bodega_id: sourceWarehouse.id,
+              producto_id: product.id,
+              movimiento_id: movementReceipt.id,
+              movimiento_det_id: receiptDet.id,
+              tipo_movimiento: 'INGRESO',
+              entrada_cantidad: this.toFixedText(quantity, 6),
+              salida_cantidad: '0.000000',
+              costo_unitario: this.toFixedText(unitCost, 4),
+              costo_total: this.toFixedText(subtotal, 4),
+              saldo_cantidad: sourceStock.stock_actual,
+              saldo_costo_promedio: this.toFixedText(unitCost, 4),
+              saldo_valorizado: this.toFixedText(
+                this.toNumber(sourceStock.stock_actual, 0) * unitCost,
+                4,
+              ),
+              observacion:
+                this.toText(detail.observacion) ||
+                baseObservation ||
+                `Ingreso preaprobado ${order.codigo || code}`,
+              created_by: userName,
+              updated_by: userName,
+            }),
+          );
+        }
 
         sourceStock.stock_actual = this.toFixedText(
           currentSourceStock - quantity,
@@ -332,7 +423,7 @@ export class TransferenciaBodegaService {
             subtotal_costo: this.toFixedText(subtotal, 4),
             observacion:
               this.toText(detail.observacion) ||
-              this.toText(dto.observacion) ||
+              baseObservation ||
               `Salida por transferencia ${code}`,
             created_by: userName,
             updated_by: userName,
@@ -349,7 +440,7 @@ export class TransferenciaBodegaService {
             subtotal_costo: this.toFixedText(subtotal, 4),
             observacion:
               this.toText(detail.observacion) ||
-              this.toText(dto.observacion) ||
+              baseObservation ||
               `Ingreso por transferencia ${code}`,
             created_by: userName,
             updated_by: userName,
@@ -377,7 +468,7 @@ export class TransferenciaBodegaService {
             ),
             observacion:
               this.toText(detail.observacion) ||
-              this.toText(dto.observacion) ||
+              baseObservation ||
               `Salida por transferencia ${code}`,
             created_by: userName,
             updated_by: userName,
@@ -405,12 +496,21 @@ export class TransferenciaBodegaService {
             ),
             observacion:
               this.toText(detail.observacion) ||
-              this.toText(dto.observacion) ||
+              baseObservation ||
               `Ingreso por transferencia ${code}`,
             created_by: userName,
             updated_by: userName,
           }),
         );
+
+        if (orderDetail) {
+          orderDetail.cantidad_transferida = this.toFixedText(
+            this.toNumber(orderDetail.cantidad_transferida, 0) + quantity,
+            6,
+          );
+          orderDetail.updated_by = userName;
+          await manager.save(OrdenCompraDet, orderDetail);
+        }
 
         transferDetailEntities.push(
           manager.create(TransferenciaBodegaDet, {
@@ -439,7 +539,14 @@ export class TransferenciaBodegaService {
       movementOut.updated_by = userName;
       movementIn.total_costos = this.toFixedText(totalCost, 4);
       movementIn.updated_by = userName;
-      await manager.save(MovimientoInventario, [movementOut, movementIn]);
+      if (movementReceipt) {
+        movementReceipt.total_costos = this.toFixedText(totalCost, 4);
+        movementReceipt.updated_by = userName;
+      }
+      const movementBatch = [movementReceipt, movementOut, movementIn].filter(
+        (item): item is MovimientoInventario => Boolean(item),
+      );
+      await manager.save(MovimientoInventario, movementBatch);
       await manager.save(TransferenciaBodegaDet, transferDetailEntities);
 
       transfer.total_items = transferDetailEntities.length;
@@ -525,19 +632,21 @@ export class TransferenciaBodegaService {
     orderDetails: OrdenCompraDet[],
   ): PreparedTransferDetail[] {
     if (!dtoDetails?.length) {
-      return orderDetails.map((item) => ({
-        orderDetail: item,
-        product: {
-          id: item.producto_id,
-          codigo: item.codigo_producto || '',
-          nombre: item.nombre_producto,
-        } as Producto,
-        cantidad: this.toNumber(item.cantidad, 0),
-        observacion: item.observacion ?? null,
-        codigoProducto: item.codigo_producto || null,
-        nombreProducto: item.nombre_producto,
-        orderUnitCost: this.toNumber(item.costo_unitario, 0),
-      }));
+      return orderDetails
+        .map((item) => ({
+          orderDetail: item,
+          product: {
+            id: item.producto_id,
+            codigo: item.codigo_producto || '',
+            nombre: item.nombre_producto,
+          } as Producto,
+          cantidad: this.getApprovedAvailableQuantity(item),
+          observacion: item.observacion ?? null,
+          codigoProducto: item.codigo_producto || null,
+          nombreProducto: item.nombre_producto,
+          orderUnitCost: this.toNumber(item.costo_unitario, 0),
+        }))
+        .filter((item) => item.cantidad > 0);
     }
 
     return dtoDetails.map((detail) => {
@@ -550,10 +659,10 @@ export class TransferenciaBodegaService {
         );
       }
       const quantity = this.toNumber(detail.cantidad, 0);
-      const orderQuantity = this.toNumber(orderDetail.cantidad, 0);
-      if (quantity > orderQuantity) {
+      const approvedAvailable = this.getApprovedAvailableQuantity(orderDetail);
+      if (quantity > approvedAvailable) {
         throw new BadRequestException(
-          `La cantidad de ${orderDetail.nombre_producto} no puede superar lo pedido en la orden de compra.`,
+          `La cantidad de ${orderDetail.nombre_producto} no puede superar el saldo preaprobado disponible en la orden de compra.`,
         );
       }
       return {
@@ -625,6 +734,16 @@ export class TransferenciaBodegaService {
     if (orderCost > 0) return orderCost;
     const productCost = this.toNumber(product.costo_promedio ?? product.ultimo_costo, 0);
     return productCost > 0 ? productCost : 0;
+  }
+
+  private getApprovedAvailableQuantity(orderDetail: OrdenCompraDet | null) {
+    if (!orderDetail) return 0;
+    const approved = this.toNumber(
+      orderDetail.cantidad_preaprobada,
+      this.toNumber(orderDetail.cantidad, 0),
+    );
+    const transferred = this.toNumber(orderDetail.cantidad_transferida, 0);
+    return Math.max(0, approved - transferred);
   }
 
   private async getOrCreateStockRow(
