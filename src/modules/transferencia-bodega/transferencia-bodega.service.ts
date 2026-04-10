@@ -567,7 +567,12 @@ export class TransferenciaBodegaService {
       }
 
       await this.notifyMaintenanceRecalculationForStocks(changedStockIds, 'transfer');
-      return this.findOne(transfer.id);
+      const [hydrated] = await this.hydrateTransfersWithManager(
+        manager,
+        [transfer],
+        true,
+      );
+      return hydrated;
     });
   }
 
@@ -601,6 +606,67 @@ export class TransferenciaBodegaService {
         })),
       }),
     ]);
+    const detailMap = details.reduce((acc, item) => {
+      (acc[item.transferencia_bodega_id] ??= []).push(item);
+      return acc;
+    }, {} as Record<string, TransferenciaBodegaDet[]>);
+    const orderMap = new Map(orders.map((item) => [item.id, item]));
+    const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
+
+    return rows.map((item) => {
+      const source = warehouseMap.get(item.bodega_origen_id);
+      const destination = warehouseMap.get(item.bodega_destino_id);
+      const order = item.orden_compra_id ? orderMap.get(item.orden_compra_id) : null;
+      return {
+        ...item,
+        orden_compra_codigo: order?.codigo ?? null,
+        orden_compra_proveedor: order?.proveedor_nombre ?? null,
+        bodega_origen_label: source
+          ? `${source.codigo || ''} - ${source.nombre || ''}`.trim()
+          : 'Sin bodega',
+        bodega_destino_label: destination
+          ? `${destination.codigo || ''} - ${destination.nombre || ''}`.trim()
+          : 'Sin bodega',
+        detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
+      };
+    });
+  }
+
+  private async hydrateTransfersWithManager(
+    manager: EntityManager,
+    rows: TransferenciaBodega[],
+    includeDetails: boolean,
+  ) {
+    if (!rows.length) return [];
+    const ids = rows.map((item) => item.id);
+    const orderIds = rows
+      .map((item) => item.orden_compra_id)
+      .filter((value): value is string => Boolean(value));
+    const warehouseIds = rows.flatMap((item) => [
+      item.bodega_origen_id,
+      item.bodega_destino_id,
+    ]);
+    const [details, orders, warehouses] = await Promise.all([
+      manager.find(TransferenciaBodegaDet, {
+        where: ids.map((id) => ({
+          transferencia_bodega_id: id,
+          is_deleted: false,
+        })),
+        order: { created_at: 'ASC' },
+      }),
+      orderIds.length
+        ? manager.find(OrdenCompra, {
+            where: orderIds.map((id) => ({ id, is_deleted: false })),
+          })
+        : Promise.resolve([] as OrdenCompra[]),
+      manager.find(Bodega, {
+        where: [...new Set(warehouseIds.filter(Boolean))].map((id) => ({
+          id,
+          is_deleted: false,
+        })),
+      }),
+    ]);
+
     const detailMap = details.reduce((acc, item) => {
       (acc[item.transferencia_bodega_id] ??= []).push(item);
       return acc;
