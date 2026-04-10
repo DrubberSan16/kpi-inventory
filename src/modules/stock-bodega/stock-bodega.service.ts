@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, Repository, Brackets } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
+import { Bodega } from '../entities/bodega.entity';
+import { Producto } from '../entities/producto.entity';
 import { StockBodega } from '../entities/stock-bodega.entity';
 import { StockBodegaQueryDto } from './stock-bodega-query.dto';
 
@@ -49,12 +51,12 @@ export class StockBodegaService extends CrudService<StockBodega> {
     const baseQuery = this.repository
       .createQueryBuilder('stock')
       .leftJoin(
-        'kpi_inventory.tb_producto',
+        Producto,
         'producto',
         'producto.id = stock.producto_id AND producto.is_deleted = false',
       )
       .leftJoin(
-        'kpi_inventory.tb_bodega',
+        Bodega,
         'bodega',
         'bodega.id = stock.bodega_id AND bodega.is_deleted = false',
       )
