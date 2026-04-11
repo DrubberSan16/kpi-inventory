@@ -10,7 +10,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
 import * as XLSX from 'xlsx';
 import { Kardex } from '../entities/kardex.entity';
 import { StockBodega } from '../entities/stock-bodega.entity';
@@ -116,6 +116,79 @@ export class KardexService extends CrudService<Kardex> {
     ).trim();
     this.importRoot =
       configuredImportRoot || join(process.cwd(), 'storage', 'inventory-imports');
+  }
+
+  async findAllPaginated(
+    page = 1,
+    limit = 10,
+    search?: string,
+    sucursalId?: string | null,
+  ) {
+    const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
+    const safeLimit =
+      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+    const normalizedSearch = String(search ?? '').trim();
+
+    const qb = this.repository
+      .createQueryBuilder('kardex')
+      .leftJoin(
+        Bodega,
+        'bodega',
+        'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
+      )
+      .leftJoin(
+        Producto,
+        'producto',
+        'producto.id = kardex.producto_id AND producto.is_deleted = false',
+      )
+      .where('kardex.is_deleted = false');
+
+    if (sucursalId) {
+      qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    if (normalizedSearch) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('producto.nombre ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('producto.codigo ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('bodega.nombre ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('bodega.codigo ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('kardex.tipo_movimiento ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(kardex.observacion, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            });
+        }),
+      );
+    }
+
+    const [data, total] = await qb
+      .orderBy('kardex.fecha', 'DESC')
+      .addOrderBy('kardex.created_at', 'DESC')
+      .skip((safePage - 1) * safeLimit)
+      .take(safeLimit)
+      .getManyAndCount();
+
+    return {
+      data,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        totalPages: Math.ceil(total / safeLimit),
+      },
+    };
   }
 
   async registerManualMovement(payload: ManualMovementPayload) {

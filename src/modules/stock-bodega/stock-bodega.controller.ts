@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import {
   ApiBody,
   ApiOperation,
@@ -9,6 +9,7 @@ import {
 } from '@nestjs/swagger';
 import { CrudController } from '../../common/crud/crud.controller';
 import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
+import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import { StockBodega } from '../entities/stock-bodega.entity';
 import { StockBodegaService } from './stock-bodega.service';
 import { StockBodegaQueryDto } from './stock-bodega-query.dto';
@@ -33,8 +34,8 @@ export class StockBodegaController extends CrudController<StockBodega> {
     status: 200,
     description: 'Listado paginado de stock por bodega',
   })
-  findAll(@Query() query: StockBodegaQueryDto) {
-    return this.service.findAllPaginated(query);
+  findAll(@Query() query: StockBodegaQueryDto, @Req() req?: any) {
+    return this.service.findAllPaginated(query, getSucursalScopeId(req));
   }
 
   @Post()

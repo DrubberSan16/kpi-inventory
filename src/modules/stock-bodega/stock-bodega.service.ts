@@ -38,7 +38,7 @@ export class StockBodegaService extends CrudService<StockBodega> {
     return removed;
   }
 
-  async findAllPaginated(query: StockBodegaQueryDto) {
+  async findAllPaginated(query: StockBodegaQueryDto, sucursalId?: string | null) {
     const page = Number.isFinite(Number(query.page)) && Number(query.page) > 0
       ? Number(query.page)
       : 1;
@@ -61,6 +61,10 @@ export class StockBodegaService extends CrudService<StockBodega> {
         'bodega.id = stock.bodega_id AND bodega.is_deleted = false',
       )
       .where('stock.is_deleted = false');
+
+    if (sucursalId) {
+      baseQuery.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
 
     if (warehouseId) {
       baseQuery.andWhere('stock.bodega_id = :warehouseId', { warehouseId });

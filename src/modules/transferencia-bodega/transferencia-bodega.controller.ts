@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import {
   ApiBody,
   ApiOperation,
@@ -7,6 +7,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import {
   CreateTransferenciaBodegaDto,
   TransferenciaBodegaQueryDto,
@@ -23,8 +24,8 @@ export class TransferenciaBodegaController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 10 })
   @ApiQuery({ name: 'search', required: false, type: String })
-  findAll(@Query() query: TransferenciaBodegaQueryDto) {
-    return this.service.findAll(query);
+  findAll(@Query() query: TransferenciaBodegaQueryDto, @Req() req?: any) {
+    return this.service.findAll(query, getSucursalScopeId(req));
   }
 
   @Get(':id')
@@ -32,8 +33,8 @@ export class TransferenciaBodegaController {
   @ApiParam({ name: 'id', type: String, description: 'UUID de la transferencia' })
   @ApiResponse({ status: 200, description: 'Transferencia encontrada' })
   @ApiResponse({ status: 404, description: 'Transferencia no encontrada' })
-  findOne(@Param('id') id: string) {
-    return this.service.findOne(id);
+  findOne(@Param('id') id: string, @Req() req?: any) {
+    return this.service.findOne(id, getSucursalScopeId(req));
   }
 
   @Post()

@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import {
   ApiBody,
   ApiOperation,
@@ -8,6 +8,8 @@ import {
 } from '@nestjs/swagger';
 import { CrudController } from '../../common/crud/crud.controller';
 import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import { Sucursal } from '../entities/sucursal.entity';
 import { SucursalService } from './sucursal.service';
 
@@ -19,6 +21,17 @@ const { CreateDto: CreateSucursalDto, UpdateDto: UpdateSucursalDto } =
 export class SucursalController extends CrudController<Sucursal> {
   constructor(protected readonly service: SucursalService) {
     super(service);
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'Listar sucursales con paginacion y alcance por sucursal' })
+  findAll(@Query() query: PaginationQueryDto, @Req() req?: any) {
+    return this.service.findAllScoped(
+      query.page,
+      query.limit,
+      query.search,
+      getSucursalScopeId(req),
+    );
   }
 
   @Post()

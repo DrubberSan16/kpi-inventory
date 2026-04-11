@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, ILike, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
 import {
   Bodega,
   Kardex,
@@ -64,46 +64,72 @@ export class TransferenciaBodegaService {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
-  async findAll(query: TransferenciaBodegaQueryDto) {
+  private async getWarehouseIdsBySucursal(sucursalId?: string | null) {
+    if (!sucursalId) return null;
+    const rows = await this.bodegaRepo.find({
+      where: { sucursal_id: sucursalId, is_deleted: false } as any,
+      select: { id: true } as any,
+    });
+    return rows.map((item) => item.id);
+  }
+
+  async findAll(query: TransferenciaBodegaQueryDto, sucursalId?: string | null) {
     const page = Number(query.page || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
-    const where: any = { is_deleted: false };
-    if (query.search) {
-      const search = this.toText(query.search);
-      const [byCode, byObs] = await Promise.all([
-        this.transferenciaRepo.find({
-          where: { ...where, codigo: ILike(`%${search}%`) },
-          skip: (page - 1) * limit,
-          take: limit,
-          order: { fecha_transferencia: 'DESC', created_at: 'DESC' },
-        }),
-        this.transferenciaRepo.find({
-          where: { ...where, observacion: ILike(`%${search}%`) },
-          skip: (page - 1) * limit,
-          take: limit,
-          order: { fecha_transferencia: 'DESC', created_at: 'DESC' },
-        }),
-      ]);
-      const deduped = new Map<string, TransferenciaBodega>();
-      [...byCode, ...byObs].forEach((item) => deduped.set(item.id, item));
-      const data = await this.hydrateTransfers([...deduped.values()], false);
+    const search = this.toText(query.search);
+    const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
+
+    if (warehouseIds && !warehouseIds.length) {
       return {
-        data,
+        data: [],
         pagination: {
           page,
           limit,
-          total: data.length,
-          totalPages: Math.max(1, Math.ceil(data.length / limit)),
+          total: 0,
+          totalPages: 1,
         },
       };
     }
 
-    const [rows, total] = await this.transferenciaRepo.findAndCount({
-      where,
-      skip: (page - 1) * limit,
-      take: limit,
-      order: { fecha_transferencia: 'DESC', created_at: 'DESC' },
-    });
+    const qb = this.transferenciaRepo
+      .createQueryBuilder('transferencia')
+      .where('transferencia.is_deleted = false');
+
+    if (warehouseIds) {
+      qb.andWhere(
+        new Brackets((scopeQb) => {
+          scopeQb
+            .where('transferencia.bodega_origen_id IN (:...warehouseIds)', {
+              warehouseIds,
+            })
+            .orWhere('transferencia.bodega_destino_id IN (:...warehouseIds)', {
+              warehouseIds,
+            });
+        }),
+      );
+    }
+
+    if (search) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('transferencia.codigo ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(transferencia.observacion, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            });
+        }),
+      );
+    }
+
+    const [rows, total] = await qb
+      .orderBy('transferencia.fecha_transferencia', 'DESC')
+      .addOrderBy('transferencia.created_at', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
+
     return {
       data: await this.hydrateTransfers(rows, false),
       pagination: {
@@ -115,11 +141,19 @@ export class TransferenciaBodegaService {
     };
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, sucursalId?: string | null) {
     const transfer = await this.transferenciaRepo.findOne({
       where: { id, is_deleted: false },
     });
     if (!transfer) {
+      throw new NotFoundException('La transferencia no existe.');
+    }
+    const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
+    if (
+      warehouseIds &&
+      !warehouseIds.includes(String(transfer.bodega_origen_id || '')) &&
+      !warehouseIds.includes(String(transfer.bodega_destino_id || ''))
+    ) {
       throw new NotFoundException('La transferencia no existe.');
     }
     const [hydrated] = await this.hydrateTransfers([transfer], true);

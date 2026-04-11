@@ -6,9 +6,11 @@ import {
   Param,
   Patch,
   Post,
+  Req,
   Res,
   UploadedFile,
   UseInterceptors,
+  Query,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -17,11 +19,14 @@ import {
   ApiConsumes,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
 import { CrudController } from '../../common/crud/crud.controller';
 import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import { Kardex } from '../entities/kardex.entity';
 import { KardexService } from './kardex.service';
 
@@ -33,6 +38,20 @@ const { CreateDto: CreateKardexDto, UpdateDto: UpdateKardexDto } =
 export class KardexController extends CrudController<Kardex> {
   constructor(protected readonly service: KardexService) {
     super(service);
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'Listar movimientos de kardex con alcance por sucursal' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 10 })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  findAll(@Query() query: PaginationQueryDto, @Req() req?: any) {
+    return this.service.findAllPaginated(
+      query.page,
+      query.limit,
+      query.search,
+      getSucursalScopeId(req),
+    );
   }
 
   @Post()

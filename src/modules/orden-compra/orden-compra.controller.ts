@@ -7,8 +7,10 @@ import {
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import {
   CreateOrdenCompraDto,
   OrdenCompraQueryDto,
@@ -23,20 +25,20 @@ export class OrdenCompraController {
 
   @Get()
   @ApiOperation({ summary: 'Listar ordenes de compra' })
-  findAll(@Query() query: OrdenCompraQueryDto) {
-    return this.service.findAll(query);
+  findAll(@Query() query: OrdenCompraQueryDto, @Req() req?: any) {
+    return this.service.findAll(query, getSucursalScopeId(req));
   }
 
   @Get('pendientes-transferencia')
   @ApiOperation({ summary: 'Listar ordenes de compra pendientes de transferencia' })
-  findPendingForTransfer() {
-    return this.service.findPendingForTransfer();
+  findPendingForTransfer(@Req() req?: any) {
+    return this.service.findPendingForTransfer(getSucursalScopeId(req));
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Obtener orden de compra por ID' })
-  findOne(@Param('id') id: string) {
-    return this.service.findOne(id);
+  findOne(@Param('id') id: string, @Req() req?: any) {
+    return this.service.findOne(id, getSucursalScopeId(req));
   }
 
   @Post()

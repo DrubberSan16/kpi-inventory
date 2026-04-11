@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, ILike, Repository } from 'typeorm';
+import { DataSource, EntityManager, ILike, In, Repository } from 'typeorm';
 import {
   Bodega,
   OrdenCompra,
@@ -45,10 +45,27 @@ export class OrdenCompraService {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
-  async findAll(query: OrdenCompraQueryDto) {
+  private async getWarehouseIdsBySucursal(sucursalId?: string | null) {
+    if (!sucursalId) return null;
+    const rows = await this.bodegaRepo.find({
+      where: { sucursal_id: sucursalId, is_deleted: false } as any,
+      select: { id: true } as any,
+    });
+    return rows.map((item) => item.id);
+  }
+
+  async findAll(query: OrdenCompraQueryDto, sucursalId?: string | null) {
     const page = Number(query.page || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
     const where: any = { is_deleted: false };
+    const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
+    if (warehouseIds && !warehouseIds.length) {
+      return {
+        data: [],
+        pagination: { page, limit, total: 0, totalPages: 1 },
+      };
+    }
+    if (warehouseIds) where.bodega_destino_id = In(warehouseIds);
     if (query.estado) where.estado = this.toText(query.estado).toUpperCase();
     if (query.proveedor_id) where.proveedor_id = query.proveedor_id;
     if (query.search) {
@@ -107,9 +124,14 @@ export class OrdenCompraService {
     };
   }
 
-  async findPendingForTransfer() {
+  async findPendingForTransfer(sucursalId?: string | null) {
+    const where: any = { is_deleted: false, estado: 'EMITIDA' };
+    const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
+    if (warehouseIds && !warehouseIds.length) return [];
+    if (warehouseIds) where.bodega_destino_id = In(warehouseIds);
+
     const rows = await this.ordenRepo.find({
-      where: { is_deleted: false, estado: 'EMITIDA' },
+      where,
       order: { fecha_emision: 'DESC', created_at: 'DESC' },
     });
     const activeTransfers = await this.transferenciaRepo.find({
@@ -123,11 +145,15 @@ export class OrdenCompraService {
     return this.hydrateOrders(pending, true);
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, sucursalId?: string | null) {
     const order = await this.ordenRepo.findOne({
       where: { id, is_deleted: false },
     });
     if (!order) {
+      throw new NotFoundException('La orden de compra no existe.');
+    }
+    const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
+    if (warehouseIds && !warehouseIds.includes(String(order.bodega_destino_id || ''))) {
       throw new NotFoundException('La orden de compra no existe.');
     }
     const [hydrated] = await this.hydrateOrders([order], true);

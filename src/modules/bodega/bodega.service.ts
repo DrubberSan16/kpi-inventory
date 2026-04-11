@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DeepPartial, QueryFailedError, Repository } from 'typeorm';
+import { Brackets, DeepPartial, QueryFailedError, Repository } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { Bodega } from '../entities/bodega.entity';
 
@@ -8,6 +8,55 @@ import { Bodega } from '../entities/bodega.entity';
 export class BodegaService extends CrudService<Bodega> {
   constructor(@InjectRepository(Bodega) repository: Repository<Bodega>) {
     super(repository);
+  }
+
+  async findAllScoped(page = 1, limit = 10, search?: string, sucursalId?: string | null) {
+    const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
+    const safeLimit =
+      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+    const normalizedSearch = String(search ?? '').trim();
+
+    const qb = this.repository
+      .createQueryBuilder('bodega')
+      .where('bodega.is_deleted = false');
+
+    if (sucursalId) {
+      qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    if (normalizedSearch) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('bodega.codigo ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('bodega.nombre ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(bodega.direccion, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            });
+        }),
+      );
+    }
+
+    const [data, total] = await qb
+      .orderBy('bodega.codigo', 'ASC')
+      .addOrderBy('bodega.nombre', 'ASC')
+      .skip((safePage - 1) * safeLimit)
+      .take(safeLimit)
+      .getManyAndCount();
+
+    return {
+      data,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        totalPages: Math.ceil(total / safeLimit),
+      },
+    };
   }
 
   async create(payload: DeepPartial<Bodega>) {
