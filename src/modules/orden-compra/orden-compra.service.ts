@@ -518,7 +518,7 @@ export class OrdenCompraService {
       );
       const descuento = this.toNumber(detail.descuento, 0);
       const porcentajeDescuento = this.toNumber(detail.porcentaje_descuento, 0);
-      const ivaPorcentaje = this.toNumber(detail.iva_porcentaje, 12);
+      const ivaPorcentaje = this.toNumber(detail.iva_porcentaje, 15);
 
       const bruto = cantidad * costoUnitario;
       const descuentoCalculado =

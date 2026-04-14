@@ -44,7 +44,7 @@ export class OrdenCompraDet extends BaseAuditEntity {
   @ApiProperty({ description: 'porcentaje descuento' })
   porcentaje_descuento: string;
 
-  @Column({ type: 'numeric', precision: 8, scale: 4, default: 12 })
+  @Column({ type: 'numeric', precision: 8, scale: 4, default: 15 })
   @ApiProperty({ description: 'porcentaje iva' })
   iva_porcentaje: string;
 
