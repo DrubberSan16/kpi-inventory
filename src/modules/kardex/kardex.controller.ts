@@ -76,6 +76,90 @@ export class KardexController extends CrudController<Kardex> {
     };
   }
 
+  @Get('documentos/lista')
+  @ApiOperation({
+    summary: 'Listar documentos de ingreso y egreso de bodega con detalle',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 10 })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({
+    name: 'tipo_movimiento',
+    required: false,
+    type: String,
+    example: 'INGRESO',
+  })
+  async getMovementDocuments(
+    @Query() query: PaginationQueryDto,
+    @Query('tipo_movimiento') tipoMovimiento?: string,
+    @Req() req?: any,
+  ) {
+    return {
+      message: 'Documentos de bodega obtenidos correctamente.',
+      data: await this.service.getMovementDocuments(
+        query.page,
+        query.limit,
+        query.search,
+        tipoMovimiento,
+        getSucursalScopeId(req),
+      ),
+    };
+  }
+
+  @Get('documentos/:id')
+  @ApiOperation({
+    summary: 'Obtener un documento de ingreso o egreso de bodega por ID',
+  })
+  @ApiParam({
+    name: 'id',
+    type: String,
+    description: 'UUID del documento de bodega',
+  })
+  async getMovementDocument(@Param('id') id: string, @Req() req?: any) {
+    return {
+      message: 'Documento de bodega obtenido correctamente.',
+      data: await this.service.getMovementDocument(id, getSucursalScopeId(req)),
+    };
+  }
+
+  @Post('documentos')
+  @ApiOperation({
+    summary: 'Crear documento de ingreso o egreso de bodega con cabecera y detalle',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['tipo_movimiento', 'bodega_id', 'detalles'],
+      properties: {
+        tipo_movimiento: { type: 'string', example: 'INGRESO' },
+        fecha_movimiento: { type: 'string', example: '2026-04-16' },
+        bodega_id: { type: 'string', format: 'uuid' },
+        referencia: { type: 'string', nullable: true },
+        observacion: { type: 'string', nullable: true },
+        created_by: { type: 'string', nullable: true },
+        updated_by: { type: 'string', nullable: true },
+        detalles: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['producto_id', 'cantidad'],
+            properties: {
+              producto_id: { type: 'string', format: 'uuid' },
+              cantidad: { type: 'number', example: 3 },
+              observacion: { type: 'string', nullable: true },
+            },
+          },
+        },
+      },
+    },
+  })
+  async createMovementDocument(@Body() payload: Record<string, unknown>) {
+    return {
+      message: 'Documento de bodega registrado correctamente.',
+      data: await this.service.createMovementDocument(payload),
+    };
+  }
+
   @Post()
   @ApiOperation({ summary: 'Crear registro' })
   @ApiBody({

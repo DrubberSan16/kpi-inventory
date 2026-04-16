@@ -23,6 +23,7 @@ import { Linea } from '../entities/linea.entity';
 import { Categoria } from '../entities/categoria.entity';
 import { Marca } from '../entities/marca.entity';
 import { UnidadMedida } from '../entities/unidad-medida.entity';
+import { OrdenCompra } from '../entities/orden-compra.entity';
 import { TransferenciaBodega } from '../entities/transferencia-bodega.entity';
 import { TransferenciaBodegaDet } from '../entities/transferencia-bodega-det.entity';
 
@@ -36,6 +37,23 @@ type ManualMovementPayload = {
   observacion?: string | null;
   created_by?: string | null;
   updated_by?: string | null;
+};
+
+type MovementDocumentDetailPayload = {
+  producto_id?: string;
+  cantidad?: string | number;
+  observacion?: string | null;
+};
+
+type MovementDocumentPayload = {
+  tipo_movimiento?: string;
+  fecha_movimiento?: string | Date | null;
+  bodega_id?: string;
+  referencia?: string | null;
+  observacion?: string | null;
+  created_by?: string | null;
+  updated_by?: string | null;
+  detalles?: MovementDocumentDetailPayload[];
 };
 
 type ImportInventorySummary = {
@@ -433,6 +451,320 @@ export class KardexService extends CrudService<Kardex> {
     };
   }
 
+  async getMovementDocuments(
+    page = 1,
+    limit = 10,
+    search?: string | null,
+    tipoMovimiento?: string | null,
+    sucursalId?: string | null,
+  ) {
+    const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
+    const safeLimit =
+      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+    const normalizedSearch = this.toText(search);
+    const normalizedType = this.normalizeMovementType(tipoMovimiento);
+
+    const qb = this.movimientoRepo
+      .createQueryBuilder('movimiento')
+      .leftJoin(
+        Bodega,
+        'bodega_origen',
+        'bodega_origen.id = movimiento.bodega_origen_id AND bodega_origen.is_deleted = false',
+      )
+      .leftJoin(
+        Bodega,
+        'bodega_destino',
+        'bodega_destino.id = movimiento.bodega_destino_id AND bodega_destino.is_deleted = false',
+      )
+      .where('movimiento.is_deleted = false')
+      .andWhere('movimiento.tipo_movimiento IN (:...movementTypes)', {
+        movementTypes: ['INGRESO', 'SALIDA'],
+      })
+      .andWhere(
+        "(COALESCE(movimiento.numero_documento, '') <> '' OR COALESCE(movimiento.referencia, '') <> '')",
+      );
+
+    if (sucursalId) {
+      qb.andWhere(
+        new Brackets((scopeQb) => {
+          scopeQb
+            .where('bodega_origen.sucursal_id = :sucursalId', { sucursalId })
+            .orWhere('bodega_destino.sucursal_id = :sucursalId', {
+              sucursalId,
+            });
+        }),
+      );
+    }
+
+    if (normalizedType) {
+      qb.andWhere('movimiento.tipo_movimiento = :normalizedType', {
+        normalizedType,
+      });
+    }
+
+    if (normalizedSearch) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('COALESCE(movimiento.numero_documento, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(movimiento.referencia, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(movimiento.observacion, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(bodega_origen.nombre, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(bodega_origen.codigo, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(bodega_destino.nombre, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere('COALESCE(bodega_destino.codigo, \'\') ILIKE :search', {
+              search: `%${normalizedSearch}%`,
+            })
+            .orWhere(
+              `EXISTS (
+                SELECT 1
+                FROM kpi_inventory.tb_movimiento_inventario_det det
+                LEFT JOIN kpi_inventory.tb_producto prod
+                  ON prod.id = det.producto_id
+                 AND prod.is_deleted = false
+                WHERE det.movimiento_id = movimiento.id
+                  AND det.is_deleted = false
+                  AND (
+                    COALESCE(prod.nombre, '') ILIKE :search
+                    OR COALESCE(prod.codigo, '') ILIKE :search
+                  )
+              )`,
+              { search: `%${normalizedSearch}%` },
+            );
+        }),
+      );
+    }
+
+    const [rows, total] = await qb
+      .orderBy('movimiento.fecha_movimiento', 'DESC')
+      .addOrderBy('movimiento.created_at', 'DESC')
+      .skip((safePage - 1) * safeLimit)
+      .take(safeLimit)
+      .getManyAndCount();
+
+    return {
+      data: await this.hydrateMovementDocuments(rows),
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+      },
+    };
+  }
+
+  async getMovementDocument(id: string, sucursalId?: string | null) {
+    const movement = await this.movimientoRepo.findOne({
+      where: { id, is_deleted: false },
+    });
+    if (!movement) {
+      throw new NotFoundException('El documento de bodega no existe.');
+    }
+
+    const warehouses = [
+      this.toText(movement.bodega_origen_id),
+      this.toText(movement.bodega_destino_id),
+    ].filter(Boolean);
+
+    if (sucursalId && warehouses.length) {
+      const scoped = await this.bodegaRepo.find({
+        where: warehouses.map((warehouseId) => ({
+          id: warehouseId,
+          sucursal_id: sucursalId,
+          is_deleted: false,
+        })),
+      });
+      if (!scoped.length) {
+        throw new NotFoundException('El documento de bodega no existe.');
+      }
+    }
+
+    const [hydrated] = await this.hydrateMovementDocuments([movement]);
+    return hydrated ?? null;
+  }
+
+  async createMovementDocument(payload: MovementDocumentPayload) {
+    const tipo = this.normalizeMovementType(payload.tipo_movimiento);
+    const bodegaId = this.toText(payload.bodega_id);
+    const detalles = Array.isArray(payload.detalles) ? payload.detalles : [];
+    const userName =
+      this.toText(payload.updated_by) || this.toText(payload.created_by) || 'SYSTEM';
+
+    if (!tipo) {
+      throw new BadRequestException(
+        'El tipo de movimiento debe ser INGRESO o SALIDA.',
+      );
+    }
+    if (!bodegaId) {
+      throw new BadRequestException('La bodega es obligatoria.');
+    }
+    if (!detalles.length) {
+      throw new BadRequestException(
+        'Debes agregar al menos un material al documento.',
+      );
+    }
+
+    const fechaMovimiento = this.parseDateBoundary(
+      this.toText(payload.fecha_movimiento),
+      'start',
+    ) ?? new Date();
+
+    return this.dataSource.transaction(async (manager) => {
+      const bodega = await manager.findOne(Bodega, {
+        where: { id: bodegaId, is_deleted: false },
+      });
+      if (!bodega) {
+        throw new NotFoundException('La bodega seleccionada no existe.');
+      }
+
+      const numeroDocumento = await this.generateMovementDocumentCode(
+        manager,
+        tipo === 'INGRESO' ? 'IB' : 'EB',
+      );
+      const movimiento = await manager.save(
+        MovimientoInventario,
+        manager.create(MovimientoInventario, {
+          status: 'ACTIVE',
+          tipo_movimiento: tipo,
+          fecha_movimiento: fechaMovimiento,
+          tipo_documento:
+            tipo === 'INGRESO' ? 'INGRESO_BODEGA' : 'EGRESO_BODEGA',
+          numero_documento: numeroDocumento,
+          referencia: this.toText(payload.referencia) || null,
+          observacion: this.toText(payload.observacion) || null,
+          bodega_origen_id: tipo === 'SALIDA' ? bodega.id : null,
+          bodega_destino_id: tipo === 'INGRESO' ? bodega.id : null,
+          tipo_cambio: '1',
+          total_costos: '0.0000',
+          estado: 'CONFIRMADO',
+          created_by: userName,
+          updated_by: userName,
+        }),
+      );
+
+      let totalCost = 0;
+      const changedStockIds = new Set<string>();
+
+      for (const detail of detalles) {
+        const productoId = this.toText(detail?.producto_id);
+        const cantidad = this.toNumber(detail?.cantidad, 0);
+        if (!productoId) {
+          throw new BadRequestException(
+            'Todos los materiales del detalle deben estar seleccionados.',
+          );
+        }
+        if (!(cantidad > 0)) {
+          throw new BadRequestException(
+            'La cantidad de cada material debe ser mayor a cero.',
+          );
+        }
+
+        const producto = await manager.findOne(Producto, {
+          where: { id: productoId, is_deleted: false },
+        });
+        if (!producto) {
+          throw new NotFoundException('Uno de los materiales no existe.');
+        }
+
+        const stockRow = await this.getOrCreateStockRow(manager, {
+          bodegaId: bodega.id,
+          productoId: producto.id,
+          costoPromedio: this.toNumber(
+            producto.costo_promedio ?? producto.ultimo_costo,
+            0,
+          ),
+          userName,
+        });
+        const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
+        if (tipo === 'SALIDA' && stockAnterior < cantidad) {
+          throw new BadRequestException(
+            `Stock insuficiente para ${producto.nombre}. Disponible ${stockAnterior.toFixed(
+              2,
+            )}, requerido ${cantidad.toFixed(2)}.`,
+          );
+        }
+
+        const costoUnitario = this.resolveProductoUnitCost(producto, stockRow);
+        const subtotal = cantidad * costoUnitario;
+        const stockNuevo =
+          tipo === 'INGRESO' ? stockAnterior + cantidad : stockAnterior - cantidad;
+
+        stockRow.stock_actual = this.toFixedText(stockNuevo, 6);
+        stockRow.costo_promedio_bodega = this.toFixedText(costoUnitario, 4);
+        stockRow.updated_by = userName;
+        await manager.save(StockBodega, stockRow);
+        changedStockIds.add(stockRow.id);
+
+        const movimientoDet = await manager.save(
+          MovimientoInventarioDet,
+          manager.create(MovimientoInventarioDet, {
+            status: 'ACTIVE',
+            movimiento_id: movimiento.id,
+            producto_id: producto.id,
+            unidad_medida_id: producto.unidad_medida_id ?? null,
+            cantidad: this.toFixedText(cantidad, 6),
+            costo_unitario: this.toFixedText(costoUnitario, 4),
+            subtotal_costo: this.toFixedText(subtotal, 4),
+            observacion: this.toText(detail?.observacion) || null,
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+
+        await manager.save(
+          Kardex,
+          manager.create(Kardex, {
+            status: 'ACTIVE',
+            fecha: fechaMovimiento,
+            bodega_id: bodega.id,
+            producto_id: producto.id,
+            movimiento_id: movimiento.id,
+            movimiento_det_id: movimientoDet.id,
+            tipo_movimiento: tipo,
+            entrada_cantidad: this.toFixedText(tipo === 'INGRESO' ? cantidad : 0, 6),
+            salida_cantidad: this.toFixedText(tipo === 'SALIDA' ? cantidad : 0, 6),
+            costo_unitario: this.toFixedText(costoUnitario, 4),
+            costo_total: this.toFixedText(subtotal, 4),
+            saldo_cantidad: this.toFixedText(stockNuevo, 6),
+            saldo_costo_promedio: this.toFixedText(costoUnitario, 4),
+            saldo_valorizado: this.toFixedText(stockNuevo * costoUnitario, 4),
+            observacion:
+              this.toText(detail?.observacion) ||
+              this.toText(payload.observacion) ||
+              `${tipo} de bodega`,
+            created_by: userName,
+            updated_by: userName,
+          }),
+        );
+
+        totalCost += subtotal;
+      }
+
+      movimiento.total_costos = this.toFixedText(totalCost, 4);
+      movimiento.updated_by = userName;
+      await manager.save(MovimientoInventario, movimiento);
+
+      await this.notifyMaintenanceRecalculationForStocks(
+        changedStockIds,
+        'document',
+      );
+      const [hydrated] = await this.hydrateMovementDocuments([movimiento]);
+      return hydrated ?? null;
+    });
+  }
+
   private resolveSummaryRange(desde?: string | null, hasta?: string | null) {
     const now = new Date();
     const fallbackFrom = new Date(
@@ -539,6 +871,163 @@ export class KardexService extends CrudService<Kardex> {
     return out;
   }
 
+  private async hydrateMovementDocuments(rows: MovimientoInventario[]) {
+    if (!rows.length) return [];
+
+    const movementIds = rows.map((item) => item.id);
+    const warehouseIds = [
+      ...new Set(
+        rows
+          .flatMap((item) => [item.bodega_origen_id, item.bodega_destino_id])
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+
+    const [details, warehouses] = await Promise.all([
+      this.movimientoDetRepo.find({
+        where: movementIds.map((movimientoId) => ({
+          movimiento_id: movimientoId,
+          is_deleted: false,
+        })),
+        order: { created_at: 'ASC' },
+      }),
+      warehouseIds.length
+        ? this.bodegaRepo.find({
+            where: warehouseIds.map((id) => ({ id, is_deleted: false })),
+          })
+        : Promise.resolve([] as Bodega[]),
+    ]);
+
+    const productIds = [...new Set(details.map((item) => item.producto_id).filter(Boolean))];
+    const unitIds = [
+      ...new Set(
+        details
+          .map((item) => item.unidad_medida_id)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    const [products, units] = await Promise.all([
+      productIds.length
+        ? this.productoRepo.find({
+            where: productIds.map((id) => ({ id, is_deleted: false })),
+          })
+        : Promise.resolve([] as Producto[]),
+      unitIds.length
+        ? this.unidadRepo.find({
+            where: unitIds.map((id) => ({ id, is_deleted: false })),
+          })
+        : Promise.resolve([] as UnidadMedida[]),
+    ]);
+
+    const detailMap = details.reduce((acc, item) => {
+      (acc[item.movimiento_id] ??= []).push(item);
+      return acc;
+    }, {} as Record<string, MovimientoInventarioDet[]>);
+    const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
+    const productMap = new Map(products.map((item) => [item.id, item]));
+    const unitMap = new Map(units.map((item) => [item.id, item]));
+
+    return rows.map((item) => {
+      const sourceWarehouse = item.bodega_origen_id
+        ? warehouseMap.get(item.bodega_origen_id)
+        : null;
+      const destinationWarehouse = item.bodega_destino_id
+        ? warehouseMap.get(item.bodega_destino_id)
+        : null;
+      const detailRows = (detailMap[item.id] ?? []).map((detail) => {
+        const product = productMap.get(detail.producto_id);
+        const unit = detail.unidad_medida_id
+          ? unitMap.get(detail.unidad_medida_id)
+          : null;
+        return {
+          id: detail.id,
+          producto_id: detail.producto_id,
+          producto_codigo: this.toText(product?.codigo),
+          producto_nombre: this.toText(product?.nombre),
+          unidad_label: this.toText(unit?.nombre),
+          cantidad: this.toNumber(detail.cantidad, 0),
+          costo_unitario: this.toNumber(detail.costo_unitario, 0),
+          subtotal_costo: this.toNumber(detail.subtotal_costo, 0),
+          observacion: this.toText(detail.observacion) || null,
+        };
+      });
+      return {
+        ...item,
+        tipo_documento_label: this.resolveDocumentTypeLabel(item),
+        bodega_label: this.resolveDocumentWarehouseLabel(
+          item,
+          sourceWarehouse,
+          destinationWarehouse,
+        ),
+        total_items: detailRows.length,
+        total_cantidad: detailRows.reduce(
+          (sum, detail) => sum + this.toNumber(detail.cantidad, 0),
+          0,
+        ),
+        detalles: detailRows,
+      };
+    });
+  }
+
+  private resolveDocumentTypeLabel(item: MovimientoInventario) {
+    const documentNumber = this.toText(item.numero_documento).toUpperCase();
+    if (documentNumber.startsWith('IB-')) return 'Ingreso de bodega';
+    if (documentNumber.startsWith('EB-')) return 'Egreso de bodega';
+    if (String(item.tipo_movimiento || '').toUpperCase() === 'INGRESO') {
+      return 'Ingreso de bodega';
+    }
+    if (String(item.tipo_movimiento || '').toUpperCase() === 'SALIDA') {
+      return 'Egreso de bodega';
+    }
+    return 'Documento de bodega';
+  }
+
+  private resolveDocumentWarehouseLabel(
+    item: MovimientoInventario,
+    sourceWarehouse?: Bodega | null,
+    destinationWarehouse?: Bodega | null,
+  ) {
+    const target =
+      String(item.tipo_movimiento || '').toUpperCase() === 'INGRESO'
+        ? destinationWarehouse
+        : sourceWarehouse;
+    if (!target) return 'Sin bodega';
+    return [this.toText(target.codigo), this.toText(target.nombre)]
+      .filter(Boolean)
+      .join(' - ');
+  }
+
+  private async generateMovementDocumentCode(
+    manager: EntityManager,
+    prefix: 'IB' | 'EB',
+  ) {
+    const movementRows = await manager.find(MovimientoInventario, {
+      where: { is_deleted: false },
+      select: { numero_documento: true } as any,
+      take: 500,
+      order: { created_at: 'DESC' } as any,
+    });
+    const orderRows =
+      prefix === 'IB'
+        ? await manager.find(OrdenCompra, {
+            where: { is_deleted: false },
+            select: { referencia: true } as any,
+            take: 500,
+            order: { created_at: 'DESC' } as any,
+          })
+        : [];
+    const values = [
+      ...movementRows.map((item: any) => this.toText(item?.numero_documento)),
+      ...orderRows.map((item: any) => this.toText(item?.referencia)),
+    ];
+    const maxNumber = values.reduce((max, current) => {
+      const match = new RegExp(`^${prefix}-(\\d{8})$`, 'i').exec(current);
+      const numeric = match ? Number(match[1]) : 0;
+      return numeric > max ? numeric : max;
+    }, 0);
+    return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
+  }
+
   private resolveDocumentCode(row: Record<string, unknown>) {
     const directDocument = this.toText(row.movimiento_numero_documento);
     if (directDocument) return directDocument;
@@ -551,6 +1040,18 @@ export class KardexService extends CrudService<Kardex> {
   private resolveMovementConcept(row: Record<string, unknown>) {
     const tipoDocumento = this.toText(row.movimiento_tipo_documento).toUpperCase();
     const tipo = this.normalizeMovementType(row.tipo_movimiento);
+    const referencia = this.toText(row.movimiento_referencia).toUpperCase();
+    if (tipoDocumento === 'INGRESO_BODEGA') {
+      if (referencia.startsWith('TB-')) return 'IN-TRANSFERENCIAS';
+      if (referencia.startsWith('OC-') || referencia.startsWith('IB-')) {
+        return 'IN-BODEGA';
+      }
+      return 'IN-BODEGA';
+    }
+    if (tipoDocumento === 'EGRESO_BODEGA') {
+      if (referencia.startsWith('TB-')) return 'EG-TRANSFERENCIAS';
+      return 'EG-BODEGA';
+    }
     if (tipoDocumento === 'TRANSFERENCIA_BODEGA') {
       return tipo === 'INGRESO' ? 'IN-TRANSFERENCIAS' : 'EG-TRANSFERENCIAS';
     }
@@ -563,88 +1064,20 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   async registerManualMovement(payload: ManualMovementPayload) {
-    const tipo = this.normalizeMovementType(payload.tipo_movimiento);
-    const bodegaId = this.toText(payload.bodega_id);
-    const productoId = this.toText(payload.producto_id);
-    const cantidad = this.toNumber(payload.cantidad, -1);
-    const userName =
-      this.toText(payload.updated_by) || this.toText(payload.created_by) || 'SYSTEM';
-
-    if (!tipo) {
-      throw new BadRequestException(
-        'El tipo de movimiento debe ser INGRESO o SALIDA.',
-      );
-    }
-    if (!bodegaId) {
-      throw new BadRequestException('La bodega es obligatoria.');
-    }
-    if (!productoId) {
-      throw new BadRequestException('El material es obligatorio.');
-    }
-    if (!(cantidad > 0)) {
-      throw new BadRequestException('La cantidad debe ser mayor a cero.');
-    }
-    const changedStockIds = new Set<string>();
-
-    const result = await this.dataSource.transaction(async (manager) => {
-      const bodega = await manager.findOne(Bodega, {
-        where: { id: bodegaId, is_deleted: false },
-      });
-      if (!bodega) {
-        throw new NotFoundException('La bodega seleccionada no existe.');
-      }
-
-      const producto = await manager.findOne(Producto, {
-        where: { id: productoId, is_deleted: false },
-      });
-      if (!producto) {
-        throw new NotFoundException('El material seleccionado no existe.');
-      }
-
-      const stockRow = await this.getOrCreateStockRow(manager, {
-        bodegaId,
-        productoId,
-        costoPromedio: this.resolveProductoUnitCost(producto),
-        userName,
-      });
-      const costoUnitario = this.resolveProductoUnitCost(producto, stockRow);
-
-      const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
-      const delta = tipo === 'INGRESO' ? cantidad : -cantidad;
-      const stockNuevo = stockAnterior + delta;
-
-      if (stockNuevo < 0) {
-        throw new BadRequestException(
-          'No existe stock suficiente para realizar la salida.',
-        );
-      }
-
-      stockRow.stock_actual = this.toFixedText(stockNuevo, 6);
-      stockRow.costo_promedio_bodega = this.toFixedText(costoUnitario, 4);
-      stockRow.updated_by = userName;
-      await manager.save(StockBodega, stockRow);
-      changedStockIds.add(stockRow.id);
-
-      const artifacts = await this.createMovementArtifacts(manager, {
-        tipo,
-        bodegaId,
-        productoId,
-        cantidad,
-        costoUnitario,
-        stockNuevo,
-        observacion:
-          this.toText(payload.observacion) || `${tipo} manual de material`,
-        userName,
-      });
-
-      return {
-        stock: stockRow,
-        ...artifacts,
-      };
+    return this.createMovementDocument({
+      tipo_movimiento: payload.tipo_movimiento,
+      bodega_id: payload.bodega_id,
+      observacion: payload.observacion,
+      created_by: payload.created_by,
+      updated_by: payload.updated_by,
+      detalles: [
+        {
+          producto_id: payload.producto_id,
+          cantidad: payload.cantidad,
+          observacion: payload.observacion,
+        },
+      ],
     });
-
-    await this.notifyMaintenanceRecalculationForStocks(changedStockIds, 'manual');
-    return result;
   }
 
   async importInventoryWorkbook(
@@ -1162,6 +1595,10 @@ export class KardexService extends CrudService<Kardex> {
   ) {
     const subtotal = args.cantidad * args.costoUnitario;
     const now = new Date();
+    const numeroDocumento = await this.generateMovementDocumentCode(
+      manager,
+      args.tipo === 'INGRESO' ? 'IB' : 'EB',
+    );
 
     const movimiento = await manager.save(
       MovimientoInventario,
@@ -1169,6 +1606,9 @@ export class KardexService extends CrudService<Kardex> {
         status: 'ACTIVE',
         tipo_movimiento: args.tipo,
         fecha_movimiento: now,
+        tipo_documento:
+          args.tipo === 'INGRESO' ? 'INGRESO_BODEGA' : 'EGRESO_BODEGA',
+        numero_documento: numeroDocumento,
         tipo_cambio: '1',
         total_costos: this.toFixedText(subtotal, 4),
         estado: 'CONFIRMADO',

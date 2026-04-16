@@ -242,7 +242,6 @@ export class TransferenciaBodegaService {
       }
       const code = await this.generateCode(manager, 'TB');
       const egressCode = await this.generateMovementDocumentCode(manager, 'EB');
-      const ingressCode = await this.generateMovementDocumentCode(manager, 'IB');
       const fechaTransferencia = dto.fecha_transferencia
         ? new Date(dto.fecha_transferencia)
         : new Date();
@@ -255,9 +254,12 @@ export class TransferenciaBodegaService {
             manager.create(MovimientoInventario, {
               tipo_movimiento: 'INGRESO',
               fecha_movimiento: fechaTransferencia,
-              tipo_documento: 'ORDEN_COMPRA',
-              numero_documento: order.codigo || code,
-              referencia: code,
+              tipo_documento: 'INGRESO_BODEGA',
+              numero_documento: await this.generateMovementDocumentCode(
+                manager,
+                'IB',
+              ),
+              referencia: order.codigo || order.referencia || code,
               observacion: `Ingreso preaprobado por ${order.codigo || 'orden de compra'} para transferencia ${code}`,
               bodega_destino_id: sourceWarehouse.id,
               tipo_cambio: '1',
@@ -269,12 +271,14 @@ export class TransferenciaBodegaService {
           )
         : null;
 
+      const ingressCode = await this.generateMovementDocumentCode(manager, 'IB');
+
       const movementOut = await manager.save(
         MovimientoInventario,
         manager.create(MovimientoInventario, {
           tipo_movimiento: 'SALIDA',
           fecha_movimiento: fechaTransferencia,
-          tipo_documento: 'TRANSFERENCIA_BODEGA',
+          tipo_documento: 'EGRESO_BODEGA',
           numero_documento: egressCode,
           referencia: code,
           observacion: baseObservation,
@@ -292,7 +296,7 @@ export class TransferenciaBodegaService {
         manager.create(MovimientoInventario, {
           tipo_movimiento: 'INGRESO',
           fecha_movimiento: fechaTransferencia,
-          tipo_documento: 'TRANSFERENCIA_BODEGA',
+          tipo_documento: 'INGRESO_BODEGA',
           numero_documento: ingressCode,
           referencia: code,
           observacion: baseObservation,

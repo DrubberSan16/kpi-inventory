@@ -10,6 +10,8 @@ import {
   Producto,
   StockBodega,
   Sucursal,
+  TransferenciaBodega,
+  TransferenciaBodegaDet,
   UnidadMedida,
 } from '../entities';
 import { KardexController } from './kardex.controller';
@@ -28,6 +30,8 @@ import { KardexService } from './kardex.service';
       Linea,
       Categoria,
       UnidadMedida,
+      TransferenciaBodega,
+      TransferenciaBodegaDet,
     ]),
   ],
   controllers: [KardexController],
