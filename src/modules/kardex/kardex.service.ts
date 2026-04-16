@@ -127,10 +127,6 @@ export class KardexService extends CrudService<Kardex> {
     private readonly categoriaRepo: Repository<Categoria>,
     @InjectRepository(UnidadMedida)
     private readonly unidadRepo: Repository<UnidadMedida>,
-    @InjectRepository(TransferenciaBodega)
-    private readonly transferenciaRepo: Repository<TransferenciaBodega>,
-    @InjectRepository(TransferenciaBodegaDet)
-    private readonly transferenciaDetRepo: Repository<TransferenciaBodegaDet>,
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {
