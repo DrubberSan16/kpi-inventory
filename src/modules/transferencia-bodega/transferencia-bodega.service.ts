@@ -240,7 +240,9 @@ export class TransferenciaBodegaService {
             : 'Debes agregar al menos un material para registrar la transferencia.',
         );
       }
-      const code = await this.generateCode(manager, 'TRB');
+      const code = await this.generateCode(manager, 'TB');
+      const egressCode = await this.generateMovementDocumentCode(manager, 'EB');
+      const ingressCode = await this.generateMovementDocumentCode(manager, 'IB');
       const fechaTransferencia = dto.fecha_transferencia
         ? new Date(dto.fecha_transferencia)
         : new Date();
@@ -273,8 +275,8 @@ export class TransferenciaBodegaService {
           tipo_movimiento: 'SALIDA',
           fecha_movimiento: fechaTransferencia,
           tipo_documento: 'TRANSFERENCIA_BODEGA',
-          numero_documento: code,
-          referencia: order?.codigo || null,
+          numero_documento: egressCode,
+          referencia: code,
           observacion: baseObservation,
           bodega_origen_id: sourceWarehouse.id,
           tipo_cambio: '1',
@@ -291,8 +293,8 @@ export class TransferenciaBodegaService {
           tipo_movimiento: 'INGRESO',
           fecha_movimiento: fechaTransferencia,
           tipo_documento: 'TRANSFERENCIA_BODEGA',
-          numero_documento: code,
-          referencia: order?.codigo || null,
+          numero_documento: ingressCode,
+          referencia: code,
           observacion: baseObservation,
           bodega_destino_id: destinationWarehouse.id,
           tipo_cambio: '1',
@@ -623,7 +625,10 @@ export class TransferenciaBodegaService {
       item.bodega_origen_id,
       item.bodega_destino_id,
     ]);
-    const [details, orders, warehouses] = await Promise.all([
+    const movementIds = rows
+      .flatMap((item) => [item.movimiento_salida_id, item.movimiento_ingreso_id])
+      .filter((value): value is string => Boolean(value));
+    const [details, orders, warehouses, movements] = await Promise.all([
       this.transferenciaDetRepo.find({
         where: ids.map((id) => ({ transferencia_bodega_id: id, is_deleted: false })),
         order: { created_at: 'ASC' },
@@ -639,6 +644,11 @@ export class TransferenciaBodegaService {
           is_deleted: false,
         })),
       }),
+      movementIds.length
+        ? this.movimientoRepo.find({
+            where: [...new Set(movementIds)].map((id) => ({ id, is_deleted: false })),
+          })
+        : Promise.resolve([] as MovimientoInventario[]),
     ]);
     const detailMap = details.reduce((acc, item) => {
       (acc[item.transferencia_bodega_id] ??= []).push(item);
@@ -646,11 +656,18 @@ export class TransferenciaBodegaService {
     }, {} as Record<string, TransferenciaBodegaDet[]>);
     const orderMap = new Map(orders.map((item) => [item.id, item]));
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
+    const movementMap = new Map(movements.map((item) => [item.id, item]));
 
     return rows.map((item) => {
       const source = warehouseMap.get(item.bodega_origen_id);
       const destination = warehouseMap.get(item.bodega_destino_id);
       const order = item.orden_compra_id ? orderMap.get(item.orden_compra_id) : null;
+      const movementOut = item.movimiento_salida_id
+        ? movementMap.get(item.movimiento_salida_id)
+        : null;
+      const movementIn = item.movimiento_ingreso_id
+        ? movementMap.get(item.movimiento_ingreso_id)
+        : null;
       return {
         ...item,
         orden_compra_codigo: order?.codigo ?? null,
@@ -661,6 +678,8 @@ export class TransferenciaBodegaService {
         bodega_destino_label: destination
           ? `${destination.codigo || ''} - ${destination.nombre || ''}`.trim()
           : 'Sin bodega',
+        egreso_bodega_codigo: movementOut?.numero_documento ?? null,
+        ingreso_bodega_codigo: movementIn?.numero_documento ?? null,
         detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
       };
     });
@@ -680,7 +699,10 @@ export class TransferenciaBodegaService {
       item.bodega_origen_id,
       item.bodega_destino_id,
     ]);
-    const [details, orders, warehouses] = await Promise.all([
+    const movementIds = rows
+      .flatMap((item) => [item.movimiento_salida_id, item.movimiento_ingreso_id])
+      .filter((value): value is string => Boolean(value));
+    const [details, orders, warehouses, movements] = await Promise.all([
       manager.find(TransferenciaBodegaDet, {
         where: ids.map((id) => ({
           transferencia_bodega_id: id,
@@ -699,6 +721,11 @@ export class TransferenciaBodegaService {
           is_deleted: false,
         })),
       }),
+      movementIds.length
+        ? manager.find(MovimientoInventario, {
+            where: [...new Set(movementIds)].map((id) => ({ id, is_deleted: false })),
+          })
+        : Promise.resolve([] as MovimientoInventario[]),
     ]);
 
     const detailMap = details.reduce((acc, item) => {
@@ -707,11 +734,18 @@ export class TransferenciaBodegaService {
     }, {} as Record<string, TransferenciaBodegaDet[]>);
     const orderMap = new Map(orders.map((item) => [item.id, item]));
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
+    const movementMap = new Map(movements.map((item) => [item.id, item]));
 
     return rows.map((item) => {
       const source = warehouseMap.get(item.bodega_origen_id);
       const destination = warehouseMap.get(item.bodega_destino_id);
       const order = item.orden_compra_id ? orderMap.get(item.orden_compra_id) : null;
+      const movementOut = item.movimiento_salida_id
+        ? movementMap.get(item.movimiento_salida_id)
+        : null;
+      const movementIn = item.movimiento_ingreso_id
+        ? movementMap.get(item.movimiento_ingreso_id)
+        : null;
       return {
         ...item,
         orden_compra_codigo: order?.codigo ?? null,
@@ -722,6 +756,8 @@ export class TransferenciaBodegaService {
         bodega_destino_label: destination
           ? `${destination.codigo || ''} - ${destination.nombre || ''}`.trim()
           : 'Sin bodega',
+        egreso_bodega_codigo: movementOut?.numero_documento ?? null,
+        ingreso_bodega_codigo: movementIn?.numero_documento ?? null,
         detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
       };
     });
@@ -895,6 +931,39 @@ export class TransferenciaBodegaService {
       const numeric = match ? Number(match[1]) : 0;
       return numeric > max ? numeric : max;
     }, 0);
+    return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
+  }
+
+  private async generateMovementDocumentCode(
+    manager: EntityManager,
+    prefix: 'IB' | 'EB',
+  ) {
+    const movementRows = await manager.find(MovimientoInventario, {
+      where: { is_deleted: false },
+      select: { numero_documento: true } as any,
+      take: 500,
+      order: { created_at: 'DESC' } as any,
+    });
+    const orderRows =
+      prefix === 'IB'
+        ? await manager.find(OrdenCompra, {
+            where: { is_deleted: false },
+            select: { referencia: true } as any,
+            take: 500,
+            order: { created_at: 'DESC' } as any,
+          })
+        : [];
+
+    const values = [
+      ...movementRows.map((item: any) => this.toText(item?.numero_documento)),
+      ...orderRows.map((item: any) => this.toText(item?.referencia)),
+    ];
+    const maxNumber = values.reduce((max, current) => {
+      const match = new RegExp(`^${prefix}-(\\d{8})$`, 'i').exec(current);
+      const numeric = match ? Number(match[1]) : 0;
+      return numeric > max ? numeric : max;
+    }, 0);
+
     return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
   }
 

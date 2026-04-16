@@ -23,6 +23,8 @@ import { Linea } from '../entities/linea.entity';
 import { Categoria } from '../entities/categoria.entity';
 import { Marca } from '../entities/marca.entity';
 import { UnidadMedida } from '../entities/unidad-medida.entity';
+import { TransferenciaBodega } from '../entities/transferencia-bodega.entity';
+import { TransferenciaBodegaDet } from '../entities/transferencia-bodega-det.entity';
 
 type MovementType = 'INGRESO' | 'SALIDA';
 
@@ -107,6 +109,10 @@ export class KardexService extends CrudService<Kardex> {
     private readonly categoriaRepo: Repository<Categoria>,
     @InjectRepository(UnidadMedida)
     private readonly unidadRepo: Repository<UnidadMedida>,
+    @InjectRepository(TransferenciaBodega)
+    private readonly transferenciaRepo: Repository<TransferenciaBodega>,
+    @InjectRepository(TransferenciaBodegaDet)
+    private readonly transferenciaDetRepo: Repository<TransferenciaBodegaDet>,
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {
@@ -189,6 +195,371 @@ export class KardexService extends CrudService<Kardex> {
         totalPages: Math.ceil(total / safeLimit),
       },
     };
+  }
+
+  async getMaterialSummary(params?: {
+    desde?: string | null;
+    hasta?: string | null;
+    search?: string | null;
+  }, sucursalId?: string | null) {
+    const range = this.resolveSummaryRange(params?.desde, params?.hasta);
+    const search = this.toText(params?.search);
+
+    const qb = this.repository
+      .createQueryBuilder('kardex')
+      .leftJoin(
+        Bodega,
+        'bodega',
+        'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
+      )
+      .leftJoin(
+        Producto,
+        'producto',
+        'producto.id = kardex.producto_id AND producto.is_deleted = false',
+      )
+      .leftJoin(
+        Linea,
+        'linea',
+        'linea.id = producto.linea_id AND linea.is_deleted = false',
+      )
+      .leftJoin(
+        Categoria,
+        'categoria',
+        'categoria.id = producto.categoria_id AND categoria.is_deleted = false',
+      )
+      .leftJoin(
+        UnidadMedida,
+        'unidad',
+        'unidad.id = producto.unidad_medida_id AND unidad.is_deleted = false',
+      )
+      .leftJoin(
+        MovimientoInventario,
+        'movimiento',
+        'movimiento.id = kardex.movimiento_id AND movimiento.is_deleted = false',
+      )
+      .leftJoin(
+        TransferenciaBodegaDet,
+        'transfer_det',
+        '(transfer_det.kardex_ingreso_id = kardex.id OR transfer_det.kardex_salida_id = kardex.id) AND transfer_det.is_deleted = false',
+      )
+      .leftJoin(
+        TransferenciaBodega,
+        'transferencia',
+        'transferencia.id = transfer_det.transferencia_bodega_id AND transferencia.is_deleted = false',
+      )
+      .where('kardex.is_deleted = false')
+      .andWhere('kardex.fecha BETWEEN :fromDate AND :toDate', {
+        fromDate: range.from,
+        toDate: range.to,
+      });
+
+    if (sucursalId) {
+      qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    if (search) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('producto.nombre ILIKE :search', { search: `%${search}%` })
+            .orWhere('producto.codigo ILIKE :search', { search: `%${search}%` })
+            .orWhere('COALESCE(movimiento.numero_documento, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(movimiento.referencia, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(transferencia.codigo, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(bodega.nombre, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(bodega.codigo, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            });
+        }),
+      );
+    }
+
+    const rows = await qb
+      .select([
+        'kardex.id AS kardex_id',
+        'kardex.fecha AS fecha',
+        'kardex.created_at AS created_at',
+        'kardex.producto_id AS producto_id',
+        'kardex.bodega_id AS bodega_id',
+        'kardex.tipo_movimiento AS tipo_movimiento',
+        'kardex.entrada_cantidad AS entrada_cantidad',
+        'kardex.salida_cantidad AS salida_cantidad',
+        'kardex.saldo_cantidad AS saldo_cantidad',
+        'kardex.observacion AS kardex_observacion',
+        'producto.codigo AS producto_codigo',
+        'producto.nombre AS producto_nombre',
+        'linea.codigo AS linea_codigo',
+        'linea.nombre AS linea_nombre',
+        'categoria.nombre AS categoria_nombre',
+        'unidad.nombre AS unidad_nombre',
+        'bodega.codigo AS bodega_codigo',
+        'bodega.nombre AS bodega_nombre',
+        'movimiento.numero_documento AS movimiento_numero_documento',
+        'movimiento.referencia AS movimiento_referencia',
+        'movimiento.tipo_documento AS movimiento_tipo_documento',
+        'movimiento.observacion AS movimiento_observacion',
+        'transferencia.codigo AS transferencia_codigo',
+      ])
+      .orderBy('COALESCE(producto.nombre, \'\')', 'ASC')
+      .addOrderBy('COALESCE(producto.codigo, \'\')', 'ASC')
+      .addOrderBy('kardex.fecha', 'ASC')
+      .addOrderBy('kardex.created_at', 'ASC')
+      .getRawMany<Record<string, unknown>>();
+
+    if (!rows.length) {
+      return {
+        range: {
+          desde: this.formatDateOnly(range.from),
+          hasta: this.formatDateOnly(range.to),
+        },
+        totals: {
+          materiales: 0,
+          movimientos: 0,
+          entradas: 0,
+          salidas: 0,
+        },
+        groups: [],
+      };
+    }
+
+    const productIds = [...new Set(rows.map((row) => this.toText(row.producto_id)).filter(Boolean))];
+    const initialStockByProduct = await this.getInitialStockByProduct(
+      productIds,
+      range.from,
+      sucursalId,
+    );
+
+    const groupsMap = new Map<string, Record<string, unknown>>();
+    let totalEntradas = 0;
+    let totalSalidas = 0;
+    let totalMovimientos = 0;
+
+    for (const row of rows) {
+      const productoId = this.toText(row.producto_id);
+      if (!productoId) continue;
+
+      const entrada = this.toNumber(row.entrada_cantidad, 0);
+      const salida = this.toNumber(row.salida_cantidad, 0);
+      const lineLabel = [this.toText(row.linea_codigo), this.toText(row.linea_nombre)]
+        .filter(Boolean)
+        .join(' - ');
+      const bodegaLabel = [this.toText(row.bodega_codigo), this.toText(row.bodega_nombre)]
+        .filter(Boolean)
+        .join(' - ');
+
+      if (!groupsMap.has(productoId)) {
+        groupsMap.set(productoId, {
+          producto_id: productoId,
+          producto_codigo: this.toText(row.producto_codigo),
+          producto_nombre: this.toText(row.producto_nombre),
+          linea_label: lineLabel,
+          categoria_label: this.toText(row.categoria_nombre),
+          unidad_label: this.toText(row.unidad_nombre),
+          stock_inicial: initialStockByProduct.get(productoId) ?? 0,
+          entradas: 0,
+          salidas: 0,
+          stock_final: initialStockByProduct.get(productoId) ?? 0,
+          movimientos_count: 0,
+          movimientos: [] as Record<string, unknown>[],
+        });
+      }
+
+      const group = groupsMap.get(productoId)!;
+      const currentEntries = this.toNumber(group.entradas, 0) + entrada;
+      const currentExits = this.toNumber(group.salidas, 0) + salida;
+      const initialStock = this.toNumber(group.stock_inicial, 0);
+      group.entradas = currentEntries;
+      group.salidas = currentExits;
+      group.stock_final = initialStock + currentEntries - currentExits;
+      group.movimientos_count = this.toNumber(group.movimientos_count, 0) + 1;
+      (group.movimientos as Record<string, unknown>[]).push({
+        id: this.toText(row.kardex_id),
+        fecha_emision: row.fecha,
+        fecha_creacion: row.created_at,
+        documento: this.resolveDocumentCode(row),
+        referencia: this.toText(row.movimiento_referencia) || this.toText(row.transferencia_codigo),
+        concepto: this.resolveMovementConcept(row),
+        descripcion:
+          this.toText(row.movimiento_observacion) ||
+          this.toText(row.kardex_observacion) ||
+          bodegaLabel ||
+          'Movimiento de inventario',
+        bodega: bodegaLabel || 'Sin bodega',
+        entrada,
+        salida,
+        stock: this.toNumber(row.saldo_cantidad, 0),
+      });
+
+      totalEntradas += entrada;
+      totalSalidas += salida;
+      totalMovimientos += 1;
+    }
+
+    const groups = [...groupsMap.values()]
+      .map((group) => ({
+        ...group,
+        stock_inicial: this.toNumber(group.stock_inicial, 0),
+        entradas: this.toNumber(group.entradas, 0),
+        salidas: this.toNumber(group.salidas, 0),
+        stock_final: this.toNumber(group.stock_final, 0),
+        movimientos_count: this.toNumber(group.movimientos_count, 0),
+      }))
+      .sort((a: any, b: any) =>
+        `${this.toText(a.producto_codigo)}|${this.toText(a.producto_nombre)}`.localeCompare(
+          `${this.toText(b.producto_codigo)}|${this.toText(b.producto_nombre)}`,
+        ),
+      );
+
+    return {
+      range: {
+        desde: this.formatDateOnly(range.from),
+        hasta: this.formatDateOnly(range.to),
+      },
+      totals: {
+        materiales: groups.length,
+        movimientos: totalMovimientos,
+        entradas: totalEntradas,
+        salidas: totalSalidas,
+      },
+      groups,
+    };
+  }
+
+  private resolveSummaryRange(desde?: string | null, hasta?: string | null) {
+    const now = new Date();
+    const fallbackFrom = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      1,
+      0,
+      0,
+      0,
+      0,
+    );
+    const fallbackTo = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      23,
+      59,
+      59,
+      999,
+    );
+    const from = this.parseDateBoundary(desde, 'start') ?? fallbackFrom;
+    const to = this.parseDateBoundary(hasta, 'end') ?? fallbackTo;
+    if (from > to) {
+      throw new BadRequestException(
+        'La fecha desde no puede ser mayor a la fecha hasta.',
+      );
+    }
+    return { from, to };
+  }
+
+  private parseDateBoundary(
+    value: string | null | undefined,
+    boundary: 'start' | 'end',
+  ) {
+    const raw = this.toText(value);
+    if (!raw) return null;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if (match) {
+      const year = Number(match[1]);
+      const month = Number(match[2]) - 1;
+      const day = Number(match[3]);
+      return boundary === 'start'
+        ? new Date(year, month, day, 0, 0, 0, 0)
+        : new Date(year, month, day, 23, 59, 59, 999);
+    }
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return null;
+    if (boundary === 'start') {
+      parsed.setHours(0, 0, 0, 0);
+    } else {
+      parsed.setHours(23, 59, 59, 999);
+    }
+    return parsed;
+  }
+
+  private formatDateOnly(value: Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  private async getInitialStockByProduct(
+    productIds: string[],
+    fromDate: Date,
+    sucursalId?: string | null,
+  ) {
+    const out = new Map<string, number>();
+    if (!productIds.length) return out;
+
+    const qb = this.repository
+      .createQueryBuilder('kardex')
+      .distinctOn(['kardex.producto_id', 'kardex.bodega_id'])
+      .leftJoin(
+        Bodega,
+        'bodega',
+        'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
+      )
+      .where('kardex.is_deleted = false')
+      .andWhere('kardex.producto_id IN (:...productIds)', { productIds })
+      .andWhere('kardex.fecha < :fromDate', { fromDate });
+
+    if (sucursalId) {
+      qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    const rows = await qb
+      .select([
+        'kardex.producto_id AS producto_id',
+        'kardex.bodega_id AS bodega_id',
+        'kardex.saldo_cantidad AS saldo_cantidad',
+      ])
+      .orderBy('kardex.producto_id', 'ASC')
+      .addOrderBy('kardex.bodega_id', 'ASC')
+      .addOrderBy('kardex.fecha', 'DESC')
+      .addOrderBy('kardex.created_at', 'DESC')
+      .getRawMany<Record<string, unknown>>();
+
+    for (const row of rows) {
+      const productId = this.toText(row.producto_id);
+      if (!productId) continue;
+      out.set(productId, (out.get(productId) ?? 0) + this.toNumber(row.saldo_cantidad, 0));
+    }
+    return out;
+  }
+
+  private resolveDocumentCode(row: Record<string, unknown>) {
+    const directDocument = this.toText(row.movimiento_numero_documento);
+    if (directDocument) return directDocument;
+    const tipo = this.normalizeMovementType(row.tipo_movimiento);
+    if (tipo === 'INGRESO') return 'IB-SIN CODIGO';
+    if (tipo === 'SALIDA') return 'EB-SIN CODIGO';
+    return 'SIN CODIGO';
+  }
+
+  private resolveMovementConcept(row: Record<string, unknown>) {
+    const tipoDocumento = this.toText(row.movimiento_tipo_documento).toUpperCase();
+    const tipo = this.normalizeMovementType(row.tipo_movimiento);
+    if (tipoDocumento === 'TRANSFERENCIA_BODEGA') {
+      return tipo === 'INGRESO' ? 'IN-TRANSFERENCIAS' : 'EG-TRANSFERENCIAS';
+    }
+    if (tipoDocumento === 'ORDEN_COMPRA') {
+      return 'IN-ORDEN_COMPRA';
+    }
+    if (tipo === 'INGRESO') return 'IN-MANUAL';
+    if (tipo === 'SALIDA') return 'EG-MANUAL';
+    return 'MOVIMIENTO';
   }
 
   async registerManualMovement(payload: ManualMovementPayload) {

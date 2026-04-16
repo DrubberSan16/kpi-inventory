@@ -54,6 +54,28 @@ export class KardexController extends CrudController<Kardex> {
     );
   }
 
+  @Get('resumen-material')
+  @ApiOperation({
+    summary: 'Obtener resumen de kardex agrupado por material y rango de fechas',
+  })
+  @ApiQuery({ name: 'desde', required: false, type: String, example: '2026-04-01' })
+  @ApiQuery({ name: 'hasta', required: false, type: String, example: '2026-04-15' })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  async getMaterialSummary(
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+    @Query('search') search?: string,
+    @Req() req?: any,
+  ) {
+    return {
+      message: 'Resumen de kardex obtenido correctamente.',
+      data: await this.service.getMaterialSummary(
+        { desde, hasta, search },
+        getSucursalScopeId(req),
+      ),
+    };
+  }
+
   @Post()
   @ApiOperation({ summary: 'Crear registro' })
   @ApiBody({
