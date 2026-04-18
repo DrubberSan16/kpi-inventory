@@ -76,6 +76,35 @@ export class KardexController extends CrudController<Kardex> {
     };
   }
 
+  @Get('resumen-material/:productoId/detalle')
+  @ApiOperation({
+    summary: 'Obtener movimientos de kardex por material y rango de fechas',
+  })
+  @ApiParam({
+    name: 'productoId',
+    type: String,
+    description: 'UUID del material a consultar',
+  })
+  @ApiQuery({ name: 'desde', required: false, type: String, example: '2026-04-01' })
+  @ApiQuery({ name: 'hasta', required: false, type: String, example: '2026-04-15' })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  async getMaterialMovements(
+    @Param('productoId') productoId: string,
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+    @Query('search') search?: string,
+    @Req() req?: any,
+  ) {
+    return {
+      message: 'Detalle de kardex por material obtenido correctamente.',
+      data: await this.service.getMaterialMovements(
+        productoId,
+        { desde, hasta, search },
+        getSucursalScopeId(req),
+      ),
+    };
+  }
+
   @Get('documentos/lista')
   @ApiOperation({
     summary: 'Listar documentos de ingreso y egreso de bodega con detalle',

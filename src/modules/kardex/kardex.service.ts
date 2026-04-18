@@ -246,21 +246,6 @@ export class KardexService extends CrudService<Kardex> {
         'unidad',
         'unidad.id = producto.unidad_medida_id AND unidad.is_deleted = false',
       )
-      .leftJoin(
-        MovimientoInventario,
-        'movimiento',
-        'movimiento.id = kardex.movimiento_id AND movimiento.is_deleted = false',
-      )
-      .leftJoin(
-        TransferenciaBodegaDet,
-        'transfer_det',
-        '(transfer_det.kardex_ingreso_id = kardex.id OR transfer_det.kardex_salida_id = kardex.id) AND transfer_det.is_deleted = false',
-      )
-      .leftJoin(
-        TransferenciaBodega,
-        'transferencia',
-        'transferencia.id = transfer_det.transferencia_bodega_id AND transferencia.is_deleted = false',
-      )
       .where('kardex.is_deleted = false')
       .andWhere('kardex.fecha BETWEEN :fromDate AND :toDate', {
         fromDate: range.from,
@@ -277,15 +262,6 @@ export class KardexService extends CrudService<Kardex> {
           searchQb
             .where('producto.nombre ILIKE :search', { search: `%${search}%` })
             .orWhere('producto.codigo ILIKE :search', { search: `%${search}%` })
-            .orWhere('COALESCE(movimiento.numero_documento, \'\') ILIKE :search', {
-              search: `%${search}%`,
-            })
-            .orWhere('COALESCE(movimiento.referencia, \'\') ILIKE :search', {
-              search: `%${search}%`,
-            })
-            .orWhere('COALESCE(transferencia.codigo, \'\') ILIKE :search', {
-              search: `%${search}%`,
-            })
             .orWhere('COALESCE(bodega.nombre, \'\') ILIKE :search', {
               search: `%${search}%`,
             })
@@ -298,34 +274,26 @@ export class KardexService extends CrudService<Kardex> {
 
     const rows = await qb
       .select([
-        'kardex.id AS kardex_id',
-        'kardex.fecha AS fecha',
-        'kardex.created_at AS created_at',
         'kardex.producto_id AS producto_id',
-        'kardex.bodega_id AS bodega_id',
-        'kardex.tipo_movimiento AS tipo_movimiento',
-        'kardex.entrada_cantidad AS entrada_cantidad',
-        'kardex.salida_cantidad AS salida_cantidad',
-        'kardex.saldo_cantidad AS saldo_cantidad',
-        'kardex.observacion AS kardex_observacion',
         'producto.codigo AS producto_codigo',
         'producto.nombre AS producto_nombre',
         'linea.codigo AS linea_codigo',
         'linea.nombre AS linea_nombre',
         'categoria.nombre AS categoria_nombre',
         'unidad.nombre AS unidad_nombre',
-        'bodega.codigo AS bodega_codigo',
-        'bodega.nombre AS bodega_nombre',
-        'movimiento.numero_documento AS movimiento_numero_documento',
-        'movimiento.referencia AS movimiento_referencia',
-        'movimiento.tipo_documento AS movimiento_tipo_documento',
-        'movimiento.observacion AS movimiento_observacion',
-        'transferencia.codigo AS transferencia_codigo',
+        'COALESCE(SUM(kardex.entrada_cantidad), 0) AS entradas',
+        'COALESCE(SUM(kardex.salida_cantidad), 0) AS salidas',
+        'COUNT(kardex.id) AS movimientos_count',
       ])
+      .groupBy('kardex.producto_id')
+      .addGroupBy('producto.codigo')
+      .addGroupBy('producto.nombre')
+      .addGroupBy('linea.codigo')
+      .addGroupBy('linea.nombre')
+      .addGroupBy('categoria.nombre')
+      .addGroupBy('unidad.nombre')
       .orderBy('COALESCE(producto.nombre, \'\')', 'ASC')
       .addOrderBy('COALESCE(producto.codigo, \'\')', 'ASC')
-      .addOrderBy('kardex.fecha', 'ASC')
-      .addOrderBy('kardex.created_at', 'ASC')
       .getRawMany<Record<string, unknown>>();
 
     if (!rows.length) {
@@ -344,89 +312,55 @@ export class KardexService extends CrudService<Kardex> {
       };
     }
 
-    const productIds = [...new Set(rows.map((row) => this.toText(row.producto_id)).filter(Boolean))];
+    const productIds = [
+      ...new Set(
+        rows
+          .map((row) => this.toText(row.producto_id))
+          .filter(Boolean),
+      ),
+    ];
     const initialStockByProduct = await this.getInitialStockByProduct(
       productIds,
       range.from,
       sucursalId,
     );
 
-    const groupsMap = new Map<string, Record<string, unknown>>();
     let totalEntradas = 0;
     let totalSalidas = 0;
     let totalMovimientos = 0;
 
-    for (const row of rows) {
-      const productoId = this.toText(row.producto_id);
-      if (!productoId) continue;
+    const groups = rows
+      .map((row) => {
+        const productoId = this.toText(row.producto_id);
+        const entradas = this.toNumber(row.entradas, 0);
+        const salidas = this.toNumber(row.salidas, 0);
+        const stockInicial = initialStockByProduct.get(productoId) ?? 0;
+        const movimientosCount = this.toNumber(row.movimientos_count, 0);
 
-      const entrada = this.toNumber(row.entrada_cantidad, 0);
-      const salida = this.toNumber(row.salida_cantidad, 0);
-      const lineLabel = [this.toText(row.linea_codigo), this.toText(row.linea_nombre)]
-        .filter(Boolean)
-        .join(' - ');
-      const bodegaLabel = [this.toText(row.bodega_codigo), this.toText(row.bodega_nombre)]
-        .filter(Boolean)
-        .join(' - ');
+        totalEntradas += entradas;
+        totalSalidas += salidas;
+        totalMovimientos += movimientosCount;
 
-      if (!groupsMap.has(productoId)) {
-        groupsMap.set(productoId, {
+        return {
           producto_id: productoId,
           producto_codigo: this.toText(row.producto_codigo),
           producto_nombre: this.toText(row.producto_nombre),
-          linea_label: lineLabel,
+          linea_label: [
+            this.toText(row.linea_codigo),
+            this.toText(row.linea_nombre),
+          ]
+            .filter(Boolean)
+            .join(' - '),
           categoria_label: this.toText(row.categoria_nombre),
           unidad_label: this.toText(row.unidad_nombre),
-          stock_inicial: initialStockByProduct.get(productoId) ?? 0,
-          entradas: 0,
-          salidas: 0,
-          stock_final: initialStockByProduct.get(productoId) ?? 0,
-          movimientos_count: 0,
-          movimientos: [] as Record<string, unknown>[],
-        });
-      }
-
-      const group = groupsMap.get(productoId)!;
-      const currentEntries = this.toNumber(group.entradas, 0) + entrada;
-      const currentExits = this.toNumber(group.salidas, 0) + salida;
-      const initialStock = this.toNumber(group.stock_inicial, 0);
-      group.entradas = currentEntries;
-      group.salidas = currentExits;
-      group.stock_final = initialStock + currentEntries - currentExits;
-      group.movimientos_count = this.toNumber(group.movimientos_count, 0) + 1;
-      (group.movimientos as Record<string, unknown>[]).push({
-        id: this.toText(row.kardex_id),
-        fecha_emision: row.fecha,
-        fecha_creacion: row.created_at,
-        documento: this.resolveDocumentCode(row),
-        referencia: this.toText(row.movimiento_referencia) || this.toText(row.transferencia_codigo),
-        concepto: this.resolveMovementConcept(row),
-        descripcion:
-          this.toText(row.movimiento_observacion) ||
-          this.toText(row.kardex_observacion) ||
-          bodegaLabel ||
-          'Movimiento de inventario',
-        bodega: bodegaLabel || 'Sin bodega',
-        entrada,
-        salida,
-        stock: this.toNumber(row.saldo_cantidad, 0),
-      });
-
-      totalEntradas += entrada;
-      totalSalidas += salida;
-      totalMovimientos += 1;
-    }
-
-    const groups = [...groupsMap.values()]
-      .map((group) => ({
-        ...group,
-        stock_inicial: this.toNumber(group.stock_inicial, 0),
-        entradas: this.toNumber(group.entradas, 0),
-        salidas: this.toNumber(group.salidas, 0),
-        stock_final: this.toNumber(group.stock_final, 0),
-        movimientos_count: this.toNumber(group.movimientos_count, 0),
-      }))
-      .sort((a: any, b: any) =>
+          stock_inicial: stockInicial,
+          entradas,
+          salidas,
+          stock_final: stockInicial + entradas - salidas,
+          movimientos_count: movimientosCount,
+        };
+      })
+      .sort((a, b) =>
         `${this.toText(a.producto_codigo)}|${this.toText(a.producto_nombre)}`.localeCompare(
           `${this.toText(b.producto_codigo)}|${this.toText(b.producto_nombre)}`,
         ),
@@ -444,6 +378,225 @@ export class KardexService extends CrudService<Kardex> {
         salidas: totalSalidas,
       },
       groups,
+    };
+  }
+
+  async getMaterialMovements(
+    productoId: string,
+    params?: {
+      desde?: string | null;
+      hasta?: string | null;
+      search?: string | null;
+    },
+    sucursalId?: string | null,
+  ) {
+    const normalizedProductId = this.toText(productoId);
+    if (!normalizedProductId) {
+      throw new BadRequestException('El material es obligatorio.');
+    }
+
+    const range = this.resolveSummaryRange(params?.desde, params?.hasta);
+    const search = this.toText(params?.search);
+
+    const qb = this.repository
+      .createQueryBuilder('kardex')
+      .leftJoin(
+        Bodega,
+        'bodega',
+        'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
+      )
+      .leftJoin(
+        Producto,
+        'producto',
+        'producto.id = kardex.producto_id AND producto.is_deleted = false',
+      )
+      .leftJoin(
+        Linea,
+        'linea',
+        'linea.id = producto.linea_id AND linea.is_deleted = false',
+      )
+      .leftJoin(
+        Categoria,
+        'categoria',
+        'categoria.id = producto.categoria_id AND categoria.is_deleted = false',
+      )
+      .leftJoin(
+        UnidadMedida,
+        'unidad',
+        'unidad.id = producto.unidad_medida_id AND unidad.is_deleted = false',
+      )
+      .leftJoin(
+        MovimientoInventario,
+        'movimiento',
+        'movimiento.id = kardex.movimiento_id AND movimiento.is_deleted = false',
+      )
+      .leftJoin(
+        TransferenciaBodegaDet,
+        'transfer_det',
+        '(transfer_det.kardex_ingreso_id = kardex.id OR transfer_det.kardex_salida_id = kardex.id) AND transfer_det.is_deleted = false',
+      )
+      .leftJoin(
+        TransferenciaBodega,
+        'transferencia',
+        'transferencia.id = transfer_det.transferencia_bodega_id AND transferencia.is_deleted = false',
+      )
+      .where('kardex.is_deleted = false')
+      .andWhere('kardex.producto_id = :productoId', {
+        productoId: normalizedProductId,
+      })
+      .andWhere('kardex.fecha BETWEEN :fromDate AND :toDate', {
+        fromDate: range.from,
+        toDate: range.to,
+      });
+
+    if (sucursalId) {
+      qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    if (search) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('COALESCE(movimiento.numero_documento, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(movimiento.referencia, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(transferencia.codigo, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(bodega.nombre, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(bodega.codigo, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            })
+            .orWhere('COALESCE(kardex.observacion, \'\') ILIKE :search', {
+              search: `%${search}%`,
+            });
+        }),
+      );
+    }
+
+    const rows = await qb
+      .select([
+        'kardex.id AS kardex_id',
+        'kardex.fecha AS fecha',
+        'kardex.created_at AS created_at',
+        'kardex.producto_id AS producto_id',
+        'kardex.entrada_cantidad AS entrada_cantidad',
+        'kardex.salida_cantidad AS salida_cantidad',
+        'kardex.saldo_cantidad AS saldo_cantidad',
+        'kardex.observacion AS kardex_observacion',
+        'producto.codigo AS producto_codigo',
+        'producto.nombre AS producto_nombre',
+        'linea.codigo AS linea_codigo',
+        'linea.nombre AS linea_nombre',
+        'categoria.nombre AS categoria_nombre',
+        'unidad.nombre AS unidad_nombre',
+        'bodega.codigo AS bodega_codigo',
+        'bodega.nombre AS bodega_nombre',
+        'movimiento.numero_documento AS movimiento_numero_documento',
+        'movimiento.referencia AS movimiento_referencia',
+        'movimiento.tipo_documento AS movimiento_tipo_documento',
+        'movimiento.observacion AS movimiento_observacion',
+        'transferencia.codigo AS transferencia_codigo',
+      ])
+      .orderBy('kardex.fecha', 'ASC')
+      .addOrderBy('kardex.created_at', 'ASC')
+      .getRawMany<Record<string, unknown>>();
+
+    if (!rows.length) {
+      return {
+        range: {
+          desde: this.formatDateOnly(range.from),
+          hasta: this.formatDateOnly(range.to),
+        },
+        totals: {
+          materiales: 0,
+          movimientos: 0,
+          entradas: 0,
+          salidas: 0,
+        },
+        product: null,
+        movements: [],
+      };
+    }
+
+    const initialStockByProduct = await this.getInitialStockByProduct(
+      [normalizedProductId],
+      range.from,
+      sucursalId,
+    );
+    let totalEntradas = 0;
+    let totalSalidas = 0;
+    const firstRow = rows[0];
+    const stockInicial = initialStockByProduct.get(normalizedProductId) ?? 0;
+    const movements = rows.map((row) => {
+      const entrada = this.toNumber(row.entrada_cantidad, 0);
+      const salida = this.toNumber(row.salida_cantidad, 0);
+      totalEntradas += entrada;
+      totalSalidas += salida;
+
+      const bodegaLabel = [
+        this.toText(row.bodega_codigo),
+        this.toText(row.bodega_nombre),
+      ]
+        .filter(Boolean)
+        .join(' - ');
+
+      return {
+        id: this.toText(row.kardex_id),
+        fecha_emision: row.fecha,
+        fecha_creacion: row.created_at,
+        documento: this.resolveDocumentCode(row),
+        referencia:
+          this.toText(row.movimiento_referencia) ||
+          this.toText(row.transferencia_codigo),
+        concepto: this.resolveMovementConcept(row),
+        descripcion:
+          this.toText(row.movimiento_observacion) ||
+          this.toText(row.kardex_observacion) ||
+          bodegaLabel ||
+          'Movimiento de inventario',
+        bodega: bodegaLabel || 'Sin bodega',
+        entrada,
+        salida,
+        stock: this.toNumber(row.saldo_cantidad, 0),
+      };
+    });
+
+    return {
+      range: {
+        desde: this.formatDateOnly(range.from),
+        hasta: this.formatDateOnly(range.to),
+      },
+      totals: {
+        materiales: 1,
+        movimientos: movements.length,
+        entradas: totalEntradas,
+        salidas: totalSalidas,
+      },
+      product: {
+        producto_id: normalizedProductId,
+        producto_codigo: this.toText(firstRow.producto_codigo),
+        producto_nombre: this.toText(firstRow.producto_nombre),
+        linea_label: [
+          this.toText(firstRow.linea_codigo),
+          this.toText(firstRow.linea_nombre),
+        ]
+          .filter(Boolean)
+          .join(' - '),
+        categoria_label: this.toText(firstRow.categoria_nombre),
+        unidad_label: this.toText(firstRow.unidad_nombre),
+        stock_inicial: stockInicial,
+        entradas: totalEntradas,
+        salidas: totalSalidas,
+        stock_final: stockInicial + totalEntradas - totalSalidas,
+        movimientos_count: movements.length,
+      },
+      movements,
     };
   }
 
@@ -1250,77 +1403,90 @@ export class KardexService extends CrudService<Kardex> {
 
   getImportTemplateBuffer() {
     const headers = [
-      'Cod. Sucursal',
+      'Codigo Sucursal',
       'Sucursal',
-      'Cod. Bodega',
+      'Codigo Bodega',
       'Bodega',
-      'Cod. Línea',
+      'Codigo Linea',
       'Linea',
       'Tipo',
       'Categoria',
-      'Reg. Sanitario',
+      'Registro Sanitario',
       'Marca',
-      'Cod. Item',
-      'Item',
-      'Sección',
+      'Codigo Material',
+      'Material',
+      'Seccion',
       'Nivel',
-      'Último costo',
-      'Costo promedio',
-      'Precio',
-      '% UTILIDAD',
-      '% TC',
-      'VALOR TC',
-      'Tipo de unidad',
-      'Por contenedores',
-      'Stock',
-      'Stock min. bodega',
-      'Stock max. bodega',
-      'Stock contenedores',
-      'Stock minimo',
+      'Ultimo Costo',
+      'Costo Promedio',
+      'Precio Referencial',
+      'Porcentaje Utilidad',
+      'Tipo Unidad',
+      'Por Contenedores',
+      'Stock Actual',
+      'Stock Minimo Bodega',
+      'Stock Maximo Bodega',
+      'Stock Contenedores',
+      'Stock Minimo Global',
     ];
 
     const sample = {
-      'Cod. Sucursal': 'SUC-001',
-      Sucursal: 'Matriz',
-      'Cod. Bodega': 'BOD-001',
-      Bodega: 'Bodega Principal',
-      'Cod. Línea': 'SUM',
+      'Codigo Sucursal': 'SUC-001',
+      Sucursal: 'MATRIZ',
+      'Codigo Bodega': 'BOD-001',
+      Bodega: 'BODEGA PRINCIPAL',
+      'Codigo Linea': 'MNT',
       Linea: 'MANTENIMIENTO',
-      Tipo: 'Mercadería',
+      Tipo: 'Mercaderia',
       Categoria: 'HERRAMIENTAS',
-      'Reg. Sanitario': '',
+      'Registro Sanitario': '',
       Marca: 'GULF',
-      'Cod. Item': '175',
-      Item: 'PROBADOR DE TIERRA DIGITAL',
-      'Sección': 'MATERIAL VARIOS',
-      Nivel: '',
-      'Último costo': 25.5,
-      'Costo promedio': 25.5,
-      Precio: 35,
-      '% UTILIDAD': 37.25,
-      '% TC': 0,
-      'VALOR TC': 0,
-      'Tipo de unidad': 'UNIDAD',
-      'Por contenedores': 'N',
-      Stock: 80,
-      'Stock min. bodega': 5,
-      'Stock max. bodega': 10000,
-      'Stock contenedores': 0,
-      'Stock minimo': 5,
-      Costo: 2040,
+      'Codigo Material': '175',
+      Material: 'PROBADOR DE TIERRA DIGITAL',
+      Seccion: 'MATERIAL VARIOS',
+      Nivel: 'GENERAL',
+      'Ultimo Costo': 25.5,
+      'Costo Promedio': 25.5,
+      'Precio Referencial': 35,
+      'Porcentaje Utilidad': 37.25,
+      'Tipo Unidad': 'UNIDAD',
+      'Por Contenedores': 'N',
+      'Stock Actual': 80,
+      'Stock Minimo Bodega': 2,
+      'Stock Maximo Bodega': 10000,
+      'Stock Contenedores': 0,
+      'Stock Minimo Global': 2,
     };
+
+    const instructions = XLSX.utils.aoa_to_sheet([
+      ['FORMATO DE CARGA MASIVA DE INVENTARIO'],
+      [
+        'Usa la hoja INVENTARIO_CARGA. Codigo Sucursal, Codigo Bodega, Codigo Material y Material son obligatorios.',
+      ],
+      [
+        'Si la sucursal, bodega, linea, categoria o marca no existen, el sistema las crea automaticamente.',
+      ],
+      [
+        'Stock Minimo Bodega: si llega en 0 se normaliza a 2. Stock Maximo Bodega: si llega en 0 se normaliza a 10000.',
+      ],
+      [
+        'El stock actual del archivo se compara con el stock vigente y el sistema genera el ajuste como ingreso o salida.',
+      ],
+    ]);
 
     const worksheet = XLSX.utils.json_to_sheet([sample], {
       header: headers,
       skipHeader: false,
     });
 
+    instructions['!cols'] = [{ wch: 140 }];
     worksheet['!cols'] = headers.map((header) => ({
-      wch: Math.max(header.length + 2, 18),
+      wch: Math.max(header.length + 4, 20),
     }));
 
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'INVENTARIO');
+    XLSX.utils.book_append_sheet(workbook, instructions, 'INSTRUCCIONES');
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'INVENTARIO_CARGA');
 
     return XLSX.write(workbook, {
       type: 'buffer',
@@ -1917,20 +2083,25 @@ export class KardexService extends CrudService<Kardex> {
     summary: ImportInventorySummary,
     changedStockIds: Set<string>,
   ) {
-    const codSucursal = this.toText(this.rowValue(row, ['Cod. Sucursal']));
+    const codSucursal = this.toText(
+      this.rowValue(row, ['Codigo Sucursal', 'Cod. Sucursal']),
+    );
     const nomSucursal = this.toText(this.rowValue(row, ['Sucursal']));
-    const codBodega = this.toText(this.rowValue(row, ['Cod. Bodega']));
+    const codBodega = this.toText(
+      this.rowValue(row, ['Codigo Bodega', 'Cod. Bodega']),
+    );
     const nomBodega = this.toText(this.rowValue(row, ['Bodega']));
     const codLinea = this.toText(
-      this.rowValue(row, ['Cod. Línea', 'Cod. Linea']),
+      this.rowValue(row, ['Codigo Linea', 'Cod. Línea', 'Cod. Linea']),
     );
-    const nomLinea = this.toText(this.rowValue(row, ['Línea', 'Linea']));
+    const nomLinea = this.toText(this.rowValue(row, ['Linea', 'Línea', 'Linea']));
     const tipoProducto = this.toText(this.rowValue(row, ['Tipo']));
     const nomCategoria = this.toText(
-      this.rowValue(row, ['Categoría', 'Categoria']),
+      this.rowValue(row, ['Categoria', 'Categoría', 'Categoria']),
     );
     const registroSanitario = this.toText(
       this.rowValue(row, [
+        'Registro Sanitario',
         'Reg. Sanitario',
         'Reg Sanitario',
         'Registro sanitario',
@@ -1938,44 +2109,78 @@ export class KardexService extends CrudService<Kardex> {
     );
     const marcaNombre = this.toText(this.rowValue(row, ['Marca']));
     const codItem = this.toText(
-      this.rowValue(row, ['Cod. Ítem', 'Cod. Item']),
+      this.rowValue(row, [
+        'Codigo Material',
+        'Codigo Item',
+        'Cod. Ítem',
+        'Cod. Item',
+      ]),
     ).replace(/^['"]+/, '');
-    const nomItem = this.toText(this.rowValue(row, ['Ítem', 'Item']));
-    const seccion = this.toText(this.rowValue(row, ['Sección', 'Seccion']));
+    const nomItem = this.toText(
+      this.rowValue(row, ['Material', 'Ítem', 'Item']),
+    );
+    const seccion = this.toText(
+      this.rowValue(row, ['Seccion', 'Sección', 'Seccion']),
+    );
     const nivel = this.toText(this.rowValue(row, ['Nivel']));
     const ultimoCosto = this.toNumber(
-      this.rowValue(row, ['Último costo', 'Ultimo costo']),
+      this.rowValue(row, ['Ultimo Costo', 'Último costo', 'Ultimo costo']),
       0,
     );
     const costoPromedioOrigen = this.toNumber(
-      this.rowValue(row, ['Costo promedio']),
+      this.rowValue(row, ['Costo Promedio', 'Costo promedio']),
       0,
     );
     const costoTotal = this.toNumber(this.rowValue(row, ['Costo']), 0);
-    const precio = this.toNumber(this.rowValue(row, ['Precio']), 0);
-    const utilidad = this.toNumber(
-      this.rowValue(row, ['% UTILIDAD', '% utilidad', 'Utilidad']),
+    const precio = this.toNumber(
+      this.rowValue(row, ['Precio Referencial', 'Precio']),
       0,
     );
-    const tipoUnidad = this.toText(this.rowValue(row, ['Tipo de unidad']));
+    const utilidad = this.toNumber(
+      this.rowValue(row, [
+        'Porcentaje Utilidad',
+        '% UTILIDAD',
+        '% utilidad',
+        'Utilidad',
+      ]),
+      0,
+    );
+    const tipoUnidad = this.toText(
+      this.rowValue(row, ['Tipo Unidad', 'Tipo de unidad']),
+    );
     const porContenedoresRaw = this.toText(
-      this.rowValue(row, ['Por contenedores']),
+      this.rowValue(row, ['Por Contenedores', 'Por contenedores']),
     ).toUpperCase();
-    const stockObjetivo = this.toNumber(this.rowValue(row, ['Stock']), 0);
+    const stockObjetivo = this.toNumber(
+      this.rowValue(row, ['Stock Actual', 'Stock']),
+      0,
+    );
     const stockMinBodega = this.toNumber(
-      this.rowValue(row, ['Stock min. bodega', 'Stock min bodega']),
+      this.rowValue(row, [
+        'Stock Minimo Bodega',
+        'Stock min. bodega',
+        'Stock min bodega',
+      ]),
       0,
     );
     const stockMaxBodega = this.toNumber(
-      this.rowValue(row, ['Stock max. bodega', 'Stock max bodega']),
+      this.rowValue(row, [
+        'Stock Maximo Bodega',
+        'Stock max. bodega',
+        'Stock max bodega',
+      ]),
       0,
     );
     const stockContenedores = this.toNumber(
-      this.rowValue(row, ['Stock contenedores']),
+      this.rowValue(row, ['Stock Contenedores', 'Stock contenedores']),
       0,
     );
     const stockMinimo = this.toNumber(
-      this.rowValue(row, ['Stock minimo', 'Stock mínimo']),
+      this.rowValue(row, [
+        'Stock Minimo Global',
+        'Stock minimo',
+        'Stock mínimo',
+      ]),
       0,
     );
 
