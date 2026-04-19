@@ -211,15 +211,28 @@ export class KardexService extends CrudService<Kardex> {
     };
   }
 
-  async getMaterialSummary(params?: {
-    desde?: string | null;
-    hasta?: string | null;
-    search?: string | null;
-  }, sucursalId?: string | null) {
+  async getMaterialSummary(
+    params?: {
+      desde?: string | null;
+      hasta?: string | null;
+      search?: string | null;
+      page?: number | null;
+      limit?: number | null;
+    },
+    sucursalId?: string | null,
+  ) {
     const range = this.resolveSummaryRange(params?.desde, params?.hasta);
     const search = this.toText(params?.search);
+    const safePage =
+      Number.isFinite(Number(params?.page)) && Number(params?.page) > 0
+        ? Number(params?.page)
+        : 1;
+    const safeLimit =
+      Number.isFinite(Number(params?.limit)) && Number(params?.limit) > 0
+        ? Math.min(Number(params?.limit), 100)
+        : 10;
 
-    const qb = this.repository
+    const baseQb = this.repository
       .createQueryBuilder('kardex')
       .leftJoin(
         Bodega,
@@ -253,11 +266,11 @@ export class KardexService extends CrudService<Kardex> {
       });
 
     if (sucursalId) {
-      qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+      baseQb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
     }
 
     if (search) {
-      qb.andWhere(
+      baseQb.andWhere(
         new Brackets((searchQb) => {
           searchQb
             .where('producto.nombre ILIKE :search', { search: `%${search}%` })
@@ -272,7 +285,16 @@ export class KardexService extends CrudService<Kardex> {
       );
     }
 
-    const rows = await qb
+    const totalsRow = await baseQb
+      .clone()
+      .select('COUNT(DISTINCT kardex.producto_id)', 'materiales')
+      .addSelect('COUNT(kardex.id)', 'movimientos')
+      .addSelect('COALESCE(SUM(kardex.entrada_cantidad), 0)', 'entradas')
+      .addSelect('COALESCE(SUM(kardex.salida_cantidad), 0)', 'salidas')
+      .getRawOne<Record<string, unknown>>();
+
+    const groupedQb = baseQb
+      .clone()
       .select([
         'kardex.producto_id AS producto_id',
         'producto.codigo AS producto_codigo',
@@ -293,8 +315,27 @@ export class KardexService extends CrudService<Kardex> {
       .addGroupBy('categoria.nombre')
       .addGroupBy('unidad.nombre')
       .orderBy('COALESCE(producto.nombre, \'\')', 'ASC')
-      .addOrderBy('COALESCE(producto.codigo, \'\')', 'ASC')
+      .addOrderBy('COALESCE(producto.codigo, \'\')', 'ASC');
+
+    const totalGroupsRaw = await this.dataSource
+      .createQueryBuilder()
+      .select('COUNT(1)', 'total')
+      .from(`(${groupedQb.getQuery()})`, 'material_summary')
+      .setParameters(groupedQb.getParameters())
+      .getRawOne<Record<string, unknown>>();
+
+    const totalGroups = this.toNumber(totalGroupsRaw?.total, 0);
+    const totalPages = Math.max(1, Math.ceil(totalGroups / safeLimit));
+
+    const rows = await groupedQb
+      .offset((safePage - 1) * safeLimit)
+      .limit(safeLimit)
       .getRawMany<Record<string, unknown>>();
+
+    const totalEntradas = this.toNumber(totalsRow?.entradas, 0);
+    const totalSalidas = this.toNumber(totalsRow?.salidas, 0);
+    const totalMovimientos = this.toNumber(totalsRow?.movimientos, 0);
+    const totalMateriales = this.toNumber(totalsRow?.materiales, 0);
 
     if (!rows.length) {
       return {
@@ -303,12 +344,18 @@ export class KardexService extends CrudService<Kardex> {
           hasta: this.formatDateOnly(range.to),
         },
         totals: {
-          materiales: 0,
-          movimientos: 0,
-          entradas: 0,
-          salidas: 0,
+          materiales: totalMateriales,
+          movimientos: totalMovimientos,
+          entradas: totalEntradas,
+          salidas: totalSalidas,
         },
         groups: [],
+        pagination: {
+          page: safePage,
+          limit: safeLimit,
+          total: totalGroups,
+          totalPages,
+        },
       };
     }
 
@@ -325,10 +372,6 @@ export class KardexService extends CrudService<Kardex> {
       sucursalId,
     );
 
-    let totalEntradas = 0;
-    let totalSalidas = 0;
-    let totalMovimientos = 0;
-
     const groups = rows
       .map((row) => {
         const productoId = this.toText(row.producto_id);
@@ -336,10 +379,6 @@ export class KardexService extends CrudService<Kardex> {
         const salidas = this.toNumber(row.salidas, 0);
         const stockInicial = initialStockByProduct.get(productoId) ?? 0;
         const movimientosCount = this.toNumber(row.movimientos_count, 0);
-
-        totalEntradas += entradas;
-        totalSalidas += salidas;
-        totalMovimientos += movimientosCount;
 
         return {
           producto_id: productoId,
@@ -372,12 +411,18 @@ export class KardexService extends CrudService<Kardex> {
         hasta: this.formatDateOnly(range.to),
       },
       totals: {
-        materiales: groups.length,
+        materiales: totalMateriales,
         movimientos: totalMovimientos,
         entradas: totalEntradas,
         salidas: totalSalidas,
       },
       groups,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total: totalGroups,
+        totalPages,
+      },
     };
   }
 

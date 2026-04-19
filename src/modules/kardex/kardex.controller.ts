@@ -58,10 +58,13 @@ export class KardexController extends CrudController<Kardex> {
   @ApiOperation({
     summary: 'Obtener resumen de kardex agrupado por material y rango de fechas',
   })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 10 })
   @ApiQuery({ name: 'desde', required: false, type: String, example: '2026-04-01' })
   @ApiQuery({ name: 'hasta', required: false, type: String, example: '2026-04-15' })
   @ApiQuery({ name: 'search', required: false, type: String })
   async getMaterialSummary(
+    @Query() query: PaginationQueryDto,
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
     @Query('search') search?: string,
@@ -70,7 +73,13 @@ export class KardexController extends CrudController<Kardex> {
     return {
       message: 'Resumen de kardex obtenido correctamente.',
       data: await this.service.getMaterialSummary(
-        { desde, hasta, search },
+        {
+          desde,
+          hasta,
+          search,
+          page: query.page,
+          limit: query.limit,
+        },
         getSucursalScopeId(req),
       ),
     };
