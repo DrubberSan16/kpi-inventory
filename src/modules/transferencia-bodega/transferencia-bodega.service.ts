@@ -9,6 +9,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
 import {
   Bodega,
+  GuiaRemisionElectronica,
   Kardex,
   MovimientoInventario,
   MovimientoInventarioDet,
@@ -50,6 +51,8 @@ export class TransferenciaBodegaService {
     private readonly ordenDetRepo: Repository<OrdenCompraDet>,
     @InjectRepository(Bodega)
     private readonly bodegaRepo: Repository<Bodega>,
+    @InjectRepository(GuiaRemisionElectronica)
+    private readonly guideRepo: Repository<GuiaRemisionElectronica>,
     @InjectRepository(Producto)
     private readonly productoRepo: Repository<Producto>,
     @InjectRepository(StockBodega)
@@ -632,7 +635,7 @@ export class TransferenciaBodegaService {
     const movementIds = rows
       .flatMap((item) => [item.movimiento_salida_id, item.movimiento_ingreso_id])
       .filter((value): value is string => Boolean(value));
-    const [details, orders, warehouses, movements] = await Promise.all([
+    const [details, orders, warehouses, movements, guides] = await Promise.all([
       this.transferenciaDetRepo.find({
         where: ids.map((id) => ({ transferencia_bodega_id: id, is_deleted: false })),
         order: { created_at: 'ASC' },
@@ -653,6 +656,12 @@ export class TransferenciaBodegaService {
             where: [...new Set(movementIds)].map((id) => ({ id, is_deleted: false })),
           })
         : Promise.resolve([] as MovimientoInventario[]),
+      ids.length
+        ? this.guideRepo.find({
+            where: ids.map((id) => ({ transferencia_bodega_id: id, is_deleted: false })),
+            order: { created_at: 'DESC' },
+          })
+        : Promise.resolve([] as GuiaRemisionElectronica[]),
     ]);
     const detailMap = details.reduce((acc, item) => {
       (acc[item.transferencia_bodega_id] ??= []).push(item);
@@ -661,6 +670,7 @@ export class TransferenciaBodegaService {
     const orderMap = new Map(orders.map((item) => [item.id, item]));
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const movementMap = new Map(movements.map((item) => [item.id, item]));
+    const guideMap = new Map(guides.map((item) => [item.transferencia_bodega_id, item]));
 
     return rows.map((item) => {
       const source = warehouseMap.get(item.bodega_origen_id);
@@ -672,6 +682,7 @@ export class TransferenciaBodegaService {
       const movementIn = item.movimiento_ingreso_id
         ? movementMap.get(item.movimiento_ingreso_id)
         : null;
+      const guide = guideMap.get(item.id) || null;
       return {
         ...item,
         orden_compra_codigo: order?.codigo ?? null,
@@ -684,6 +695,12 @@ export class TransferenciaBodegaService {
           : 'Sin bodega',
         egreso_bodega_codigo: movementOut?.numero_documento ?? null,
         ingreso_bodega_codigo: movementIn?.numero_documento ?? null,
+        guia_remision_id: guide?.id ?? null,
+        guia_remision_estado: guide?.estado_emision ?? null,
+        guia_remision_sri_estado: guide?.sri_estado ?? null,
+        guia_remision_clave_acceso: guide?.clave_acceso ?? null,
+        guia_remision_numero: guide?.numero_guia ?? null,
+        guia_remision_numero_autorizacion: guide?.numero_autorizacion ?? null,
         detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
       };
     });
@@ -706,7 +723,7 @@ export class TransferenciaBodegaService {
     const movementIds = rows
       .flatMap((item) => [item.movimiento_salida_id, item.movimiento_ingreso_id])
       .filter((value): value is string => Boolean(value));
-    const [details, orders, warehouses, movements] = await Promise.all([
+    const [details, orders, warehouses, movements, guides] = await Promise.all([
       manager.find(TransferenciaBodegaDet, {
         where: ids.map((id) => ({
           transferencia_bodega_id: id,
@@ -730,6 +747,12 @@ export class TransferenciaBodegaService {
             where: [...new Set(movementIds)].map((id) => ({ id, is_deleted: false })),
           })
         : Promise.resolve([] as MovimientoInventario[]),
+      ids.length
+        ? manager.find(GuiaRemisionElectronica, {
+            where: ids.map((id) => ({ transferencia_bodega_id: id, is_deleted: false })),
+            order: { created_at: 'DESC' },
+          })
+        : Promise.resolve([] as GuiaRemisionElectronica[]),
     ]);
 
     const detailMap = details.reduce((acc, item) => {
@@ -739,6 +762,7 @@ export class TransferenciaBodegaService {
     const orderMap = new Map(orders.map((item) => [item.id, item]));
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const movementMap = new Map(movements.map((item) => [item.id, item]));
+    const guideMap = new Map(guides.map((item) => [item.transferencia_bodega_id, item]));
 
     return rows.map((item) => {
       const source = warehouseMap.get(item.bodega_origen_id);
@@ -750,6 +774,7 @@ export class TransferenciaBodegaService {
       const movementIn = item.movimiento_ingreso_id
         ? movementMap.get(item.movimiento_ingreso_id)
         : null;
+      const guide = guideMap.get(item.id) || null;
       return {
         ...item,
         orden_compra_codigo: order?.codigo ?? null,
@@ -762,6 +787,12 @@ export class TransferenciaBodegaService {
           : 'Sin bodega',
         egreso_bodega_codigo: movementOut?.numero_documento ?? null,
         ingreso_bodega_codigo: movementIn?.numero_documento ?? null,
+        guia_remision_id: guide?.id ?? null,
+        guia_remision_estado: guide?.estado_emision ?? null,
+        guia_remision_sri_estado: guide?.sri_estado ?? null,
+        guia_remision_clave_acceso: guide?.clave_acceso ?? null,
+        guia_remision_numero: guide?.numero_guia ?? null,
+        guia_remision_numero_autorizacion: guide?.numero_autorizacion ?? null,
         detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
       };
     });

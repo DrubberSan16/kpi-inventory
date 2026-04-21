@@ -14,6 +14,7 @@ import { SucursalModule } from './modules/sucursal/sucursal.module';
 import { TerceroModule } from './modules/tercero/tercero.module';
 import { OrdenCompraModule } from './modules/orden-compra/orden-compra.module';
 import { TransferenciaBodegaModule } from './modules/transferencia-bodega/transferencia-bodega.module';
+import { GuiaRemisionElectronicaModule } from './modules/guia-remision-electronica/guia-remision-electronica.module';
 import { UnidadMedidaModule } from './modules/unidad-medida/unidad-medida.module';
 import { ENTITIES } from './modules/entities';
 
@@ -62,6 +63,7 @@ import { ENTITIES } from './modules/entities';
     KardexModule,
     OrdenCompraModule,
     TransferenciaBodegaModule,
+    GuiaRemisionElectronicaModule,
   ],
 })
 export class AppModule {}

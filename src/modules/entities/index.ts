@@ -14,7 +14,9 @@ import { Tercero } from "./tercero.entity";
 import { TransferenciaBodega } from "./transferencia-bodega.entity";
 import { TransferenciaBodegaDet } from "./transferencia-bodega-det.entity";
 import { UnidadMedida } from "./unidad-medida.entity";
+import { SriEmissionConfig } from "./sri-emission-config.entity";
+import { GuiaRemisionElectronica } from "./guia-remision-electronica.entity";
 
-export const ENTITIES = [Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida];
+export const ENTITIES = [Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, GuiaRemisionElectronica];
 
-export { Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida };
+export { Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, GuiaRemisionElectronica };
