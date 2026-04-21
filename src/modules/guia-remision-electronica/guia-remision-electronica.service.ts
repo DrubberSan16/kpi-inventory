@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -19,6 +20,7 @@ import {
   GuiaRemisionElectronica,
   Producto,
   SriEmissionConfig,
+  SriSignatureConfig,
   Sucursal,
   TransferenciaBodega,
   TransferenciaBodegaDet,
@@ -30,6 +32,8 @@ import {
 import { SRI_XADES_PYTHON_HELPER } from './python-helper.source';
 
 const execFileAsync = promisify(execFile);
+const SRI_TAXPAYER_LOOKUP_URL =
+  'https://srienlinea.sri.gob.ec/sri-catastro-sujeto-servicio-internet/rest/ConsolidadoContribuyente/obtenerPorNumerosRuc';
 
 type PreparedGuideContext = {
   transfer: TransferenciaBodega;
@@ -37,7 +41,21 @@ type PreparedGuideContext = {
   destinationWarehouse: Bodega;
   sucursal: Sucursal;
   config: SriEmissionConfig;
+  signature: SignatureCarrier | null;
   details: TransferenciaBodegaDet[];
+};
+
+type SignatureCarrier = {
+  certificate_filename?: string | null;
+  certificate_p12_encrypted?: string | null;
+  certificate_password_encrypted?: string | null;
+  cert_subject?: string | null;
+  cert_issuer?: string | null;
+  cert_serial?: string | null;
+  cert_valid_from?: Date | null;
+  cert_valid_to?: Date | null;
+  updated_at?: Date | null;
+  signature_scope?: string | null;
 };
 
 @Injectable()
@@ -47,6 +65,8 @@ export class GuiaRemisionElectronicaService {
   constructor(
     @InjectRepository(SriEmissionConfig)
     private readonly configRepo: Repository<SriEmissionConfig>,
+    @InjectRepository(SriSignatureConfig)
+    private readonly signatureRepo: Repository<SriSignatureConfig>,
     @InjectRepository(GuiaRemisionElectronica)
     private readonly guideRepo: Repository<GuiaRemisionElectronica>,
     @InjectRepository(TransferenciaBodega)
@@ -64,11 +84,128 @@ export class GuiaRemisionElectronicaService {
   ) {}
 
   async getConfigBySucursal(sucursalId: string) {
-    const config = await this.configRepo.findOne({
-      where: { sucursal_id: sucursalId, is_deleted: false },
-    });
+    const [config, signature] = await Promise.all([
+      this.configRepo.findOne({
+        where: { sucursal_id: sucursalId, is_deleted: false },
+      }),
+      this.loadGlobalSignature(),
+    ]);
     if (!config) return null;
-    return this.maskConfig(config);
+    return this.maskConfig(config, signature);
+  }
+
+  async getGlobalSignatureConfig() {
+    const signature = await this.loadGlobalSignature();
+    if (!signature) return null;
+    return this.maskSignature(signature);
+  }
+
+  assertSuperAdministratorRole(roleName?: string) {
+    const normalizedRole = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    const allowedRoles = new Set([
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ]);
+    if (!allowedRoles.has(normalizedRole)) {
+      throw new ForbiddenException(
+        'Solo el Super Administrador puede gestionar la firma global SRI.',
+      );
+    }
+  }
+
+  async lookupTaxpayerByRuc(ruc: string) {
+    const normalizedRuc = this.onlyDigits(ruc, 13);
+    if (normalizedRuc.length !== 13) {
+      throw new BadRequestException('El RUC debe tener 13 digitos.');
+    }
+
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), 15000);
+
+    try {
+      const url = `${SRI_TAXPAYER_LOOKUP_URL}?&ruc=${encodeURIComponent(
+        normalizedRuc,
+      )}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new BadRequestException(
+          `No se pudo consultar el SRI. HTTP ${response.status}.`,
+        );
+      }
+
+      const payload = await response.json();
+      const raw = Array.isArray(payload) ? payload[0] : payload;
+      if (!raw || !String(raw.numeroRuc || '').trim()) {
+        throw new NotFoundException(
+          'No se encontraron datos del contribuyente para el RUC indicado.',
+        );
+      }
+
+      return {
+        ruc: this.onlyDigits(raw.numeroRuc, 13),
+        razon_social: this.cleanText(
+          raw.razonSocial || raw.nombreComercial || raw.numeroRuc,
+          300,
+        ),
+        nombre_comercial: this.cleanOptionalText(
+          raw.nombreComercial || raw.razonSocial,
+          300,
+        ),
+        estado_contribuyente: this.cleanOptionalText(
+          raw.estadoContribuyenteRuc,
+          60,
+        ),
+        actividad_economica_principal: this.cleanOptionalText(
+          raw.actividadEconomicaPrincipal,
+          300,
+        ),
+        tipo_contribuyente: this.cleanOptionalText(raw.tipoContribuyente, 80),
+        regimen: this.cleanOptionalText(raw.regimen, 80),
+        categoria: this.cleanOptionalText(raw.categoria, 80),
+        obligado_contabilidad: this.normalizeYesNo(
+          raw.obligadoLlevarContabilidad,
+        ),
+        contribuyente_especial:
+          String(raw.contribuyenteEspecial || '')
+            .trim()
+            .toUpperCase() === 'NO'
+            ? null
+            : this.cleanOptionalText(raw.contribuyenteEspecial, 13),
+        agente_retencion: this.normalizeYesNo(raw.agenteRetencion),
+        informacion_fechas: raw.informacionFechasContribuyente || null,
+        raw,
+      };
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        throw new BadRequestException(
+          'La consulta al SRI tardó demasiado. Intenta nuevamente.',
+        );
+      }
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
+        throw error;
+      }
+      const message = error?.message || 'No se pudo consultar el SRI.';
+      this.logger.warn(`Error consultando catastro SRI (${normalizedRuc}): ${message}`);
+      throw new BadRequestException(message);
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
   }
 
   async upsertConfig(dto: UpsertSriEmissionConfigDto) {
@@ -90,10 +227,13 @@ export class GuiaRemisionElectronicaService {
       razon_social: this.cleanText(dto.razon_social, 300),
       nombre_comercial: this.cleanOptionalText(dto.nombre_comercial, 300),
       dir_matriz: this.cleanText(dto.dir_matriz, 300),
-      dir_establecimiento: this.cleanOptionalText(dto.dir_establecimiento, 300),
+      dir_establecimiento: this.cleanOptionalText(
+        dto.dir_establecimiento || dto.dir_matriz,
+        300,
+      ),
       estab: this.onlyDigits(dto.estab, 3),
       pto_emi: this.onlyDigits(dto.pto_emi, 3),
-      codigo_numerico: this.onlyDigits(dto.codigo_numerico || '12345678', 8),
+      codigo_numerico: config?.codigo_numerico || this.generateConfigNumericSeed(dto),
       contribuyente_especial: this.cleanOptionalText(dto.contribuyente_especial, 13),
       obligado_contabilidad: this.normalizeYesNo(dto.obligado_contabilidad),
       dir_partida_default: this.cleanOptionalText(dto.dir_partida_default, 300),
@@ -198,6 +338,70 @@ export class GuiaRemisionElectronicaService {
     return this.maskConfig(saved);
   }
 
+  async uploadGlobalCertificate(
+    password: string,
+    file: { originalname?: string; buffer?: Buffer },
+    updatedBy?: string,
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('Debes adjuntar un archivo .p12 valido.');
+    }
+    if (!String(file.originalname || '').toLowerCase().endsWith('.p12')) {
+      throw new BadRequestException('El archivo debe tener extension .p12.');
+    }
+
+    let signature = await this.signatureRepo.findOne({
+      where: { scope_key: 'GLOBAL', is_deleted: false },
+      select: {
+        id: true,
+        scope_key: true,
+        created_at: true,
+        updated_at: true,
+        created_by: true,
+        updated_by: true,
+        status: true,
+        is_deleted: true,
+        deleted_at: true,
+        deleted_by: true,
+        certificate_filename: true,
+        certificate_p12_encrypted: true,
+        certificate_password_encrypted: true,
+        cert_subject: true,
+        cert_issuer: true,
+        cert_serial: true,
+        cert_valid_from: true,
+        cert_valid_to: true,
+      } as any,
+    });
+
+    if (!signature) {
+      signature = this.signatureRepo.create({
+        scope_key: 'GLOBAL',
+        created_by: this.resolveUser(updatedBy),
+      });
+    }
+
+    const inspection = await this.inspectP12Buffer(file.buffer, password);
+    signature.certificate_filename = String(file.originalname || 'certificado.p12');
+    signature.certificate_p12_encrypted = this.encryptToText(
+      file.buffer.toString('base64'),
+    );
+    signature.certificate_password_encrypted = this.encryptToText(password);
+    signature.cert_subject = inspection.subject || null;
+    signature.cert_issuer = inspection.issuer || null;
+    signature.cert_serial = inspection.serial_number || null;
+    signature.cert_valid_from = inspection.not_valid_before
+      ? new Date(inspection.not_valid_before)
+      : null;
+    signature.cert_valid_to = inspection.not_valid_after
+      ? new Date(inspection.not_valid_after)
+      : null;
+    signature.updated_by = this.resolveUser(updatedBy);
+
+    const saved = await this.signatureRepo.save(signature);
+    return this.maskSignature(saved);
+  }
+
   async prepareForTransfer(transferId: string) {
     const context = await this.loadGuideContext(transferId);
     const existingGuide = await this.guideRepo.findOne({
@@ -221,7 +425,7 @@ export class GuiaRemisionElectronicaService {
         codigo: context.sucursal.codigo,
         nombre: context.sucursal.nombre,
       },
-      config: this.maskConfig(context.config),
+      config: this.maskConfig(context.config, context.signature),
       draft: {
         ambiente: context.config.ambiente_default || 'PRUEBAS',
         fecha_emision: this.formatDateOnly(context.transfer.fecha_transferencia),
@@ -379,7 +583,8 @@ export class GuiaRemisionElectronicaService {
       if (!lockedConfig) {
         throw new NotFoundException('No existe configuración SRI para la sucursal.');
       }
-      this.ensureCertificatePresent(lockedConfig);
+      const globalSignature = await this.loadGlobalSignature(manager);
+      this.ensureCertificatePresent(globalSignature);
 
       const nextSecuencial = Number(lockedConfig.ultimo_secuencial || 0) + 1;
       const secuencial = String(nextSecuencial).padStart(9, '0');
@@ -392,7 +597,15 @@ export class GuiaRemisionElectronicaService {
         estab: lockedConfig.estab,
         ptoEmi: lockedConfig.pto_emi,
         secuencial,
-        codigoNumerico: lockedConfig.codigo_numerico,
+        codigoNumerico: this.generateDocumentNumericCode({
+          transferId,
+          secuencial,
+          ruc: lockedConfig.ruc,
+          ambiente,
+          fechaEmision:
+            dto.fecha_emision ||
+            this.formatDateOnly(context.transfer.fecha_transferencia),
+        }),
         tipoEmision: '1',
       });
       const numeroGuia = `${lockedConfig.estab}-${lockedConfig.pto_emi}-${secuencial}`;
@@ -430,7 +643,10 @@ export class GuiaRemisionElectronicaService {
       };
 
       const xmlUnsigned = this.buildGuideXml(context, lockedConfig, model, enrichedDetails, infoAdicional);
-      const xmlSigned = await this.signXmlWithCertificate(xmlUnsigned, lockedConfig);
+      const xmlSigned = await this.signXmlWithCertificate(
+        xmlUnsigned,
+        globalSignature,
+      );
 
       lockedConfig.ultimo_secuencial = nextSecuencial;
       lockedConfig.updated_by = userName;
@@ -681,13 +897,22 @@ export class GuiaRemisionElectronicaService {
         'La sucursal de la transferencia no tiene configuración SRI. Configúrala antes de generar la guía.',
       );
     }
-    return { transfer, sourceWarehouse, destinationWarehouse, sucursal, config, details };
+    const signature = await this.loadGlobalSignature(manager);
+    return {
+      transfer,
+      sourceWarehouse,
+      destinationWarehouse,
+      sucursal,
+      config,
+      signature,
+      details,
+    };
   }
 
-  private ensureCertificatePresent(config: SriEmissionConfig) {
-    if (!config.certificate_p12_encrypted || !config.certificate_password_encrypted) {
+  private ensureCertificatePresent(config?: SignatureCarrier | null) {
+    if (!config?.certificate_p12_encrypted || !config?.certificate_password_encrypted) {
       throw new BadRequestException(
-        'La configuración SRI no tiene certificado .p12 cargado.',
+        'La firma global SRI no tiene certificado .p12 cargado.',
       );
     }
   }
@@ -829,10 +1054,18 @@ export class GuiaRemisionElectronicaService {
     ].join('');
   }
 
-  private async signXmlWithCertificate(xmlUnsigned: string, config: SriEmissionConfig) {
+  private async signXmlWithCertificate(
+    xmlUnsigned: string,
+    config: SignatureCarrier | null,
+  ) {
     this.ensureCertificatePresent(config);
-    const p12Base64 = this.decryptFromText(config.certificate_p12_encrypted!);
-    const password = this.decryptFromText(config.certificate_password_encrypted!);
+    const safeConfig = config as SignatureCarrier;
+    const p12Base64 = this.decryptFromText(
+      safeConfig.certificate_p12_encrypted!,
+    );
+    const password = this.decryptFromText(
+      safeConfig.certificate_password_encrypted!,
+    );
     const helperPath = await this.ensurePythonHelper();
     const workId = randomUUID();
     const p12Path = join(tmpdir(), `sri-cert-${workId}.p12`);
@@ -1106,7 +1339,14 @@ export class GuiaRemisionElectronicaService {
     };
   }
 
-  private maskConfig(config: SriEmissionConfig) {
+  private maskConfig(
+    config: SriEmissionConfig,
+    signature?: SignatureCarrier | null,
+  ) {
+    const effectiveSignature = signature || config;
+    const effectiveSignatureScope =
+      signature?.signature_scope ||
+      ((effectiveSignature as SignatureCarrier)?.signature_scope ?? 'SUCURSAL');
     return {
       id: config.id,
       sucursal_id: config.sucursal_id,
@@ -1129,15 +1369,147 @@ export class GuiaRemisionElectronicaService {
       placa_default: config.placa_default,
       info_adicional_email: config.info_adicional_email,
       info_adicional_telefono: config.info_adicional_telefono,
-      certificate_filename: config.certificate_filename,
-      certificate_loaded: Boolean(config.certificate_filename),
-      cert_subject: config.cert_subject,
-      cert_issuer: config.cert_issuer,
-      cert_serial: config.cert_serial,
-      cert_valid_from: config.cert_valid_from,
-      cert_valid_to: config.cert_valid_to,
+      certificate_filename: effectiveSignature?.certificate_filename || null,
+      certificate_loaded: Boolean(effectiveSignature?.certificate_filename),
+      cert_subject: effectiveSignature?.cert_subject || null,
+      cert_issuer: effectiveSignature?.cert_issuer || null,
+      cert_serial: effectiveSignature?.cert_serial || null,
+      cert_valid_from: effectiveSignature?.cert_valid_from || null,
+      cert_valid_to: effectiveSignature?.cert_valid_to || null,
+      certificate_scope: effectiveSignatureScope,
       updated_at: config.updated_at,
     };
+  }
+
+  private maskSignature(signature: SignatureCarrier) {
+    return {
+      certificate_filename: signature.certificate_filename || null,
+      certificate_loaded: Boolean(signature.certificate_filename),
+      cert_subject: signature.cert_subject || null,
+      cert_issuer: signature.cert_issuer || null,
+      cert_serial: signature.cert_serial || null,
+      cert_valid_from: signature.cert_valid_from || null,
+      cert_valid_to: signature.cert_valid_to || null,
+      certificate_scope: signature.signature_scope || 'GLOBAL',
+      updated_at: signature.updated_at || null,
+    };
+  }
+
+  private async loadGlobalSignature(
+    manager?: EntityManager,
+  ): Promise<SignatureCarrier | null> {
+    const repo = manager
+      ? manager.getRepository(SriSignatureConfig)
+      : this.signatureRepo;
+    let signature: SriSignatureConfig | null = null;
+    try {
+      signature = await repo.findOne({
+        where: { scope_key: 'GLOBAL', is_deleted: false },
+        select: {
+          id: true,
+          scope_key: true,
+          created_at: true,
+          updated_at: true,
+          created_by: true,
+          updated_by: true,
+          status: true,
+          is_deleted: true,
+          deleted_at: true,
+          deleted_by: true,
+          certificate_filename: true,
+          certificate_p12_encrypted: true,
+          certificate_password_encrypted: true,
+          cert_subject: true,
+          cert_issuer: true,
+          cert_serial: true,
+          cert_valid_from: true,
+          cert_valid_to: true,
+        } as any,
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo consultar la firma global SRI. Se intentara usar la firma legacy por sucursal. ${error?.message || error}`,
+      );
+    }
+    if (signature) {
+      return {
+        ...signature,
+        signature_scope: 'GLOBAL',
+      };
+    }
+    return this.findLegacySignatureFromSucursal(manager);
+  }
+
+  private async findLegacySignatureFromSucursal(
+    manager?: EntityManager,
+  ): Promise<SignatureCarrier | null> {
+    const repo = manager
+      ? manager.getRepository(SriEmissionConfig)
+      : this.configRepo;
+    const legacy = await repo
+      .createQueryBuilder('cfg')
+      .select([
+        'cfg.id',
+        'cfg.created_at',
+        'cfg.updated_at',
+        'cfg.certificate_filename',
+        'cfg.certificate_p12_encrypted',
+        'cfg.certificate_password_encrypted',
+        'cfg.cert_subject',
+        'cfg.cert_issuer',
+        'cfg.cert_serial',
+        'cfg.cert_valid_from',
+        'cfg.cert_valid_to',
+      ])
+      .where('cfg.is_deleted = false')
+      .andWhere("coalesce(cfg.certificate_p12_encrypted, '') <> ''")
+      .andWhere("coalesce(cfg.certificate_password_encrypted, '') <> ''")
+      .orderBy('cfg.updated_at', 'DESC')
+      .addOrderBy('cfg.created_at', 'DESC')
+      .getOne();
+
+    if (!legacy) return null;
+    return {
+      ...legacy,
+      signature_scope: 'LEGACY_SUCURSAL',
+    };
+  }
+
+  private generateConfigNumericSeed(dto: UpsertSriEmissionConfigDto) {
+    const seed = [
+      this.onlyDigits(dto.ruc, 13),
+      this.onlyDigits(dto.estab, 3),
+      this.onlyDigits(dto.pto_emi, 3),
+      String(dto.sucursal_id || ''),
+    ].join('|');
+    return this.hashToEightDigits(seed);
+  }
+
+  private generateDocumentNumericCode(params: {
+    transferId: string;
+    secuencial: string;
+    ruc: string;
+    ambiente: string;
+    fechaEmision: string;
+  }) {
+    const seed = [
+      params.transferId,
+      params.secuencial,
+      this.onlyDigits(params.ruc, 13),
+      this.normalizeEnvironment(params.ambiente),
+      params.fechaEmision,
+      randomUUID(),
+      Date.now(),
+    ].join('|');
+    return this.hashToEightDigits(seed);
+  }
+
+  private hashToEightDigits(seed: string) {
+    const hash = createHash('sha256').update(seed).digest();
+    const a = hash.readUInt32BE(0);
+    const b = hash.readUInt32BE(4);
+    const value = (a ^ b) % 100000000;
+    return String(value).padStart(8, '0');
   }
 
   private generateAccessKey(params: {

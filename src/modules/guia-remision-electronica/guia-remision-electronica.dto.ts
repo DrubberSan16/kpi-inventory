@@ -61,13 +61,6 @@ export class UpsertSriEmissionConfigDto {
   @Matches(/^\d{3}$/)
   pto_emi: string;
 
-  @ApiPropertyOptional({ description: '8 digitos' })
-  @IsOptional()
-  @IsString()
-  @Length(8, 8)
-  @Matches(/^\d{8}$/)
-  codigo_numerico?: string;
-
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

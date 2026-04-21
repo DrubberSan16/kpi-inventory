@@ -6,6 +6,7 @@ import {
   GuiaRemisionElectronica,
   Producto,
   SriEmissionConfig,
+  SriSignatureConfig,
   Sucursal,
   TransferenciaBodega,
   TransferenciaBodegaDet,
@@ -18,6 +19,7 @@ import { GuiaRemisionElectronicaService } from './guia-remision-electronica.serv
     ConfigModule,
     TypeOrmModule.forFeature([
       SriEmissionConfig,
+      SriSignatureConfig,
       GuiaRemisionElectronica,
       TransferenciaBodega,
       TransferenciaBodegaDet,
