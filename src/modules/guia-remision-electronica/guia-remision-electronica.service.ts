@@ -850,7 +850,7 @@ export class GuiaRemisionElectronicaService {
         signatureValueId: `SignatureValue${Math.floor(Math.random() * 1000000)}`,
       };
       const signingTime = new Date().toISOString();
-      const { stdout, stderr } = await execFileAsync('python3', [
+      const { stdout, stderr } = await execFileAsync(this.getPythonBin(), [
         helperPath,
         'sign',
         '--p12-path',
@@ -899,8 +899,7 @@ export class GuiaRemisionElectronicaService {
     const p12Path = join(tmpdir(), `sri-inspect-${workId}.p12`);
     try {
       await fs.writeFile(p12Path, buffer);
-      const { stdout } = await execFileAsync(
-        'python3',
+      const { stdout } = await execFileAsync(this.getPythonBin(),
         [helperPath, 'inspect', '--p12-path', p12Path, '--password', password],
         { encoding: 'utf8', maxBuffer: 1024 * 1024 },
       );
@@ -1167,6 +1166,15 @@ export class GuiaRemisionElectronicaService {
     const dv = this.mod11(base);
     return `${base}${dv}`;
   }
+  
+
+  private getPythonBin() {
+  return (
+    this.configService.get<string>('SRI_PYTHON_BIN') ||
+    'python3'
+  );
+}
+
 
   private mod11(base: string) {
     let factor = 2;
