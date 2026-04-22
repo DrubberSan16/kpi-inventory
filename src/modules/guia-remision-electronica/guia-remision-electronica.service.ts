@@ -801,7 +801,11 @@ export class GuiaRemisionElectronicaService {
         } as any,
       });
 
-      if (existingGuide && !dto.forzar_regeneracion) {
+      const shouldRegenerateExistingGuide = Boolean(
+        existingGuide && dto.forzar_regeneracion !== false,
+      );
+
+      if (existingGuide && !shouldRegenerateExistingGuide) {
         throw new BadRequestException(
           'La transferencia ya tiene una guía de remisión generada. Usa forzar_regeneracion si deseas regenerarla.',
         );
@@ -1496,7 +1500,10 @@ export class GuiaRemisionElectronicaService {
           : '';
         return [
           '<detalle>',
-          appendIf('codigoInterno', detail.codigo_producto || null),
+          appendIf(
+            'codigoInterno',
+            this.normalizeSriInternalCode(detail.codigo_producto),
+          ),
           `<descripcion>${this.escapeXml(detail.nombre_producto || 'ITEM TRANSFERENCIA')}</descripcion>`,
           `<cantidad>${this.toNumericText(detail.cantidad, 6)}</cantidad>`,
           detAdicionales,
@@ -2140,6 +2147,10 @@ export class GuiaRemisionElectronicaService {
       );
     }
     return digits;
+  }
+
+  private normalizeSriInternalCode(value?: string | null) {
+    return this.cleanOptionalText(value, 25);
   }
 
   private resolveUser(value?: string | null) {
