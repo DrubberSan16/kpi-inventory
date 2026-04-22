@@ -474,7 +474,9 @@ export class GuiaRemisionElectronicaService {
       estab: this.onlyDigits(dto.estab, 3),
       pto_emi: this.onlyDigits(dto.pto_emi, 3),
       codigo_numerico: config?.codigo_numerico || this.generateConfigNumericSeed(dto),
-      contribuyente_especial: this.cleanOptionalText(dto.contribuyente_especial, 13),
+      contribuyente_especial: this.normalizeSpecialTaxpayerResolution(
+        dto.contribuyente_especial,
+      ),
       obligado_contabilidad: this.normalizeYesNo(dto.obligado_contabilidad),
       dir_partida_default: this.cleanOptionalText(dto.dir_partida_default, 300),
       razon_social_transportista_default: this.cleanOptionalText(dto.razon_social_transportista_default, 300),
@@ -1534,7 +1536,10 @@ export class GuiaRemisionElectronicaService {
       `<tipoIdentificacionTransportista>${this.escapeXml(model.tipo_identificacion_transportista)}</tipoIdentificacionTransportista>`,
       `<rucTransportista>${this.escapeXml(model.identificacion_transportista)}</rucTransportista>`,
       appendIf('obligadoContabilidad', this.normalizeYesNo(config.obligado_contabilidad)),
-      appendIf('contribuyenteEspecial', config.contribuyente_especial || null),
+      appendIf(
+        'contribuyenteEspecial',
+        this.normalizeSpecialTaxpayerResolution(config.contribuyente_especial),
+      ),
       `<fechaIniTransporte>${formatDate(model.fecha_ini_transporte)}</fechaIniTransporte>`,
       `<fechaFinTransporte>${formatDate(model.fecha_fin_transporte)}</fechaFinTransporte>`,
       `<placa>${this.escapeXml(model.placa)}</placa>`,
@@ -2118,6 +2123,23 @@ export class GuiaRemisionElectronicaService {
   private normalizeYesNo(value?: string | null) {
     if (!value) return null;
     return String(value).trim().toUpperCase() === 'SI' ? 'SI' : 'NO';
+  }
+
+  private normalizeSpecialTaxpayerResolution(value?: string | null) {
+    const text = String(value || '').trim().toUpperCase();
+    if (!text || text === 'NO' || text === 'SI') {
+      return null;
+    }
+    const digits = this.extractDigits(text);
+    if (!digits) {
+      return null;
+    }
+    if (digits.length < 3 || digits.length > 5) {
+      throw new BadRequestException(
+        'La resolución de contribuyente especial debe ser numérica y tener entre 3 y 5 dígitos.',
+      );
+    }
+    return digits;
   }
 
   private resolveUser(value?: string | null) {
