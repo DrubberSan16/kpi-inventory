@@ -700,8 +700,8 @@ export class GuiaRemisionElectronicaService {
         razon_social_destinatario:
           existingGuide?.razon_social_destinatario || context.config.razon_social,
         dir_destinatario:
-          existingGuide?.dir_destinatario ||
           context.destinationWarehouse.direccion ||
+          existingGuide?.dir_destinatario ||
           context.config.dir_establecimiento ||
           '',
         motivo_traslado:
@@ -894,9 +894,10 @@ export class GuiaRemisionElectronicaService {
         lockedConfig,
       );
       const resolvedTransportIdentificationType =
-        this.cleanOptionalText(dto.tipo_identificacion_transportista, 2) ||
-        this.resolveIdentificationType(resolvedTransportIdentification) ||
-        '04';
+        this.resolveTransportIdentificationType(
+          this.cleanOptionalText(dto.tipo_identificacion_transportista, 2),
+          resolvedTransportIdentification,
+        ) || '04';
       const autoRoute = `${this.warehouseLabel(context.sourceWarehouse)} -> ${this.warehouseLabel(
         context.destinationWarehouse,
       )}`;
@@ -935,8 +936,11 @@ export class GuiaRemisionElectronicaService {
           'Tipo de identificación del transportista',
         ),
         identificacion_transportista: this.requireGuideText(
-          resolvedTransportIdentification,
-          20,
+          this.validateTransportIdentificationForSri(
+            resolvedTransportIdentification,
+            resolvedTransportIdentificationType,
+          ),
+          13,
           'RUC/Cédula del transportista',
         ),
         placa: this.requireGuideText(dto.placa, 20, 'Placa del vehículo'),
@@ -1784,16 +1788,22 @@ export class GuiaRemisionElectronicaService {
 
   private extractMessages(xml: string) {
     const messages: Array<Record<string, string | null>> = [];
-    const regex = /<mensaje>([\s\S]*?)<\/mensaje>/gi;
+    const regex =
+      /<mensaje>\s*(?:<identificador>([\s\S]*?)<\/identificador>)?\s*(?:<mensaje>([\s\S]*?)<\/mensaje>)?\s*(?:<informacionAdicional>([\s\S]*?)<\/informacionAdicional>)?\s*(?:<tipo>([\s\S]*?)<\/tipo>)?\s*<\/mensaje>/gi;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(xml || ''))) {
-      const node = match[1];
-      messages.push({
-        identificador: this.extractTagValue(node, 'identificador'),
-        mensaje: this.extractTagValue(node, 'mensaje'),
-        informacionAdicional: this.extractTagValue(node, 'informacionAdicional'),
-        tipo: this.extractTagValue(node, 'tipo'),
-      });
+      const identificador = match[1]?.trim() || null;
+      const mensaje = match[2]?.trim() || null;
+      const informacionAdicional = match[3]?.trim() || null;
+      const tipo = match[4]?.trim() || null;
+      if (identificador || mensaje || informacionAdicional || tipo) {
+        messages.push({
+          identificador,
+          mensaje,
+          informacionAdicional,
+          tipo,
+        });
+      }
     }
     return messages;
   }
@@ -2141,6 +2151,64 @@ export class GuiaRemisionElectronicaService {
     if (digits.length === 13) return '04';
     if (digits.length === 10) return '05';
     return null;
+  }
+
+  private isCompatibleIdentificationType(
+    identificationType?: string | null,
+    identification?: string | null,
+  ) {
+    const normalizedType = String(identificationType || '').trim();
+    const digits = this.extractDigits(identification);
+    if (!normalizedType || !digits) return true;
+    if (normalizedType === '04') return digits.length === 13;
+    if (normalizedType === '05') return digits.length === 10;
+    return true;
+  }
+
+  private resolveTransportIdentificationType(
+    providedType?: string | null,
+    identification?: string | null,
+  ) {
+    const normalizedProvidedType = this.cleanOptionalText(providedType, 2);
+    const inferredType = this.resolveIdentificationType(identification);
+    if (
+      normalizedProvidedType &&
+      this.isCompatibleIdentificationType(
+        normalizedProvidedType,
+        identification,
+      )
+    ) {
+      return normalizedProvidedType;
+    }
+    return inferredType || normalizedProvidedType || null;
+  }
+
+  private validateTransportIdentificationForSri(
+    identification: string | null,
+    identificationType: string,
+  ) {
+    const text = String(identification || '').trim();
+    const digits = this.extractDigits(text);
+
+    if (identificationType === '04' && digits.length !== 13) {
+      throw new BadRequestException(
+        'El tipo de identificaciÃ³n del transportista es RUC (04), por lo que debe tener 13 dÃ­gitos segÃºn la ficha tÃ©cnica del SRI.',
+      );
+    }
+
+    if (identificationType === '05' && digits.length !== 10) {
+      throw new BadRequestException(
+        'El tipo de identificaciÃ³n del transportista es CÃ©dula (05), por lo que debe tener 10 dÃ­gitos segÃºn la ficha tÃ©cnica del SRI.',
+      );
+    }
+
+    if (text.length > 13) {
+      throw new BadRequestException(
+        'La identificaciÃ³n del transportista supera la longitud mÃ¡xima permitida por el SRI para la guÃ­a de remisiÃ³n.',
+      );
+    }
+
+    return text;
   }
 
   private resolveGuideTransportIdentification(
