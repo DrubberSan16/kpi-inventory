@@ -18,10 +18,12 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import {
   Bodega,
   GuiaRemisionElectronica,
+  OrdenCompra,
   Producto,
   SriEmissionConfig,
   SriSignatureConfig,
   Sucursal,
+  Tercero,
   TransferenciaBodega,
   TransferenciaBodegaDet,
 } from '../entities';
@@ -34,6 +36,28 @@ import { SRI_XADES_PYTHON_HELPER } from './python-helper.source';
 const execFileAsync = promisify(execFile);
 const SRI_TAXPAYER_LOOKUP_URL =
   'https://srienlinea.sri.gob.ec/sri-catastro-sujeto-servicio-internet/rest/ConsolidadoContribuyente/obtenerPorNumerosRuc';
+const SRI_ESTABLISHMENT_LOOKUP_URL =
+  'https://srienlinea.sri.gob.ec/sri-catastro-sujeto-servicio-internet/rest/Establecimiento/consultarPorNumeroRuc';
+
+type SriEstablishmentRecord = {
+  numero_establecimiento: string | null;
+  tipo_establecimiento: string | null;
+  nombre_fantasia_comercial: string | null;
+  direccion_completa: string | null;
+  estado: string | null;
+  matriz: string | null;
+  raw: Record<string, unknown>;
+};
+
+type GuideSupplierContext = {
+  id?: string | null;
+  identificacion?: string | null;
+  razon_social?: string | null;
+  nombre_comercial?: string | null;
+  direccion?: string | null;
+  establecimientos?: SriEstablishmentRecord[];
+  origen?: string | null;
+};
 
 type PreparedGuideContext = {
   transfer: TransferenciaBodega;
@@ -43,6 +67,8 @@ type PreparedGuideContext = {
   config: SriEmissionConfig;
   signature: SignatureCarrier | null;
   details: TransferenciaBodegaDet[];
+  purchaseOrder: OrdenCompra | null;
+  supplier: GuideSupplierContext | null;
 };
 
 type SignatureCarrier = {
@@ -79,6 +105,10 @@ export class GuiaRemisionElectronicaService {
     private readonly sucursalRepo: Repository<Sucursal>,
     @InjectRepository(Producto)
     private readonly productoRepo: Repository<Producto>,
+    @InjectRepository(OrdenCompra)
+    private readonly orderRepo: Repository<OrdenCompra>,
+    @InjectRepository(Tercero)
+    private readonly terceroRepo: Repository<Tercero>,
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
@@ -120,6 +150,216 @@ export class GuiaRemisionElectronicaService {
   }
 
   async lookupTaxpayerByRuc(ruc: string) {
+    const normalizedRuc = this.onlyDigits(ruc, 13);
+    const raw = await this.fetchSriTaxpayerRaw(normalizedRuc);
+    const establishments = await this.lookupEstablishmentsByRuc(
+      normalizedRuc,
+      false,
+    );
+    const primaryEstablishment = this.pickPreferredEstablishment(establishments);
+    const matrixEstablishment =
+      establishments.find((item) => item.matriz === 'SI') || null;
+
+    return {
+      ruc: this.onlyDigits(raw.numeroRuc, 13),
+      razon_social: this.cleanText(
+        raw.razonSocial || raw.nombreComercial || raw.numeroRuc,
+        300,
+      ),
+      nombre_comercial: this.cleanOptionalText(
+        raw.nombreComercial ||
+          primaryEstablishment?.nombre_fantasia_comercial ||
+          raw.razonSocial,
+        300,
+      ),
+      estado_contribuyente: this.cleanOptionalText(
+        raw.estadoContribuyenteRuc,
+        60,
+      ),
+      actividad_economica_principal: this.cleanOptionalText(
+        raw.actividadEconomicaPrincipal,
+        300,
+      ),
+      tipo_contribuyente: this.cleanOptionalText(raw.tipoContribuyente, 80),
+      regimen: this.cleanOptionalText(raw.regimen, 80),
+      categoria: this.cleanOptionalText(raw.categoria, 80),
+      obligado_contabilidad: this.normalizeYesNo(
+        raw.obligadoLlevarContabilidad,
+      ),
+      contribuyente_especial:
+        String(raw.contribuyenteEspecial || '').trim().toUpperCase() === 'NO'
+          ? null
+          : this.cleanOptionalText(raw.contribuyenteEspecial, 13),
+      agente_retencion: this.normalizeYesNo(raw.agenteRetencion),
+      informacion_fechas: raw.informacionFechasContribuyente || null,
+      dir_matriz:
+        matrixEstablishment?.direccion_completa ||
+        primaryEstablishment?.direccion_completa ||
+        null,
+      dir_establecimiento:
+        primaryEstablishment?.direccion_completa ||
+        matrixEstablishment?.direccion_completa ||
+        null,
+      estab:
+        primaryEstablishment?.numero_establecimiento ||
+        matrixEstablishment?.numero_establecimiento ||
+        null,
+      establecimientos: establishments,
+      establecimiento_principal: primaryEstablishment,
+      establecimiento_matriz: matrixEstablishment,
+      raw: {
+        contribuyente: raw,
+        establecimientos: establishments.map((item) => item.raw),
+      },
+    };
+  }
+
+  async lookupEstablishmentsByRuc(ruc: string, throwWhenEmpty = true) {
+    const normalizedRuc = this.onlyDigits(ruc, 13);
+    try {
+      const url = `${SRI_ESTABLISHMENT_LOOKUP_URL}?numeroRuc=${encodeURIComponent(
+        normalizedRuc,
+      )}`;
+      const payload = await this.fetchSriJson(
+        url,
+        `No se pudo consultar los establecimientos del SRI para el RUC ${normalizedRuc}.`,
+      );
+      const rows = Array.isArray(payload) ? payload : [];
+      const establishments = rows
+        .map((item) => this.normalizeSriEstablishment(item))
+        .filter(
+          (item): item is SriEstablishmentRecord =>
+            Boolean(item?.numero_establecimiento || item?.direccion_completa),
+        );
+
+      if (!establishments.length && throwWhenEmpty) {
+        throw new NotFoundException(
+          'No se encontraron establecimientos para el RUC indicado.',
+        );
+      }
+
+      return establishments;
+    } catch (error: any) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
+        if (!throwWhenEmpty && error instanceof NotFoundException) {
+          return [];
+        }
+        throw error;
+      }
+
+      const message =
+        error?.message ||
+        'No se pudo consultar los establecimientos del SRI.';
+      this.logger.warn(
+        `Error consultando establecimientos SRI (${normalizedRuc}): ${message}`,
+      );
+      if (throwWhenEmpty) {
+        throw new BadRequestException(message);
+      }
+      return [];
+    }
+  }
+
+  private async fetchSriTaxpayerRaw(ruc: string) {
+    const payload = await this.fetchSriJson(
+      `${SRI_TAXPAYER_LOOKUP_URL}?&ruc=${encodeURIComponent(ruc)}`,
+      `No se pudo consultar el SRI para el RUC ${ruc}.`,
+    );
+    const raw = Array.isArray(payload) ? payload[0] : payload;
+    if (!raw || !String(raw.numeroRuc || '').trim()) {
+      throw new NotFoundException(
+        'No se encontraron datos del contribuyente para el RUC indicado.',
+      );
+    }
+    return raw as Record<string, any>;
+  }
+
+  private async fetchSriJson(url: string, errorPrefix: string) {
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new BadRequestException(`${errorPrefix} HTTP ${response.status}.`);
+      }
+      return await response.json();
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        throw new BadRequestException(
+          'La consulta al SRI tardó demasiado. Intenta nuevamente.',
+        );
+      }
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
+        throw error;
+      }
+      throw new BadRequestException(error?.message || errorPrefix);
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+  }
+
+  private normalizeSriEstablishment(
+    payload: Record<string, unknown>,
+  ): SriEstablishmentRecord | null {
+    if (!payload || typeof payload !== 'object') return null;
+    const numeroEstablecimiento =
+      this.cleanOptionalText(
+        payload.numeroEstablecimiento,
+        3,
+      ) || null;
+    const direccionCompleta =
+      this.cleanOptionalText(payload.direccionCompleta, 300) || null;
+    const matriz = this.cleanOptionalText(payload.matriz, 2) || null;
+
+    if (!numeroEstablecimiento && !direccionCompleta) {
+      return null;
+    }
+
+    return {
+      numero_establecimiento: numeroEstablecimiento,
+      tipo_establecimiento:
+        this.cleanOptionalText(payload.tipoEstablecimiento, 30) || null,
+      nombre_fantasia_comercial:
+        this.cleanOptionalText(payload.nombreFantasiaComercial, 300) || null,
+      direccion_completa: direccionCompleta,
+      estado: this.cleanOptionalText(payload.estado, 30) || null,
+      matriz,
+      raw: payload,
+    };
+  }
+
+  private pickPreferredEstablishment(
+    establishments: SriEstablishmentRecord[],
+  ): SriEstablishmentRecord | null {
+    if (!establishments.length) return null;
+    return (
+      establishments.find(
+        (item) =>
+          item.matriz === 'SI' &&
+          String(item.estado || '').trim().toUpperCase() === 'ABIERTO',
+      ) ||
+      establishments.find(
+        (item) =>
+          String(item.estado || '').trim().toUpperCase() === 'ABIERTO',
+      ) ||
+      establishments.find((item) => item.matriz === 'SI') ||
+      establishments[0]
+    );
+  }
+
+  private async lookupTaxpayerByRucLegacy(ruc: string) {
     const normalizedRuc = this.onlyDigits(ruc, 13);
     if (normalizedRuc.length !== 13) {
       throw new BadRequestException('El RUC debe tener 13 digitos.');
@@ -407,6 +647,8 @@ export class GuiaRemisionElectronicaService {
     const existingGuide = await this.guideRepo.findOne({
       where: { transferencia_bodega_id: transferId, is_deleted: false },
     });
+    const fallbackSupplier =
+      context.supplier || this.buildSupplierContextFromGuideDraft(existingGuide);
 
     return {
       transferencia: {
@@ -425,34 +667,60 @@ export class GuiaRemisionElectronicaService {
         codigo: context.sucursal.codigo,
         nombre: context.sucursal.nombre,
       },
+      proveedor: fallbackSupplier,
       config: this.maskConfig(context.config, context.signature),
       draft: {
-        ambiente: context.config.ambiente_default || 'PRUEBAS',
-        fecha_emision: this.formatDateOnly(context.transfer.fecha_transferencia),
-        fecha_ini_transporte: this.formatDateOnly(context.transfer.fecha_transferencia),
-        fecha_fin_transporte: this.formatDateOnly(context.transfer.fecha_transferencia),
+        ambiente:
+          existingGuide?.ambiente || context.config.ambiente_default || 'PRUEBAS',
+        fecha_emision:
+          existingGuide?.fecha_emision ||
+          this.formatDateOnly(context.transfer.fecha_transferencia),
+        fecha_ini_transporte:
+          existingGuide?.fecha_ini_transporte ||
+          this.formatDateOnly(context.transfer.fecha_transferencia),
+        fecha_fin_transporte:
+          existingGuide?.fecha_fin_transporte ||
+          this.formatDateOnly(context.transfer.fecha_transferencia),
         dir_partida:
+          existingGuide?.dir_partida ||
+          fallbackSupplier?.direccion ||
           context.config.dir_partida_default ||
           context.sourceWarehouse.direccion ||
           context.config.dir_establecimiento ||
           context.config.dir_matriz,
         razon_social_transportista:
-          context.config.razon_social_transportista_default ||
-          context.config.razon_social,
+          existingGuide?.razon_social_transportista || '',
         tipo_identificacion_transportista:
-          context.config.tipo_identificacion_transportista_default || '04',
+          existingGuide?.tipo_identificacion_transportista || '04',
         identificacion_transportista:
-          context.config.identificacion_transportista_default || context.config.ruc,
-        placa: context.config.placa_default || '',
-        identificacion_destinatario: context.config.ruc,
-        razon_social_destinatario: context.config.razon_social,
+          existingGuide?.identificacion_transportista || '',
+        placa: existingGuide?.placa || '',
+        identificacion_destinatario:
+          existingGuide?.identificacion_destinatario || context.config.ruc,
+        razon_social_destinatario:
+          existingGuide?.razon_social_destinatario || context.config.razon_social,
         dir_destinatario:
-          context.destinationWarehouse.direccion || context.config.dir_establecimiento || '',
-        motivo_traslado: `Transferencia interna ${context.transfer.codigo}`,
-        cod_estab_destino: context.config.estab,
-        ruta: `${this.warehouseLabel(context.sourceWarehouse)} -> ${this.warehouseLabel(context.destinationWarehouse)}`,
-        info_adicional_email: context.config.info_adicional_email || '',
-        info_adicional_telefono: context.config.info_adicional_telefono || '',
+          existingGuide?.dir_destinatario ||
+          context.destinationWarehouse.direccion ||
+          context.config.dir_establecimiento ||
+          '',
+        motivo_traslado:
+          existingGuide?.motivo_traslado ||
+          (context.purchaseOrder?.codigo
+            ? `Traslado asociado a orden ${context.purchaseOrder.codigo}`
+            : `Transferencia interna ${context.transfer.codigo}`),
+        cod_estab_destino: existingGuide?.cod_estab_destino || context.config.estab,
+        ruta:
+          existingGuide?.ruta ||
+          `${this.warehouseLabel(context.sourceWarehouse)} -> ${this.warehouseLabel(context.destinationWarehouse)}`,
+        info_adicional_email:
+          String((existingGuide?.info_adicional as Record<string, unknown> | null)?.["E-MAIL"] || "") ||
+          context.config.info_adicional_email ||
+          '',
+        info_adicional_telefono:
+          String((existingGuide?.info_adicional as Record<string, unknown> | null)?.TELEFONO || "") ||
+          context.config.info_adicional_telefono ||
+          '',
       },
       guia_existente: existingGuide
         ? {
@@ -611,7 +879,14 @@ export class GuiaRemisionElectronicaService {
       const numeroGuia = `${lockedConfig.estab}-${lockedConfig.pto_emi}-${secuencial}`;
 
       const enrichedDetails = await this.enrichTransferDetails(context.details);
-      const infoAdicional = this.buildInfoAdicional(dto, lockedConfig, context);
+      const effectiveSupplier =
+        context.supplier || this.buildSupplierContextFromDto(dto);
+      const infoAdicional = this.buildInfoAdicional(
+        dto,
+        lockedConfig,
+        context,
+        effectiveSupplier,
+      );
 
       const model = {
         ambiente,
@@ -830,14 +1105,20 @@ export class GuiaRemisionElectronicaService {
         'La guía de remisión solo puede generarse cuando la transferencia esté aprobada, completada o finalizada.',
       );
     }
-    const [sourceWarehouse, destinationWarehouse, details] = await Promise.all([
+    const [sourceWarehouse, destinationWarehouse, details, purchaseOrder] =
+      await Promise.all([
       repo.findOne(Bodega, { where: { id: transfer.bodega_origen_id, is_deleted: false } }),
       repo.findOne(Bodega, { where: { id: transfer.bodega_destino_id, is_deleted: false } }),
       repo.find(TransferenciaBodegaDet, {
         where: { transferencia_bodega_id: transferId, is_deleted: false },
         order: { created_at: 'ASC' },
       }),
-    ]);
+        transfer.orden_compra_id
+          ? repo.findOne(OrdenCompra, {
+              where: { id: transfer.orden_compra_id, is_deleted: false },
+            })
+          : Promise.resolve(null),
+      ]);
     if (!sourceWarehouse || !destinationWarehouse) {
       throw new BadRequestException('No se pudo resolver la bodega origen o destino de la transferencia.');
     }
@@ -898,6 +1179,7 @@ export class GuiaRemisionElectronicaService {
       );
     }
     const signature = await this.loadGlobalSignature(manager);
+    const supplier = await this.resolveSupplierContext(repo, purchaseOrder);
     return {
       transfer,
       sourceWarehouse,
@@ -906,6 +1188,144 @@ export class GuiaRemisionElectronicaService {
       config,
       signature,
       details,
+      purchaseOrder,
+      supplier,
+    };
+  }
+
+  private async resolveSupplierContext(
+    repo: EntityManager,
+    purchaseOrder: OrdenCompra | null,
+  ): Promise<GuideSupplierContext | null> {
+    if (!purchaseOrder) return null;
+
+    const supplier = purchaseOrder.proveedor_id
+      ? await repo.findOne(Tercero, {
+          where: { id: purchaseOrder.proveedor_id, is_deleted: false },
+        })
+      : null;
+
+    const baseIdentification = this.extractDigits(
+      supplier?.identificacion || purchaseOrder.proveedor_identificacion,
+    );
+    const baseName =
+      this.cleanOptionalText(
+        supplier?.razon_social || purchaseOrder.proveedor_nombre,
+        300,
+      ) || null;
+    const baseCommercialName =
+      this.cleanOptionalText(supplier?.nombre_comercial, 300) || null;
+    const baseAddress =
+      this.cleanOptionalText(supplier?.direccion, 300) || null;
+
+    const localContext: GuideSupplierContext = {
+      id: supplier?.id || purchaseOrder.proveedor_id || null,
+      identificacion: baseIdentification || null,
+      razon_social: baseName,
+      nombre_comercial: baseCommercialName,
+      direccion: baseAddress,
+      origen: supplier ? 'ORDEN_COMPRA' : 'ORDEN_COMPRA_LOCAL',
+      establecimientos: [],
+    };
+
+    if (baseIdentification.length !== 13) {
+      return localContext.razon_social || localContext.identificacion
+        ? localContext
+        : null;
+    }
+
+    try {
+      const sriCatalog = await this.lookupTaxpayerByRuc(baseIdentification);
+      return {
+        ...localContext,
+        identificacion: sriCatalog.ruc || localContext.identificacion || null,
+        razon_social: sriCatalog.razon_social || localContext.razon_social || null,
+        nombre_comercial:
+          sriCatalog.nombre_comercial || localContext.nombre_comercial || null,
+        direccion:
+          sriCatalog.dir_matriz ||
+          sriCatalog.dir_establecimiento ||
+          localContext.direccion ||
+          null,
+        establecimientos: Array.isArray(sriCatalog.establecimientos)
+          ? sriCatalog.establecimientos
+          : [],
+        origen: 'SRI_ORDEN_COMPRA',
+      };
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo enriquecer el proveedor de la orden ${purchaseOrder.codigo || purchaseOrder.id} con el SRI: ${
+          error?.message || 'sin detalle'
+        }`,
+      );
+      return localContext.razon_social || localContext.identificacion
+        ? localContext
+        : null;
+    }
+  }
+
+  private buildSupplierContextFromDto(dto: GenerateGuideFromTransferDto): GuideSupplierContext | null {
+    const identificacion = this.cleanOptionalText(dto.proveedor_identificacion, 20);
+    const razonSocial = this.cleanOptionalText(dto.proveedor_razon_social, 300);
+    const nombreComercial = this.cleanOptionalText(
+      dto.proveedor_nombre_comercial,
+      300,
+    );
+    const direccion = this.cleanOptionalText(dto.proveedor_direccion, 300);
+
+    if (!identificacion && !razonSocial && !nombreComercial && !direccion) {
+      return null;
+    }
+
+    return {
+      identificacion,
+      razon_social: razonSocial,
+      nombre_comercial: nombreComercial,
+      direccion,
+      origen: 'MANUAL',
+      establecimientos: [],
+    };
+  }
+
+  private buildSupplierContextFromGuideDraft(
+    guide?: GuiaRemisionElectronica | null,
+  ): GuideSupplierContext | null {
+    const additional =
+      (guide?.info_adicional as Record<string, unknown> | null) || null;
+    if (!additional) return null;
+
+    const identificacion = this.cleanOptionalText(
+      String(additional['RUC PROVEEDOR'] || ''),
+      20,
+    );
+    const razonSocial = this.cleanOptionalText(
+      String(additional.PROVEEDOR || ''),
+      300,
+    );
+    const nombreComercial = this.cleanOptionalText(
+      String(additional['NOMBRE COMERCIAL PROVEEDOR'] || ''),
+      300,
+    );
+    const direccion = this.cleanOptionalText(
+      String(additional['DIRECCION PROVEEDOR'] || ''),
+      300,
+    );
+    const origen = this.cleanOptionalText(
+      String(additional['ORIGEN PROVEEDOR'] || ''),
+      120,
+    );
+
+    if (!identificacion && !razonSocial && !nombreComercial && !direccion) {
+      return null;
+    }
+
+    return {
+      identificacion,
+      razon_social: razonSocial,
+      nombre_comercial: nombreComercial,
+      direccion,
+      origen,
+      establecimientos: [],
     };
   }
 
@@ -942,6 +1362,7 @@ export class GuiaRemisionElectronicaService {
     dto: GenerateGuideFromTransferDto,
     config: SriEmissionConfig,
     context: PreparedGuideContext,
+    supplier: GuideSupplierContext | null,
   ) {
     const pairs: Record<string, string> = {};
     const telefono = this.cleanOptionalText(
@@ -955,6 +1376,30 @@ export class GuiaRemisionElectronicaService {
     if (telefono) pairs.TELEFONO = telefono;
     if (email) pairs['E-MAIL'] = email;
     pairs.TRANSFERENCIA = this.cleanText(context.transfer.codigo, 300);
+    if (context.purchaseOrder?.codigo) {
+      pairs['ORDEN COMPRA'] = this.cleanText(context.purchaseOrder.codigo, 300);
+    }
+    if (supplier?.razon_social) {
+      pairs.PROVEEDOR = this.cleanText(supplier.razon_social, 300);
+    }
+    if (supplier?.identificacion) {
+      pairs['RUC PROVEEDOR'] = this.cleanText(
+        supplier.identificacion,
+        20,
+      );
+    }
+    if (supplier?.nombre_comercial) {
+      pairs['NOMBRE COMERCIAL PROVEEDOR'] = this.cleanText(
+        supplier.nombre_comercial,
+        300,
+      );
+    }
+    if (supplier?.direccion) {
+      pairs['DIRECCION PROVEEDOR'] = this.cleanText(supplier.direccion, 300);
+    }
+    if (supplier?.origen) {
+      pairs['ORIGEN PROVEEDOR'] = this.cleanText(supplier.origen, 120);
+    }
     pairs['BODEGA ORIGEN'] = this.cleanText(this.warehouseLabel(context.sourceWarehouse), 300);
     pairs['BODEGA DESTINO'] = this.cleanText(this.warehouseLabel(context.destinationWarehouse), 300);
     if (dto.info_adicional_extra_nombre && dto.info_adicional_extra_valor) {
@@ -1321,6 +1766,7 @@ export class GuiaRemisionElectronicaService {
       fecha_fin_transporte: guide.fecha_fin_transporte,
       dir_partida: guide.dir_partida,
       razon_social_transportista: guide.razon_social_transportista,
+      tipo_identificacion_transportista: guide.tipo_identificacion_transportista,
       identificacion_transportista: guide.identificacion_transportista,
       placa: guide.placa,
       identificacion_destinatario: guide.identificacion_destinatario,
@@ -1611,8 +2057,12 @@ export class GuiaRemisionElectronicaService {
     return text || 'system';
   }
 
+  private extractDigits(value: unknown) {
+    return String(value || '').replace(/\D/g, '');
+  }
+
   private onlyDigits(value: string, length: number) {
-    const digits = String(value || '').replace(/\D/g, '');
+    const digits = this.extractDigits(value);
     if (digits.length !== length) {
       throw new BadRequestException(`El valor ${value} debe contener exactamente ${length} dígitos.`);
     }

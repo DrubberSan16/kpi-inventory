@@ -4,10 +4,12 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   Bodega,
   GuiaRemisionElectronica,
+  OrdenCompra,
   Producto,
   SriEmissionConfig,
   SriSignatureConfig,
   Sucursal,
+  Tercero,
   TransferenciaBodega,
   TransferenciaBodegaDet,
 } from '../entities';
@@ -26,6 +28,8 @@ import { GuiaRemisionElectronicaService } from './guia-remision-electronica.serv
       Bodega,
       Sucursal,
       Producto,
+      OrdenCompra,
+      Tercero,
     ]),
   ],
   controllers: [GuiaRemisionElectronicaController],

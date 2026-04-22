@@ -67,6 +67,23 @@ export class GuiaRemisionElectronicaController {
     };
   }
 
+  @Get('catalogo-establecimientos')
+  @ApiOperation({
+    summary: 'Consultar establecimientos del contribuyente en el catastro SRI por RUC',
+  })
+  @ApiQuery({
+    name: 'ruc',
+    required: true,
+    type: String,
+    example: '0953449246001',
+  })
+  async lookupEstablishments(@Query('ruc') ruc: string) {
+    return {
+      message: 'Establecimientos obtenidos correctamente.',
+      data: await this.service.lookupEstablishmentsByRuc(ruc),
+    };
+  }
+
   @Post('config')
   @ApiOperation({ summary: 'Crear o actualizar configuracion SRI por sucursal' })
   @ApiBody({ type: UpsertSriEmissionConfigDto })

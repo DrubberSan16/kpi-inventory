@@ -233,6 +233,30 @@ export class GenerateGuideFromTransferDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(20)
+  proveedor_identificacion?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  proveedor_razon_social?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  proveedor_nombre_comercial?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  proveedor_direccion?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
   @Length(2, 2)
   cod_doc_sustento?: string;
 
