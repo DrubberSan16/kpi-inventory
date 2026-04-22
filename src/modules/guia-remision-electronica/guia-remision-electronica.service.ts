@@ -38,6 +38,7 @@ const SRI_TAXPAYER_LOOKUP_URL =
   'https://srienlinea.sri.gob.ec/sri-catastro-sujeto-servicio-internet/rest/ConsolidadoContribuyente/obtenerPorNumerosRuc';
 const SRI_ESTABLISHMENT_LOOKUP_URL =
   'https://srienlinea.sri.gob.ec/sri-catastro-sujeto-servicio-internet/rest/Establecimiento/consultarPorNumeroRuc';
+const APP_TIME_ZONE = 'America/Guayaquil';
 
 type SriEstablishmentRecord = {
   numero_establecimiento: string | null;
@@ -651,6 +652,10 @@ export class GuiaRemisionElectronicaService {
     });
     const fallbackSupplier =
       context.supplier || this.buildSupplierContextFromGuideDraft(existingGuide);
+    const refreshGuideDates = Boolean(existingGuide);
+    const defaultGuideDate = refreshGuideDates
+      ? this.currentDateOnly()
+      : this.formatDateOnly(context.transfer.fecha_transferencia);
 
     return {
       transferencia: {
@@ -674,15 +679,9 @@ export class GuiaRemisionElectronicaService {
       draft: {
         ambiente:
           existingGuide?.ambiente || context.config.ambiente_default || 'PRUEBAS',
-        fecha_emision:
-          existingGuide?.fecha_emision ||
-          this.formatDateOnly(context.transfer.fecha_transferencia),
-        fecha_ini_transporte:
-          existingGuide?.fecha_ini_transporte ||
-          this.formatDateOnly(context.transfer.fecha_transferencia),
-        fecha_fin_transporte:
-          existingGuide?.fecha_fin_transporte ||
-          this.formatDateOnly(context.transfer.fecha_transferencia),
+        fecha_emision: defaultGuideDate,
+        fecha_ini_transporte: defaultGuideDate,
+        fecha_fin_transporte: defaultGuideDate,
         dir_partida:
           existingGuide?.dir_partida ||
           fallbackSupplier?.direccion ||
@@ -860,11 +859,27 @@ export class GuiaRemisionElectronicaService {
       const globalSignature = await this.loadGlobalSignature(manager);
       this.ensureCertificatePresent(globalSignature);
 
+      const defaultGuideDate = shouldRegenerateExistingGuide
+        ? this.currentDateOnly()
+        : this.formatDateOnly(context.transfer.fecha_transferencia);
+      const normalizedFechaEmision = this.formatDateOnly(
+        dto.fecha_emision || defaultGuideDate,
+      );
+      const normalizedFechaIniTransporte = this.formatDateOnly(
+        dto.fecha_ini_transporte || normalizedFechaEmision,
+      );
+      const normalizedFechaFinTransporte = this.formatDateOnly(
+        dto.fecha_fin_transporte || normalizedFechaIniTransporte,
+      );
+      const normalizedFechaEmisionDocSustento = dto.fecha_emision_doc_sustento
+        ? this.formatDateOnly(dto.fecha_emision_doc_sustento)
+        : null;
+
       const nextSecuencial = Number(lockedConfig.ultimo_secuencial || 0) + 1;
       const secuencial = String(nextSecuencial).padStart(9, '0');
       const ambiente = this.normalizeEnvironment(dto.ambiente || lockedConfig.ambiente_default || 'PRUEBAS');
       const claveAcceso = this.generateAccessKey({
-        fechaEmision: dto.fecha_emision || this.formatDateOnly(context.transfer.fecha_transferencia),
+        fechaEmision: normalizedFechaEmision,
         codDoc: '06',
         ruc: lockedConfig.ruc,
         ambiente,
@@ -876,9 +891,7 @@ export class GuiaRemisionElectronicaService {
           secuencial,
           ruc: lockedConfig.ruc,
           ambiente,
-          fechaEmision:
-            dto.fecha_emision ||
-            this.formatDateOnly(context.transfer.fecha_transferencia),
+          fechaEmision: normalizedFechaEmision,
         }),
         tipoEmision: '1',
       });
@@ -918,9 +931,9 @@ export class GuiaRemisionElectronicaService {
         secuencial,
         numero_guia: numeroGuia,
         clave_acceso: claveAcceso,
-        fecha_emision: dto.fecha_emision || this.formatDateOnly(context.transfer.fecha_transferencia),
-        fecha_ini_transporte: dto.fecha_ini_transporte,
-        fecha_fin_transporte: dto.fecha_fin_transporte,
+        fecha_emision: normalizedFechaEmision,
+        fecha_ini_transporte: normalizedFechaIniTransporte,
+        fecha_fin_transporte: normalizedFechaFinTransporte,
         dir_partida: this.requireGuideText(
           dto.dir_partida ||
             effectiveSupplier?.direccion ||
@@ -980,7 +993,7 @@ export class GuiaRemisionElectronicaService {
         cod_doc_sustento: this.cleanOptionalText(dto.cod_doc_sustento, 2),
         num_doc_sustento: this.cleanOptionalText(dto.num_doc_sustento, 17),
         num_aut_doc_sustento: this.cleanOptionalText(dto.num_aut_doc_sustento, 49),
-        fecha_emision_doc_sustento: dto.fecha_emision_doc_sustento || null,
+        fecha_emision_doc_sustento: normalizedFechaEmisionDocSustento,
         detalle_snapshot: enrichedDetails,
         info_adicional: infoAdicional,
       };
@@ -1487,7 +1500,7 @@ export class GuiaRemisionElectronicaService {
     infoAdicional: Record<string, string>,
   ) {
     const ambienteCode = model.ambiente === 'PRODUCCION' ? '2' : '1';
-    const formatDate = (value: string) => this.toSriDate(value);
+    const formatDate = (value: string) => this.toSriCalendarDate(value);
     const appendIf = (tag: string, value?: string | null) =>
       value ? `<${tag}>${this.escapeXml(value)}</${tag}>` : '';
 
@@ -1841,9 +1854,9 @@ export class GuiaRemisionElectronicaService {
       sri_estado: guide.sri_estado,
       numero_autorizacion: guide.numero_autorizacion,
       fecha_autorizacion: guide.fecha_autorizacion,
-      fecha_emision: guide.fecha_emision,
-      fecha_ini_transporte: guide.fecha_ini_transporte,
-      fecha_fin_transporte: guide.fecha_fin_transporte,
+      fecha_emision: this.formatDateOnly(guide.fecha_emision),
+      fecha_ini_transporte: this.formatDateOnly(guide.fecha_ini_transporte),
+      fecha_fin_transporte: this.formatDateOnly(guide.fecha_fin_transporte),
       dir_partida: guide.dir_partida,
       razon_social_transportista: guide.razon_social_transportista,
       tipo_identificacion_transportista: guide.tipo_identificacion_transportista,
@@ -2049,7 +2062,7 @@ export class GuiaRemisionElectronicaService {
     codigoNumerico: string;
     tipoEmision: string;
   }) {
-    const fecha = this.toSriDate(params.fechaEmision).replace(/\//g, '');
+    const fecha = this.toSriCalendarDate(params.fechaEmision).replace(/\//g, '');
     const ambienteCode = this.normalizeEnvironment(params.ambiente) === 'PRODUCCION' ? '2' : '1';
     const base = [
       fecha,
@@ -2086,6 +2099,42 @@ export class GuiaRemisionElectronicaService {
     if (mod === 11) return '0';
     if (mod === 10) return '1';
     return String(mod);
+  }
+
+  private extractCalendarDateParts(value: Date | string | null | undefined) {
+    const dateOnlyMatch =
+      typeof value === 'string'
+        ? /^\s*(\d{4})-(\d{2})-(\d{2})/.exec(value)
+        : null;
+
+    if (dateOnlyMatch) {
+      return {
+        year: dateOnlyMatch[1],
+        month: dateOnlyMatch[2],
+        day: dateOnlyMatch[3],
+      };
+    }
+
+    const parsed = value instanceof Date ? value : value ? new Date(value) : new Date();
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(`Fecha invÃ¡lida para guÃ­a de remisiÃ³n: ${value}`);
+    }
+
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: APP_TIME_ZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(parsed);
+
+    const findPart = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((item) => item.type === type)?.value || '';
+
+    return {
+      year: findPart('year'),
+      month: findPart('month'),
+      day: findPart('day'),
+    };
   }
 
   private encryptToText(plainText: string) {
@@ -2325,11 +2374,17 @@ export class GuiaRemisionElectronicaService {
   }
 
   private formatDateOnly(date: Date | string | null | undefined) {
-    const value = date ? new Date(date) : new Date();
-    const year = value.getFullYear();
-    const month = String(value.getMonth() + 1).padStart(2, '0');
-    const day = String(value.getDate()).padStart(2, '0');
+    const { year, month, day } = this.extractCalendarDateParts(date);
     return `${year}-${month}-${day}`;
+  }
+
+  private currentDateOnly() {
+    return this.formatDateOnly(new Date());
+  }
+
+  private toSriCalendarDate(value: Date | string | null | undefined) {
+    const { year, month, day } = this.extractCalendarDateParts(value);
+    return `${day}/${month}/${year}`;
   }
 
   private toSriDate(value: string) {
