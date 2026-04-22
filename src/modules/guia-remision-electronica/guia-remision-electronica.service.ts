@@ -888,6 +888,22 @@ export class GuiaRemisionElectronicaService {
         effectiveSupplier,
       );
 
+      const resolvedTransportIdentification = this.resolveGuideTransportIdentification(
+        dto,
+        effectiveSupplier,
+        lockedConfig,
+      );
+      const resolvedTransportIdentificationType =
+        this.cleanOptionalText(dto.tipo_identificacion_transportista, 2) ||
+        this.resolveIdentificationType(resolvedTransportIdentification) ||
+        '04';
+      const autoRoute = `${this.warehouseLabel(context.sourceWarehouse)} -> ${this.warehouseLabel(
+        context.destinationWarehouse,
+      )}`;
+      const autoMotive = context.purchaseOrder?.codigo
+        ? `Traslado asociado a orden ${context.purchaseOrder.codigo}`
+        : `Transferencia interna ${context.transfer.codigo}`;
+
       const model = {
         ambiente,
         estab: lockedConfig.estab,
@@ -898,17 +914,59 @@ export class GuiaRemisionElectronicaService {
         fecha_emision: dto.fecha_emision || this.formatDateOnly(context.transfer.fecha_transferencia),
         fecha_ini_transporte: dto.fecha_ini_transporte,
         fecha_fin_transporte: dto.fecha_fin_transporte,
-        dir_partida: this.cleanText(dto.dir_partida, 300),
-        razon_social_transportista: this.cleanText(dto.razon_social_transportista, 300),
-        tipo_identificacion_transportista: this.cleanText(dto.tipo_identificacion_transportista, 2),
-        identificacion_transportista: this.cleanText(dto.identificacion_transportista, 20),
-        placa: this.cleanText(dto.placa, 20),
-        identificacion_destinatario: this.cleanText(dto.identificacion_destinatario, 20),
-        razon_social_destinatario: this.cleanText(dto.razon_social_destinatario, 300),
-        dir_destinatario: this.cleanText(dto.dir_destinatario, 300),
-        motivo_traslado: this.cleanText(dto.motivo_traslado, 300),
-        cod_estab_destino: this.cleanOptionalText(dto.cod_estab_destino, 3),
-        ruta: this.cleanOptionalText(dto.ruta, 300),
+        dir_partida: this.requireGuideText(
+          dto.dir_partida ||
+            effectiveSupplier?.direccion ||
+            lockedConfig.dir_partida_default ||
+            context.sourceWarehouse.direccion ||
+            lockedConfig.dir_establecimiento ||
+            lockedConfig.dir_matriz,
+          300,
+          'Dirección de partida',
+        ),
+        razon_social_transportista: this.requireGuideText(
+          dto.razon_social_transportista,
+          300,
+          'Razón social transportista',
+        ),
+        tipo_identificacion_transportista: this.requireGuideText(
+          resolvedTransportIdentificationType,
+          2,
+          'Tipo de identificación del transportista',
+        ),
+        identificacion_transportista: this.requireGuideText(
+          resolvedTransportIdentification,
+          20,
+          'RUC/Cédula del transportista',
+        ),
+        placa: this.requireGuideText(dto.placa, 20, 'Placa del vehículo'),
+        identificacion_destinatario: this.requireGuideText(
+          dto.identificacion_destinatario || lockedConfig.ruc,
+          20,
+          'Identificación del destinatario',
+        ),
+        razon_social_destinatario: this.requireGuideText(
+          dto.razon_social_destinatario || lockedConfig.razon_social,
+          300,
+          'Razón social del destinatario',
+        ),
+        dir_destinatario: this.requireGuideText(
+          dto.dir_destinatario ||
+            context.destinationWarehouse.direccion ||
+            lockedConfig.dir_establecimiento ||
+            lockedConfig.dir_matriz,
+          300,
+          'Dirección del destinatario',
+        ),
+        motivo_traslado: this.requireGuideText(
+          dto.motivo_traslado || autoMotive,
+          300,
+          'Motivo de traslado',
+        ),
+        cod_estab_destino:
+          this.cleanOptionalText(dto.cod_estab_destino, 3) ||
+          this.cleanOptionalText(lockedConfig.estab, 3),
+        ruta: this.cleanOptionalText(dto.ruta, 300) || autoRoute,
         cod_doc_sustento: this.cleanOptionalText(dto.cod_doc_sustento, 2),
         num_doc_sustento: this.cleanOptionalText(dto.num_doc_sustento, 17),
         num_aut_doc_sustento: this.cleanOptionalText(dto.num_aut_doc_sustento, 49),
@@ -2067,6 +2125,80 @@ export class GuiaRemisionElectronicaService {
       throw new BadRequestException(`El valor ${value} debe contener exactamente ${length} dígitos.`);
     }
     return digits;
+  }
+
+  private normalizeComparableText(value: unknown) {
+    return String(value || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+  }
+
+  private resolveIdentificationType(value?: string | null) {
+    const digits = this.extractDigits(value);
+    if (digits.length === 13) return '04';
+    if (digits.length === 10) return '05';
+    return null;
+  }
+
+  private resolveGuideTransportIdentification(
+    dto: GenerateGuideFromTransferDto,
+    supplier: GuideSupplierContext | null,
+    config: SriEmissionConfig,
+  ) {
+    const directValue = this.cleanOptionalText(dto.identificacion_transportista, 20);
+    if (directValue) return directValue;
+
+    const normalizedTransportName = this.normalizeComparableText(
+      dto.razon_social_transportista,
+    );
+    if (!normalizedTransportName) return null;
+
+    const candidatePairs = [
+      {
+        name: dto.razon_social_destinatario,
+        identification: dto.identificacion_destinatario,
+      },
+      {
+        name: supplier?.razon_social,
+        identification: supplier?.identificacion,
+      },
+      {
+        name: supplier?.nombre_comercial,
+        identification: supplier?.identificacion,
+      },
+      {
+        name: config.razon_social,
+        identification: config.ruc,
+      },
+      {
+        name: config.nombre_comercial,
+        identification: config.ruc,
+      },
+    ];
+
+    for (const pair of candidatePairs) {
+      if (
+        this.normalizeComparableText(pair.name) === normalizedTransportName &&
+        this.cleanOptionalText(pair.identification, 20)
+      ) {
+        return this.cleanOptionalText(pair.identification, 20);
+      }
+    }
+
+    return null;
+  }
+
+  private requireGuideText(value: unknown, maxLength: number, label: string) {
+    const text = String(value ?? '').trim();
+    if (!text) {
+      throw new BadRequestException(
+        `El campo "${label}" es obligatorio para la guía de remisión.`,
+      );
+    }
+    return text.slice(0, maxLength);
   }
 
   private cleanText(value: unknown, maxLength: number) {

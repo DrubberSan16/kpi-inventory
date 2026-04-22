@@ -31,6 +31,54 @@ import { GuiaRemisionElectronicaService } from './guia-remision-electronica.serv
 export class GuiaRemisionElectronicaController {
   constructor(private readonly service: GuiaRemisionElectronicaService) {}
 
+  private buildGuideSriMessage(
+    payload:
+      | {
+          estado_emision?: string | null;
+          sri_estado?: string | null;
+        }
+      | null
+      | undefined,
+    action: 'authorize' | 'consult',
+  ) {
+    const emission = String(payload?.estado_emision || '')
+      .trim()
+      .toUpperCase();
+    const sri = String(payload?.sri_estado || '')
+      .trim()
+      .toUpperCase();
+    const status = sri || emission;
+
+    if (status === 'AUTORIZADO' || emission === 'AUTORIZADA') {
+      return action === 'authorize'
+        ? 'Guia autorizada correctamente en el SRI.'
+        : 'La guia se encuentra autorizada en el SRI.';
+    }
+    if (status === 'RECIBIDA' || emission === 'RECIBIDA') {
+      return action === 'authorize'
+        ? 'La guia fue recibida por el SRI y está pendiente de autorización.'
+        : 'La guia fue recibida por el SRI y sigue pendiente de autorización.';
+    }
+    if (status === 'DEVUELTA' || emission === 'DEVUELTA') {
+      return action === 'authorize'
+        ? 'La guia fue devuelta por el SRI. Revisa los mensajes devueltos.'
+        : 'La guia permanece devuelta por el SRI. Revisa los mensajes devueltos.';
+    }
+    if (
+      status === 'NO AUTORIZADO' ||
+      status === 'RECHAZADO' ||
+      emission === 'NO_AUTORIZADA'
+    ) {
+      return action === 'authorize'
+        ? 'La guia no fue autorizada por el SRI. Revisa los mensajes reportados.'
+        : 'La guia no se encuentra autorizada en el SRI. Revisa los mensajes reportados.';
+    }
+
+    return action === 'authorize'
+      ? 'Estado de autorización SRI actualizado correctamente.'
+      : 'Consulta de autorización ejecutada correctamente.';
+  }
+
   @Get('config/sucursal/:sucursalId')
   @ApiOperation({ summary: 'Obtener configuracion SRI por sucursal' })
   async getConfigBySucursal(@Param('sucursalId') sucursalId: string) {
@@ -171,9 +219,10 @@ export class GuiaRemisionElectronicaController {
     @Param('guideId') guideId: string,
     @Body('updated_by') updatedBy?: string,
   ) {
+    const payload = await this.service.consultAuthorization(guideId, updatedBy);
     return {
-      message: 'Consulta de autorizacion ejecutada correctamente.',
-      data: await this.service.consultAuthorization(guideId, updatedBy),
+      message: this.buildGuideSriMessage(payload, 'consult'),
+      data: payload,
     };
   }
 
@@ -186,9 +235,10 @@ export class GuiaRemisionElectronicaController {
     @Param('guideId') guideId: string,
     @Body('updated_by') updatedBy?: string,
   ) {
+    const payload = await this.service.authorizeGuide(guideId, updatedBy);
     return {
-      message: 'Autorizacion SRI ejecutada correctamente.',
-      data: await this.service.authorizeGuide(guideId, updatedBy),
+      message: this.buildGuideSriMessage(payload, 'authorize'),
+      data: payload,
     };
   }
 
