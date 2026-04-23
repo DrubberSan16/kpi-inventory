@@ -14,6 +14,7 @@ import {
   TransferenciaBodegaDet,
 } from '../entities';
 import { GuiaRemisionElectronicaController } from './guia-remision-electronica.controller';
+import { GuiaRemisionElectronicaGateway } from './guia-remision-electronica.gateway';
 import { GuiaRemisionElectronicaService } from './guia-remision-electronica.service';
 
 @Module({
@@ -33,7 +34,7 @@ import { GuiaRemisionElectronicaService } from './guia-remision-electronica.serv
     ]),
   ],
   controllers: [GuiaRemisionElectronicaController],
-  providers: [GuiaRemisionElectronicaService],
+  providers: [GuiaRemisionElectronicaService, GuiaRemisionElectronicaGateway],
   exports: [GuiaRemisionElectronicaService],
 })
 export class GuiaRemisionElectronicaModule {}

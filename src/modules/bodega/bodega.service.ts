@@ -60,6 +60,7 @@ export class BodegaService extends CrudService<Bodega> {
   }
 
   async create(payload: DeepPartial<Bodega>) {
+    this.ensureWarehouseAddress(payload);
     await this.ensureDefaultPurchaseWarehouseAvailability(
       payload?.es_default_compra === true,
     );
@@ -72,6 +73,12 @@ export class BodegaService extends CrudService<Bodega> {
   }
 
   async update(id: string, payload: DeepPartial<Bodega>) {
+    const current = await this.repository.findOne({
+      where: { id, is_deleted: false },
+    });
+    if (current) {
+      this.ensureWarehouseAddress(payload, current);
+    }
     await this.ensureDefaultPurchaseWarehouseAvailability(
       payload?.es_default_compra === true,
       id,
@@ -147,5 +154,27 @@ export class BodegaService extends CrudService<Bodega> {
         label,
       },
     });
+  }
+
+  private ensureWarehouseAddress(
+    payload: DeepPartial<Bodega>,
+    current?: Bodega | null,
+  ) {
+    const nextAddress = this.normalizeWarehouseAddress(
+      payload?.direccion ?? current?.direccion,
+    );
+
+    if (!nextAddress) {
+      throw new BadRequestException(
+        'La dirección de la bodega es obligatoria. Configúrala para usar correctamente traslados y guías de remisión.',
+      );
+    }
+
+    payload.direccion = nextAddress;
+  }
+
+  private normalizeWarehouseAddress(value: unknown) {
+    const text = String(value ?? '').trim();
+    return text || null;
   }
 }

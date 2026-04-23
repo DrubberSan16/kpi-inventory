@@ -5,6 +5,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -31,6 +32,7 @@ import {
   GenerateGuideFromTransferDto,
   UpsertSriEmissionConfigDto,
 } from './guia-remision-electronica.dto';
+import { GuiaRemisionElectronicaGateway } from './guia-remision-electronica.gateway';
 import { SRI_XADES_PYTHON_HELPER } from './python-helper.source';
 
 const execFileAsync = promisify(execFile);
@@ -39,6 +41,8 @@ const SRI_TAXPAYER_LOOKUP_URL =
 const SRI_ESTABLISHMENT_LOOKUP_URL =
   'https://srienlinea.sri.gob.ec/sri-catastro-sujeto-servicio-internet/rest/Establecimiento/consultarPorNumeroRuc';
 const APP_TIME_ZONE = 'America/Guayaquil';
+const GUIDE_STATUS_TRACK_DELAY_MS = 15000;
+const GUIDE_STATUS_TRACK_MAX_ATTEMPTS = 20;
 
 type SriEstablishmentRecord = {
   numero_establecimiento: string | null;
@@ -86,8 +90,12 @@ type SignatureCarrier = {
 };
 
 @Injectable()
-export class GuiaRemisionElectronicaService {
+export class GuiaRemisionElectronicaService implements OnModuleDestroy {
   private readonly logger = new Logger(GuiaRemisionElectronicaService.name);
+  private readonly guideStatusTrackers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
 
   constructor(
     @InjectRepository(SriEmissionConfig)
@@ -110,9 +118,17 @@ export class GuiaRemisionElectronicaService {
     private readonly orderRepo: Repository<OrdenCompra>,
     @InjectRepository(Tercero)
     private readonly terceroRepo: Repository<Tercero>,
+    private readonly guideStatusGateway: GuiaRemisionElectronicaGateway,
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  onModuleDestroy() {
+    for (const timer of this.guideStatusTrackers.values()) {
+      clearTimeout(timer);
+    }
+    this.guideStatusTrackers.clear();
+  }
 
   async getConfigBySucursal(sucursalId: string) {
     const [config, signature] = await Promise.all([
@@ -652,10 +668,25 @@ export class GuiaRemisionElectronicaService {
     });
     const fallbackSupplier =
       context.supplier || this.buildSupplierContextFromGuideDraft(existingGuide);
-    const refreshGuideDates = Boolean(existingGuide);
+    const isAuthorizedExistingGuide = this.isGuideAuthorized(existingGuide);
+    const refreshGuideDates = Boolean(existingGuide) && !isAuthorizedExistingGuide;
     const defaultGuideDate = refreshGuideDates
       ? this.currentDateOnly()
-      : this.formatDateOnly(context.transfer.fecha_transferencia);
+      : this.formatDateOnly(
+          existingGuide?.fecha_emision || context.transfer.fecha_transferencia,
+        );
+    const defaultTransportStartDate = refreshGuideDates
+      ? defaultGuideDate
+      : this.formatDateOnly(
+          existingGuide?.fecha_ini_transporte ||
+            context.transfer.fecha_transferencia,
+        );
+    const defaultTransportEndDate = refreshGuideDates
+      ? defaultGuideDate
+      : this.formatDateOnly(
+          existingGuide?.fecha_fin_transporte ||
+            context.transfer.fecha_transferencia,
+        );
 
     return {
       transferencia: {
@@ -680,13 +711,12 @@ export class GuiaRemisionElectronicaService {
         ambiente:
           existingGuide?.ambiente || context.config.ambiente_default || 'PRUEBAS',
         fecha_emision: defaultGuideDate,
-        fecha_ini_transporte: defaultGuideDate,
-        fecha_fin_transporte: defaultGuideDate,
+        fecha_ini_transporte: defaultTransportStartDate,
+        fecha_fin_transporte: defaultTransportEndDate,
         dir_partida:
-          existingGuide?.dir_partida ||
-          fallbackSupplier?.direccion ||
-          context.config.dir_partida_default ||
           context.sourceWarehouse.direccion ||
+          existingGuide?.dir_partida ||
+          context.config.dir_partida_default ||
           context.config.dir_establecimiento ||
           context.config.dir_matriz,
         razon_social_transportista:
@@ -803,6 +833,12 @@ export class GuiaRemisionElectronicaService {
       const shouldRegenerateExistingGuide = Boolean(
         existingGuide && dto.forzar_regeneracion !== false,
       );
+
+      if (existingGuide && this.isGuideAuthorized(existingGuide)) {
+        throw new BadRequestException(
+          'La guía ya fue autorizada por el SRI. Solo puedes visualizarla o descargar su XML firmado.',
+        );
+      }
 
       if (existingGuide && !shouldRegenerateExistingGuide) {
         throw new BadRequestException(
@@ -935,10 +971,9 @@ export class GuiaRemisionElectronicaService {
         fecha_ini_transporte: normalizedFechaIniTransporte,
         fecha_fin_transporte: normalizedFechaFinTransporte,
         dir_partida: this.requireGuideText(
-          dto.dir_partida ||
-            effectiveSupplier?.direccion ||
+          context.sourceWarehouse.direccion ||
+            dto.dir_partida ||
             lockedConfig.dir_partida_default ||
-            context.sourceWarehouse.direccion ||
             lockedConfig.dir_establecimiento ||
             lockedConfig.dir_matriz,
           300,
@@ -974,8 +1009,8 @@ export class GuiaRemisionElectronicaService {
           'Razón social del destinatario',
         ),
         dir_destinatario: this.requireGuideText(
-          dto.dir_destinatario ||
-            context.destinationWarehouse.direccion ||
+          context.destinationWarehouse.direccion ||
+            dto.dir_destinatario ||
             lockedConfig.dir_establecimiento ||
             lockedConfig.dir_matriz,
           300,
@@ -1042,6 +1077,8 @@ export class GuiaRemisionElectronicaService {
       if (dto.emitir_y_enviar) {
         finalGuide = await this.sendGuideToSri(saved.id, manager, userName);
       }
+      this.emitGuideStatusUpdate(finalGuide, 'generate');
+      this.syncGuideStatusTracking(finalGuide, userName);
       return this.toGuideResponse(finalGuide);
     });
   }
@@ -1060,6 +1097,8 @@ export class GuiaRemisionElectronicaService {
       guide.estado_emision = this.resolveEmissionStatus(result.authorizationState || result.state || 'PENDIENTE');
       guide.updated_by = this.resolveUser(updatedBy);
       const saved = await manager.save(GuiaRemisionElectronica, guide);
+      this.emitGuideStatusUpdate(saved, 'consult');
+      this.syncGuideStatusTracking(saved, updatedBy);
       return this.toGuideResponse(saved);
     });
   }
@@ -1076,6 +1115,7 @@ export class GuiaRemisionElectronicaService {
         normalizedEmission === 'AUTORIZADA' ||
         normalizedSri === 'AUTORIZADO'
       ) {
+        this.clearGuideStatusTracking(guide.id);
         return this.toGuideResponse(guide);
       }
 
@@ -1103,6 +1143,8 @@ export class GuiaRemisionElectronicaService {
         );
         guide.updated_by = this.resolveUser(updatedBy);
         const saved = await manager.save(GuiaRemisionElectronica, guide);
+        this.emitGuideStatusUpdate(saved, 'authorize');
+        this.syncGuideStatusTracking(saved, updatedBy);
         return this.toGuideResponse(saved);
       }
 
@@ -1111,6 +1153,8 @@ export class GuiaRemisionElectronicaService {
         manager,
         this.resolveUser(updatedBy),
       );
+      this.emitGuideStatusUpdate(saved, 'authorize');
+      this.syncGuideStatusTracking(saved, updatedBy);
       return this.toGuideResponse(saved);
     });
   }
@@ -1203,6 +1247,14 @@ export class GuiaRemisionElectronicaService {
     if (!sourceWarehouse || !destinationWarehouse) {
       throw new BadRequestException('No se pudo resolver la bodega origen o destino de la transferencia.');
     }
+    sourceWarehouse.direccion = this.requireWarehouseAddress(
+      sourceWarehouse,
+      'origen',
+    );
+    destinationWarehouse.direccion = this.requireWarehouseAddress(
+      destinationWarehouse,
+      'destino',
+    );
     if (!details.length) {
       throw new BadRequestException('La transferencia no tiene detalles para emitir la guía.');
     }
@@ -1843,6 +1895,154 @@ export class GuiaRemisionElectronicaService {
     return normalized;
   }
 
+  private isGuideAuthorized(
+    guide:
+      | Pick<GuiaRemisionElectronica, 'estado_emision' | 'sri_estado'>
+      | null
+      | undefined,
+  ) {
+    const emission = String(guide?.estado_emision || '')
+      .trim()
+      .toUpperCase();
+    const sri = String(guide?.sri_estado || '')
+      .trim()
+      .toUpperCase();
+    return emission === 'AUTORIZADA' || sri === 'AUTORIZADO';
+  }
+
+  private isGuidePendingAuthorization(
+    guide:
+      | Pick<GuiaRemisionElectronica, 'estado_emision' | 'sri_estado'>
+      | null
+      | undefined,
+  ) {
+    const emission = String(guide?.estado_emision || '')
+      .trim()
+      .toUpperCase();
+    const sri = String(guide?.sri_estado || '')
+      .trim()
+      .toUpperCase();
+    return (
+      emission === 'RECIBIDA' ||
+      sri === 'RECIBIDA' ||
+      emission === 'PENDIENTE' ||
+      sri === 'PENDIENTE'
+    );
+  }
+
+  private clearGuideStatusTracking(guideId?: string | null) {
+    const normalizedGuideId = String(guideId || '').trim();
+    if (!normalizedGuideId) return;
+    const timer = this.guideStatusTrackers.get(normalizedGuideId);
+    if (timer) {
+      clearTimeout(timer);
+      this.guideStatusTrackers.delete(normalizedGuideId);
+    }
+  }
+
+  private syncGuideStatusTracking(
+    guide:
+      | Pick<
+          GuiaRemisionElectronica,
+          'id' | 'estado_emision' | 'sri_estado'
+        >
+      | null
+      | undefined,
+    updatedBy?: string | null,
+  ) {
+    const normalizedGuideId = String(guide?.id || '').trim();
+    if (!normalizedGuideId) return;
+    if (this.isGuideAuthorized(guide) || !this.isGuidePendingAuthorization(guide)) {
+      this.clearGuideStatusTracking(normalizedGuideId);
+      return;
+    }
+    this.scheduleGuideStatusTracking(normalizedGuideId, updatedBy, 1);
+  }
+
+  private scheduleGuideStatusTracking(
+    guideId: string,
+    updatedBy?: string | null,
+    attempt = 1,
+  ) {
+    this.clearGuideStatusTracking(guideId);
+    if (attempt > GUIDE_STATUS_TRACK_MAX_ATTEMPTS) return;
+
+    const timer = setTimeout(() => {
+      void this.runGuideStatusTracking(guideId, updatedBy, attempt);
+    }, GUIDE_STATUS_TRACK_DELAY_MS);
+
+    this.guideStatusTrackers.set(guideId, timer);
+  }
+
+  private async runGuideStatusTracking(
+    guideId: string,
+    updatedBy?: string | null,
+    attempt = 1,
+  ) {
+    this.clearGuideStatusTracking(guideId);
+
+    try {
+      const saved = await this.dataSource.transaction(async (manager) => {
+        const guide = await this.findGuideOrFail(guideId, manager);
+        if (
+          this.isGuideAuthorized(guide) ||
+          !this.isGuidePendingAuthorization(guide)
+        ) {
+          return guide;
+        }
+
+        const result = await this.invokeAuthorizationWs(
+          guide.ambiente,
+          guide.clave_acceso,
+        );
+        guide.sri_authorization_response = result.raw;
+        guide.sri_messages = result.messages;
+        guide.sri_estado = result.authorizationState || result.state || null;
+        guide.numero_autorizacion =
+          result.authorizationNumber || guide.numero_autorizacion || null;
+        guide.fecha_autorizacion = result.authorizationDate
+          ? new Date(result.authorizationDate)
+          : guide.fecha_autorizacion || null;
+        guide.estado_emision = this.resolveEmissionStatus(
+          result.authorizationState || result.state || guide.sri_estado || 'PENDIENTE',
+        );
+        guide.updated_by = this.resolveUser(updatedBy);
+        return manager.save(GuiaRemisionElectronica, guide);
+      });
+
+      this.emitGuideStatusUpdate(saved, 'tracker');
+
+      if (this.isGuideAuthorized(saved) || !this.isGuidePendingAuthorization(saved)) {
+        this.clearGuideStatusTracking(saved.id);
+        return;
+      }
+
+      this.scheduleGuideStatusTracking(saved.id, updatedBy, attempt + 1);
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo consultar automáticamente el estado SRI de la guía ${guideId} (intento ${attempt}/${GUIDE_STATUS_TRACK_MAX_ATTEMPTS}): ${
+          error?.message || error
+        }`,
+      );
+      if (attempt < GUIDE_STATUS_TRACK_MAX_ATTEMPTS) {
+        this.scheduleGuideStatusTracking(guideId, updatedBy, attempt + 1);
+      }
+    }
+  }
+
+  private emitGuideStatusUpdate(
+    guide: GuiaRemisionElectronica,
+    source: 'generate' | 'authorize' | 'consult' | 'tracker',
+  ) {
+    const payload = this.toGuideResponse(guide);
+    this.guideStatusGateway.emitGuideStatusUpdate({
+      guideId: payload.id,
+      transferId: payload.transferencia_bodega_id,
+      source,
+      guide: payload,
+    });
+  }
+
   private toGuideResponse(guide: GuiaRemisionElectronica) {
     return {
       id: guide.id,
@@ -2402,6 +2602,18 @@ export class GuiaRemisionElectronicaService {
     const numberValue = Number(value || 0);
     if (!Number.isFinite(numberValue)) return (0).toFixed(decimals);
     return numberValue.toFixed(decimals);
+  }
+
+  private requireWarehouseAddress(
+    warehouse: Bodega,
+    role: 'origen' | 'destino',
+  ) {
+    const address = this.cleanOptionalText(warehouse?.direccion, 300);
+    if (address) return address;
+
+    throw new BadRequestException(
+      `La bodega ${role} ${this.warehouseLabel(warehouse)} no tiene una dirección configurada. Actualízala en el módulo de bodegas antes de emitir la guía de remisión.`,
+    );
   }
 
   private warehouseLabel(warehouse: Bodega) {
