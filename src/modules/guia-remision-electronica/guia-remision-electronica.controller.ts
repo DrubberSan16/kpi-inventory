@@ -244,11 +244,15 @@ export class GuiaRemisionElectronicaController {
 
   @Get(':guideId/xml')
   @ApiOperation({ summary: 'Descargar XML de la guia generada' })
-  @ApiQuery({ name: 'kind', required: false, enum: ['unsigned', 'signed'] })
+  @ApiQuery({
+    name: 'kind',
+    required: false,
+    enum: ['unsigned', 'signed', 'authorized'],
+  })
   @ApiResponse({ status: 200, description: 'XML generado correctamente.' })
   async downloadXml(
     @Param('guideId') guideId: string,
-    @Query('kind') kind: 'unsigned' | 'signed' = 'signed',
+    @Query('kind') kind: 'unsigned' | 'signed' | 'authorized' = 'signed',
     @Res() res: Response,
   ) {
     const payload = await this.service.getXmlContent(guideId, kind);

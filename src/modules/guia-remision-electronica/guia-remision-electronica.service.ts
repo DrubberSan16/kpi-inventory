@@ -836,7 +836,7 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
 
       if (existingGuide && this.isGuideAuthorized(existingGuide)) {
         throw new BadRequestException(
-          'La guía ya fue autorizada por el SRI. Solo puedes visualizarla o descargar su XML firmado.',
+          'La guía ya fue autorizada por el SRI. Solo puedes visualizarla o descargar el XML autorizado y su RIDE.',
         );
       }
 
@@ -1159,25 +1159,42 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     });
   }
 
-  async getXmlContent(guideId: string, kind: 'unsigned' | 'signed' = 'signed') {
-    const select = kind === 'signed'
-      ? ({ xml_signed: true } as any)
-      : ({ xml_unsigned: true } as any);
+  async getXmlContent(
+    guideId: string,
+    kind: 'unsigned' | 'signed' | 'authorized' = 'signed',
+  ) {
+    const select =
+      kind === 'signed'
+        ? ({ xml_signed: true } as any)
+        : kind === 'authorized'
+          ? ({ sri_authorization_response: true } as any)
+          : ({ xml_unsigned: true } as any);
     const guide = await this.guideRepo.findOne({
       where: { id: guideId, is_deleted: false },
       select: {
         id: true,
         numero_guia: true,
         clave_acceso: true,
+        sri_estado: true,
+        estado_emision: true,
         ...select,
       } as any,
     });
     if (!guide) {
       throw new NotFoundException('La guía de remisión no existe.');
     }
-    const xml = kind === 'signed' ? guide.xml_signed : guide.xml_unsigned;
+    const xml =
+      kind === 'signed'
+        ? guide.xml_signed
+        : kind === 'authorized'
+          ? this.extractAuthorizedXmlFromGuide(guide)
+          : guide.xml_unsigned;
     if (!xml) {
-      throw new NotFoundException('No existe XML disponible para la guía seleccionada.');
+      throw new NotFoundException(
+        kind === 'authorized'
+          ? 'No existe XML autorizado del SRI para la guía seleccionada.'
+          : 'No existe XML disponible para la guía seleccionada.',
+      );
     }
     return {
       fileName: `${guide.numero_guia || guide.clave_acceso}-${kind}.xml`,
@@ -1863,6 +1880,68 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     return match ? match[1].trim() : null;
   }
 
+  private extractAuthorizedXmlFromGuide(
+    guide:
+      | Pick<
+          GuiaRemisionElectronica,
+          | 'sri_authorization_response'
+          | 'numero_guia'
+          | 'clave_acceso'
+          | 'sri_estado'
+          | 'estado_emision'
+        >
+      | null
+      | undefined,
+  ) {
+    const responseText = String(
+      (guide?.sri_authorization_response as Record<string, unknown> | null)
+        ?.response || '',
+    ).trim();
+    if (!responseText) {
+      return null;
+    }
+
+    const authorizationXml = this.extractTagValue(responseText, 'autorizacion');
+    const comprobante =
+      (authorizationXml && this.extractTagValue(authorizationXml, 'comprobante')) ||
+      this.extractTagValue(responseText, 'comprobante');
+
+    if (!comprobante) {
+      return null;
+    }
+
+    return this.normalizeSriAuthorizedXml(comprobante);
+  }
+
+  private normalizeSriAuthorizedXml(value: string) {
+    let xml = String(value || '').trim();
+    if (!xml) {
+      return null;
+    }
+
+    const cdataMatch = /^<!\[CDATA\[([\s\S]*?)\]\]>$/i.exec(xml);
+    if (cdataMatch) {
+      xml = cdataMatch[1].trim();
+    } else {
+      xml = this.decodeXmlEntities(xml).trim();
+    }
+
+    return xml || null;
+  }
+
+  private decodeXmlEntities(value: string) {
+    return String(value || '')
+      .replace(/&#xD;/gi, '\r')
+      .replace(/&#13;/gi, '\r')
+      .replace(/&#xA;/gi, '\n')
+      .replace(/&#10;/gi, '\n')
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&amp;/gi, '&');
+  }
+
   private extractMessages(xml: string) {
     const messages: Array<Record<string, string | null>> = [];
     const regex =
@@ -2044,6 +2123,7 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
   }
 
   private toGuideResponse(guide: GuiaRemisionElectronica) {
+    const authorizedXml = this.extractAuthorizedXmlFromGuide(guide);
     return {
       id: guide.id,
       transferencia_bodega_id: guide.transferencia_bodega_id,
@@ -2073,6 +2153,7 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
       sri_messages: guide.sri_messages,
       has_xml_unsigned: Boolean((guide as any).xml_unsigned),
       has_xml_signed: Boolean((guide as any).xml_signed),
+      has_xml_authorized: Boolean(authorizedXml),
       created_at: guide.created_at,
       updated_at: guide.updated_at,
     };
