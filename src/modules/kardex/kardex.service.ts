@@ -593,8 +593,8 @@ export class KardexService extends CrudService<Kardex> {
 
       return {
         id: this.toText(row.kardex_id),
-        fecha_emision: row.fecha,
-        fecha_creacion: row.created_at,
+        fecha_emision: this.formatDateTimeForClient(row.fecha),
+        fecha_creacion: this.formatDateTimeForClient(row.created_at),
         documento: this.resolveDocumentCode(row),
         referencia:
           this.toText(row.movimiento_referencia) ||
@@ -1021,6 +1021,47 @@ export class KardexService extends CrudService<Kardex> {
     return `${year}-${month}-${day}`;
   }
 
+  private formatDateTimeForClient(
+    value: unknown,
+  ): string | null {
+    if (!value) return null;
+
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) return null;
+      return this.formatGuayaquilDateTime(value);
+    }
+
+    const raw = this.toText(value);
+    if (!raw) return null;
+
+    const directMatch =
+      /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/.exec(raw);
+    if (directMatch) {
+      const [, year, month, day, hour, minute, second = '00'] = directMatch;
+      return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+    }
+
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return this.formatGuayaquilDateTime(parsed);
+  }
+
+  private formatGuayaquilDateTime(value: Date) {
+    return new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'America/Guayaquil',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+      .format(value)
+      .replace('T', ' ')
+      .replace(',', '');
+  }
+
   private async getInitialStockByProduct(
     productIds: string[],
     fromDate: Date,
@@ -1147,6 +1188,9 @@ export class KardexService extends CrudService<Kardex> {
       });
       return {
         ...item,
+        fecha_movimiento: this.formatDateTimeForClient(item.fecha_movimiento),
+        created_at: this.formatDateTimeForClient(item.created_at),
+        updated_at: this.formatDateTimeForClient(item.updated_at),
         tipo_documento_label: this.resolveDocumentTypeLabel(item),
         bodega_label: this.resolveDocumentWarehouseLabel(
           item,
