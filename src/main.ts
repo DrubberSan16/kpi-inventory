@@ -5,6 +5,9 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 import { TimezoneInterceptor } from './common/interceptors/timezone.interceptor';
 
+process.env.TZ =
+  String(process.env.APP_TIMEZONE || '').trim() || 'America/Guayaquil';
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
