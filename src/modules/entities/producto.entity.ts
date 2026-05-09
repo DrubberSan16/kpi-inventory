@@ -37,6 +37,10 @@ export class Producto extends BaseAuditEntity {
   unidad_medida_id?: string | null;
 
   @Column({ type: 'boolean', default: false })
+  @ApiProperty({ description: 'es aceite' })
+  es_aceite: boolean;
+
+  @Column({ type: 'boolean', default: false })
   @ApiProperty({ description: 'por contenedores' })
   por_contenedores: boolean;
 

@@ -1668,6 +1668,90 @@ export class KardexService extends CrudService<Kardex> {
     return `${prefix}_${compact}`;
   }
 
+  private isOilLikeProductName(value: unknown) {
+    const normalized = this.toText(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+    return /\baceite\b/.test(normalized);
+  }
+
+  private async resolveUnidadMedidaForProduct(
+    manager: EntityManager,
+    options: {
+      tipoUnidad?: string | null;
+      productName?: string | null;
+      userName: string;
+    },
+  ) {
+    const requestedUnit = this.toText(options.tipoUnidad);
+    const prefersGallons =
+      this.isOilLikeProductName(options.productName) ||
+      ['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase());
+
+    if (prefersGallons && !requestedUnit) {
+      return this.ensureGallonsUnit(manager, options.userName);
+    }
+
+    if (['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase())) {
+      return this.ensureGallonsUnit(manager, options.userName);
+    }
+
+    const unidadNombre = requestedUnit || 'UNIDAD';
+    const unidadCodigo = this.buildCodeFromLabel(unidadNombre, 'UM');
+    let unidad = await manager.findOne(UnidadMedida, {
+      where: [
+        { codigo: unidadCodigo, is_deleted: false },
+        { nombre: unidadNombre, is_deleted: false },
+      ],
+    });
+    if (!unidad) {
+      unidad = await manager.save(
+        UnidadMedida,
+        manager.create(UnidadMedida, {
+          status: 'ACTIVE',
+          codigo: unidadCodigo,
+          nombre: unidadNombre,
+          es_base: true,
+          created_by: options.userName,
+          updated_by: options.userName,
+        }),
+      );
+    }
+    return unidad;
+  }
+
+  private async ensureGallonsUnit(manager: EntityManager, userName: string) {
+    let unidad = await manager.findOne(UnidadMedida, {
+      where: [
+        { nombre: 'GALONES', is_deleted: false },
+        { nombre: 'GALON', is_deleted: false },
+        { codigo: 'GALONES', is_deleted: false },
+        { codigo: 'GALON', is_deleted: false },
+        { codigo: 'GAL', is_deleted: false },
+        { abreviatura: 'GAL', is_deleted: false },
+        { abreviatura: 'GL', is_deleted: false },
+      ],
+    });
+
+    if (!unidad) {
+      unidad = await manager.save(
+        UnidadMedida,
+        manager.create(UnidadMedida, {
+          status: 'ACTIVE',
+          codigo: 'GALONES',
+          nombre: 'GALONES',
+          abreviatura: 'GAL',
+          es_base: true,
+          created_by: userName,
+          updated_by: userName,
+        }),
+      );
+    }
+
+    return unidad;
+  }
+
   private mojibakeScore(value: string) {
     if (!value) return 0;
     const matches = value.match(/Ã.|Â.|â.|�/g);
@@ -2055,27 +2139,12 @@ export class KardexService extends CrudService<Kardex> {
         );
       }
 
-      const unidadNombre = tipoUnidad || 'UNIDAD';
-      const unidadCodigo = this.buildCodeFromLabel(unidadNombre, 'UM');
-      let unidad = await manager.findOne(UnidadMedida, {
-        where: [
-          { codigo: unidadCodigo, is_deleted: false },
-          { nombre: unidadNombre, is_deleted: false },
-        ],
+      const esAceite = this.isOilLikeProductName(nomItem);
+      const unidad = await this.resolveUnidadMedidaForProduct(manager, {
+        tipoUnidad,
+        productName: nomItem,
+        userName,
       });
-      if (!unidad) {
-        unidad = await manager.save(
-          UnidadMedida,
-          manager.create(UnidadMedida, {
-            status: 'ACTIVE',
-            codigo: unidadCodigo,
-            nombre: unidadNombre,
-            es_base: true,
-            created_by: userName,
-            updated_by: userName,
-          }),
-        );
-      }
 
       let producto = await manager.findOne(Producto, {
         where: { codigo: codItem, is_deleted: false },
@@ -2090,6 +2159,7 @@ export class KardexService extends CrudService<Kardex> {
             linea_id: linea.id,
             categoria_id: categoria.id,
             unidad_medida_id: unidad.id,
+            es_aceite: esAceite,
             por_contenedores: porContenedores,
             es_servicio: false,
             requiere_lote: false,
@@ -2108,6 +2178,7 @@ export class KardexService extends CrudService<Kardex> {
         producto.linea_id = linea.id;
         producto.categoria_id = categoria.id;
         producto.unidad_medida_id = unidad.id;
+        producto.es_aceite = producto.es_aceite || esAceite;
         producto.por_contenedores = porContenedores;
         producto.ultimo_costo = this.toFixedText(costoPromedio, 4);
         producto.costo_promedio = this.toFixedText(costoPromedio, 4);
@@ -2394,27 +2465,12 @@ export class KardexService extends CrudService<Kardex> {
         }
       }
 
-      const unidadNombre = tipoUnidad || 'UNIDAD';
-      const unidadCodigo = this.buildCodeFromLabel(unidadNombre, 'UM');
-      let unidad = await manager.findOne(UnidadMedida, {
-        where: [
-          { codigo: unidadCodigo, is_deleted: false },
-          { nombre: unidadNombre, is_deleted: false },
-        ],
+      const esAceite = this.isOilLikeProductName(nomItem);
+      const unidad = await this.resolveUnidadMedidaForProduct(manager, {
+        tipoUnidad,
+        productName: nomItem,
+        userName,
       });
-      if (!unidad) {
-        unidad = await manager.save(
-          UnidadMedida,
-          manager.create(UnidadMedida, {
-            status: 'ACTIVE',
-            codigo: unidadCodigo,
-            nombre: unidadNombre,
-            es_base: true,
-            created_by: userName,
-            updated_by: userName,
-          }),
-        );
-      }
 
       let producto = await manager.findOne(Producto, {
         where: { codigo: codItem, is_deleted: false },
@@ -2432,6 +2488,7 @@ export class KardexService extends CrudService<Kardex> {
             marca_id: marca?.id ?? null,
             registro_sanitario: registroSanitario || null,
             unidad_medida_id: unidad.id,
+            es_aceite: esAceite,
             por_contenedores: porContenedores,
             es_servicio: false,
             requiere_lote: false,
@@ -2453,6 +2510,7 @@ export class KardexService extends CrudService<Kardex> {
         producto.marca_id = marca?.id ?? null;
         producto.registro_sanitario = registroSanitario || null;
         producto.unidad_medida_id = unidad.id;
+        producto.es_aceite = producto.es_aceite || esAceite;
         producto.por_contenedores = porContenedores;
         producto.ultimo_costo = this.toFixedText(ultimoCosto || costoUnitario, 4);
         producto.costo_promedio = this.toFixedText(costoUnitario, 4);
