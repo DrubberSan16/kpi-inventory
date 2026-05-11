@@ -11,6 +11,19 @@ import { StockBodegaQueryDto } from './stock-bodega-query.dto';
 @Injectable()
 export class StockBodegaService extends CrudService<StockBodega> {
   private readonly logger = new Logger(StockBodegaService.name);
+  private readonly closedWorkOrderStatuses = [
+    'CANCELLED',
+    'CANCELED',
+    'ANULADA',
+    'ANULADO',
+    'VOID',
+    'VOIDED',
+    'CLOSED',
+    'CERRADA',
+    'CERRADO',
+    'DONE',
+    'COMPLETED',
+  ];
 
   constructor(
     @InjectRepository(StockBodega) repository: Repository<StockBodega>,
@@ -47,6 +60,21 @@ export class StockBodegaService extends CrudService<StockBodega> {
       : 20;
     const search = String(query.search || '').trim();
     const warehouseId = String(query.bodega_id || '').trim();
+    const closedStatusSql = this.closedWorkOrderStatuses
+      .map((status) => `'${status.replace(/'/g, "''")}'`)
+      .join(', ');
+    const activeReservationSql = `COALESCE((
+      SELECT SUM(COALESCE(reserva.cantidad, 0))
+      FROM kpi_inventory.tb_reserva_stock reserva
+      INNER JOIN kpi_process.tb_work_order work_order
+        ON work_order.id = reserva.work_order_id
+       AND work_order.is_deleted = false
+      WHERE reserva.is_deleted = false
+        AND UPPER(TRIM(COALESCE(reserva.estado, ''))) = 'RESERVADO'
+        AND reserva.producto_id = stock.producto_id
+        AND reserva.bodega_id = stock.bodega_id
+        AND UPPER(TRIM(COALESCE(work_order.status_workflow, 'PLANNED'))) NOT IN (${closedStatusSql})
+    ), 0)`;
 
     const baseQuery = this.repository
       .createQueryBuilder('stock')
@@ -99,6 +127,11 @@ export class StockBodegaService extends CrudService<StockBodega> {
         `TRIM(CONCAT(COALESCE(bodega.codigo || ' - ', ''), COALESCE(bodega.nombre, 'Sin bodega')))`,
         'bodega_label',
       )
+      .addSelect(activeReservationSql, 'cantidad_reservada_activa')
+      .addSelect(
+        `GREATEST(COALESCE(stock.stock_actual, 0) - ${activeReservationSql}, 0)`,
+        'stock_disponible',
+      )
       .orderBy('stock.updated_at', 'DESC')
       .addOrderBy('stock.created_at', 'DESC')
       .skip((page - 1) * limit)
@@ -109,6 +142,12 @@ export class StockBodegaService extends CrudService<StockBodega> {
       ...item,
       producto_label: raw[index]?.producto_label ?? null,
       bodega_label: raw[index]?.bodega_label ?? null,
+      cantidad_reservada_activa: Number(
+        raw[index]?.cantidad_reservada_activa ?? 0,
+      ),
+      stock_disponible: Number(
+        raw[index]?.stock_disponible ?? item.stock_actual ?? 0,
+      ),
     }));
 
     return {
