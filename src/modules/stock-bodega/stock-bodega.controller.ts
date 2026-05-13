@@ -30,6 +30,7 @@ export class StockBodegaController extends CrudController<StockBodega> {
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiQuery({ name: 'search', required: false, type: String })
   @ApiQuery({ name: 'bodega_id', required: false, type: String })
+  @ApiQuery({ name: 'es_aceite', required: false, type: Boolean })
   @ApiResponse({
     status: 200,
     description: 'Listado paginado de stock por bodega',

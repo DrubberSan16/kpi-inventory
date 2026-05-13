@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
-import { IsOptional, IsUUID } from 'class-validator';
+import { IsBoolean, IsOptional, IsUUID } from 'class-validator';
 
 export class StockBodegaQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({
@@ -10,4 +11,18 @@ export class StockBodegaQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID()
   bodega_id?: string;
+
+  @ApiPropertyOptional({
+    description: 'Filtrar solo productos marcados como aceite',
+    type: Boolean,
+    example: true,
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const normalized = String(value).trim().toLowerCase();
+    return ['true', '1', 'yes', 'si'].includes(normalized);
+  })
+  @IsBoolean()
+  es_aceite?: boolean;
 }

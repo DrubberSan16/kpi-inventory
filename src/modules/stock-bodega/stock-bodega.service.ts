@@ -98,6 +98,12 @@ export class StockBodegaService extends CrudService<StockBodega> {
       baseQuery.andWhere('stock.bodega_id = :warehouseId', { warehouseId });
     }
 
+    if (typeof query.es_aceite === 'boolean') {
+      baseQuery.andWhere('COALESCE(producto.es_aceite, false) = :oilOnly', {
+        oilOnly: query.es_aceite,
+      });
+    }
+
     if (search) {
       baseQuery.andWhere(
         new Brackets((qb) => {
@@ -127,6 +133,7 @@ export class StockBodegaService extends CrudService<StockBodega> {
         `TRIM(CONCAT(COALESCE(bodega.codigo || ' - ', ''), COALESCE(bodega.nombre, 'Sin bodega')))`,
         'bodega_label',
       )
+      .addSelect('COALESCE(producto.es_aceite, false)', 'producto_es_aceite')
       .addSelect(activeReservationSql, 'cantidad_reservada_activa')
       .addSelect(
         `GREATEST(COALESCE(stock.stock_actual, 0) - ${activeReservationSql}, 0)`,
@@ -142,6 +149,7 @@ export class StockBodegaService extends CrudService<StockBodega> {
       ...item,
       producto_label: raw[index]?.producto_label ?? null,
       bodega_label: raw[index]?.bodega_label ?? null,
+      es_aceite: Boolean(raw[index]?.producto_es_aceite ?? false),
       cantidad_reservada_activa: Number(
         raw[index]?.cantidad_reservada_activa ?? 0,
       ),
