@@ -233,9 +233,10 @@ export class OrdenServicioService implements OnModuleInit {
       });
 
     entity.codigo = this.toText(dto.codigo) || entity.codigo;
-    entity.fecha_emision = dto.fecha_emision
-      ? new Date(dto.fecha_emision)
-      : current?.fecha_emision ?? new Date();
+    entity.fecha_emision =
+      this.normalizeDateOnly(dto.fecha_emision) ||
+      this.normalizeDateOnly(current?.fecha_emision) ||
+      this.currentAppDateString();
     entity.proveedor_id = supplier.id;
     entity.proveedor_identificacion = supplier.identificacion ?? null;
     entity.proveedor_nombre =
@@ -431,14 +432,40 @@ export class OrdenServicioService implements OnModuleInit {
       take: 500,
       order: { created_at: 'DESC' } as any,
     });
-    const maxNumber = rows.reduce((max, item: any) => {
-      const match = new RegExp(`^RJCTI-${year}-(\\d{6})$`, 'i').exec(
-        String(item?.codigo || '').trim(),
-      );
-      const numeric = match ? Number(match[1]) : 0;
-      return numeric > max ? numeric : max;
-    }, 0);
-    return `RJCTI-${year}-${String(maxNumber + 1).padStart(6, '0')}`;
+    const lastCode = rows
+      .map((item: any) => String(item?.codigo || '').trim())
+      .filter((item) =>
+        new RegExp(`^RJCTI-${year}-([A-Z])(\\d{7})$`, 'i').test(item),
+      )
+      .sort((a, b) => this.getCodeRank(b, year) - this.getCodeRank(a, year))[0];
+
+    if (!lastCode) return `RJCTI-${year}-A0000001`;
+    const match = new RegExp(`^RJCTI-${year}-([A-Z])(\\d{7})$`, 'i').exec(
+      lastCode,
+    );
+    if (!match) return `RJCTI-${year}-A0000001`;
+    const currentLetter = (match[1] ?? 'A').toUpperCase();
+    const currentNumber = Number(match[2] ?? '0');
+    if (currentNumber >= 9999999) {
+      return `RJCTI-${year}-${this.incrementAlphaPrefix(currentLetter)}0000001`;
+    }
+    return `RJCTI-${year}-${currentLetter}${String(currentNumber + 1).padStart(7, '0')}`;
+  }
+
+  private incrementAlphaPrefix(letter: string) {
+    const nextCharCode = letter.toUpperCase().charCodeAt(0) + 1;
+    if (nextCharCode > 90) return 'A';
+    return String.fromCharCode(nextCharCode);
+  }
+
+  private getCodeRank(code: string, year: number) {
+    const match = new RegExp(`^RJCTI-${year}-([A-Z])(\\d{7})$`, 'i').exec(
+      String(code || '').trim(),
+    );
+    if (!match) return -1;
+    const letter = (match[1] ?? 'A').toUpperCase();
+    const number = Number(match[2] ?? '0');
+    return (letter.charCodeAt(0) - 64) * 10000000 + number;
   }
 
   private resolveUserName(dto: CreateOrdenServicioDto | UpdateOrdenServicioDto) {
@@ -458,6 +485,26 @@ export class OrdenServicioService implements OnModuleInit {
     return Number.isFinite(value) ? value.toFixed(decimals) : '0';
   }
 
+  private normalizeDateOnly(value: unknown) {
+    const text = this.toText(value);
+    if (!text) return '';
+    const match = /^(\d{4}-\d{2}-\d{2})/.exec(text);
+    return match?.[1] ?? '';
+  }
+
+  private currentAppDateString() {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'America/Guayaquil',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const year = parts.find((item) => item.type === 'year')?.value ?? '';
+    const month = parts.find((item) => item.type === 'month')?.value ?? '';
+    const day = parts.find((item) => item.type === 'day')?.value ?? '';
+    return `${year}-${month}-${day}`;
+  }
+
   private async ensureSchema() {
     await this.dataSource.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
     await this.dataSource.query(`
@@ -472,7 +519,7 @@ export class OrdenServicioService implements OnModuleInit {
         deleted_at timestamp without time zone NULL,
         deleted_by text NULL,
         codigo varchar(40) NOT NULL,
-        fecha_emision timestamp without time zone NOT NULL DEFAULT now(),
+        fecha_emision date NOT NULL DEFAULT CURRENT_DATE,
         proveedor_id uuid NULL,
         proveedor_identificacion varchar(30) NULL,
         proveedor_nombre varchar(200) NULL,
@@ -530,6 +577,28 @@ export class OrdenServicioService implements OnModuleInit {
       CREATE INDEX IF NOT EXISTS idx_tb_orden_servicio_det_orden
       ON kpi_inventory.tb_orden_servicio_det (orden_servicio_id)
       WHERE is_deleted = false
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE kpi_inventory.tb_orden_servicio
+      ALTER COLUMN fecha_emision TYPE date
+      USING (
+        CASE
+          WHEN fecha_emision IS NULL THEN NULL
+          ELSE (
+            CASE
+              WHEN EXTRACT(HOUR FROM CAST(fecha_emision AS timestamp)) = 19
+               AND EXTRACT(MINUTE FROM CAST(fecha_emision AS timestamp)) = 0
+               AND FLOOR(EXTRACT(SECOND FROM CAST(fecha_emision AS timestamp))) = 0
+                THEN (CAST(fecha_emision AS timestamp) + INTERVAL '5 hours')::date
+              ELSE CAST(fecha_emision AS timestamp)::date
+            END
+          )
+        END
+      )
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE kpi_inventory.tb_orden_servicio
+      ALTER COLUMN fecha_emision SET DEFAULT CURRENT_DATE
     `);
   }
 }

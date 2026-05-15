@@ -8,9 +8,9 @@ export class OrdenServicio extends BaseAuditEntity {
   @ApiProperty({ description: 'codigo de la orden de servicio' })
   codigo: string;
 
-  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  @Column({ type: 'date', default: () => 'CURRENT_DATE' })
   @ApiProperty({ description: 'fecha de emision' })
-  fecha_emision: Date;
+  fecha_emision: string;
 
   @Column({ type: 'uuid', nullable: true })
   @ApiPropertyOptional({ description: 'proveedor id' })
