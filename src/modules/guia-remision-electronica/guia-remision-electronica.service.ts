@@ -742,9 +742,9 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
           existingGuide?.identificacion_transportista || '',
         placa: existingGuide?.placa || '',
         identificacion_destinatario:
-          existingGuide?.identificacion_destinatario || context.config.ruc,
+          existingGuide?.identificacion_destinatario || '',
         razon_social_destinatario:
-          existingGuide?.razon_social_destinatario || context.config.razon_social,
+          existingGuide?.razon_social_destinatario || '',
         dir_destinatario:
           context.destinationWarehouse.direccion ||
           existingGuide?.dir_destinatario ||
@@ -755,7 +755,7 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
           (context.purchaseOrder?.codigo
             ? `Traslado asociado a orden ${context.purchaseOrder.codigo}`
             : `Transferencia interna ${context.transfer.codigo}`),
-        cod_estab_destino: existingGuide?.cod_estab_destino || context.config.estab,
+        cod_estab_destino: existingGuide?.cod_estab_destino || '',
         ruta:
           existingGuide?.ruta ||
           `${this.warehouseLabel(context.sourceWarehouse)} -> ${this.warehouseLabel(context.destinationWarehouse)}`,
@@ -1014,12 +1014,12 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
         ),
         placa: this.requireGuideText(dto.placa, 20, 'Placa del vehículo'),
         identificacion_destinatario: this.requireGuideText(
-          dto.identificacion_destinatario || lockedConfig.ruc,
+          dto.identificacion_destinatario,
           20,
           'Identificación del destinatario',
         ),
         razon_social_destinatario: this.requireGuideText(
-          dto.razon_social_destinatario || lockedConfig.razon_social,
+          dto.razon_social_destinatario,
           300,
           'Razón social del destinatario',
         ),
@@ -1036,9 +1036,11 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
           300,
           'Motivo de traslado',
         ),
-        cod_estab_destino:
-          this.cleanOptionalText(dto.cod_estab_destino, 3) ||
-          this.cleanOptionalText(lockedConfig.estab, 3),
+        cod_estab_destino: this.requireGuideText(
+          dto.cod_estab_destino,
+          3,
+          'CÃ³digo establecimiento destino',
+        ),
         ruta: this.cleanOptionalText(dto.ruta, 300) || autoRoute,
         cod_doc_sustento: this.cleanOptionalText(dto.cod_doc_sustento, 2),
         num_doc_sustento: this.cleanOptionalText(dto.num_doc_sustento, 17),
