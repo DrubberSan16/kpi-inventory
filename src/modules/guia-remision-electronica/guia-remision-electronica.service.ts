@@ -176,6 +176,9 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     const primaryEstablishment = this.pickPreferredEstablishment(establishments);
     const matrixEstablishment =
       establishments.find((item) => item.matriz === 'SI') || null;
+    const specialTaxpayer = this.resolveSpecialTaxpayerInfo(
+      raw.contribuyenteEspecial,
+    );
 
     return {
       ruc: this.onlyDigits(raw.numeroRuc, 13),
@@ -203,10 +206,9 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
       obligado_contabilidad: this.normalizeYesNo(
         raw.obligadoLlevarContabilidad,
       ),
-      contribuyente_especial:
-        String(raw.contribuyenteEspecial || '').trim().toUpperCase() === 'NO'
-          ? null
-          : this.cleanOptionalText(raw.contribuyenteEspecial, 13),
+      contribuyente_especial: specialTaxpayer.label,
+      contribuyente_especial_codigo: specialTaxpayer.resolution,
+      es_contribuyente_especial: specialTaxpayer.enabled,
       agente_retencion: this.normalizeYesNo(raw.agenteRetencion),
       informacion_fechas: raw.informacionFechasContribuyente || null,
       dir_matriz:
@@ -410,6 +412,9 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
           'No se encontraron datos del contribuyente para el RUC indicado.',
         );
       }
+      const specialTaxpayer = this.resolveSpecialTaxpayerInfo(
+        raw.contribuyenteEspecial,
+      );
 
       return {
         ruc: this.onlyDigits(raw.numeroRuc, 13),
@@ -435,12 +440,9 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
         obligado_contabilidad: this.normalizeYesNo(
           raw.obligadoLlevarContabilidad,
         ),
-        contribuyente_especial:
-          String(raw.contribuyenteEspecial || '')
-            .trim()
-            .toUpperCase() === 'NO'
-            ? null
-            : this.cleanOptionalText(raw.contribuyenteEspecial, 13),
+        contribuyente_especial: specialTaxpayer.label,
+        contribuyente_especial_codigo: specialTaxpayer.resolution,
+        es_contribuyente_especial: specialTaxpayer.enabled,
         agente_retencion: this.normalizeYesNo(raw.agenteRetencion),
         informacion_fechas: raw.informacionFechasContribuyente || null,
         raw,
@@ -2181,6 +2183,8 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
       codigo_numerico: config.codigo_numerico,
       ultimo_secuencial: config.ultimo_secuencial,
       contribuyente_especial: config.contribuyente_especial,
+      contribuyente_especial_codigo: config.contribuyente_especial,
+      es_contribuyente_especial: Boolean(config.contribuyente_especial),
       obligado_contabilidad: config.obligado_contabilidad,
       dir_partida_default: config.dir_partida_default,
       razon_social_transportista_default: config.razon_social_transportista_default,
@@ -2477,6 +2481,30 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
       );
     }
     return digits;
+  }
+
+  private resolveSpecialTaxpayerInfo(value?: unknown) {
+    const label = this.cleanOptionalText(value, 20);
+    const normalized = String(value || '').trim().toUpperCase();
+    const enabled = Boolean(normalized) && normalized !== 'NO';
+
+    if (!enabled) {
+      return {
+        enabled: false,
+        label: null,
+        resolution: null,
+      };
+    }
+
+    const digits = this.extractDigits(String(value || ''));
+    const resolution =
+      digits.length >= 3 && digits.length <= 5 ? digits : null;
+
+    return {
+      enabled: true,
+      label,
+      resolution,
+    };
   }
 
   private normalizeSriInternalCode(value?: string | null) {
