@@ -130,10 +130,15 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     this.guideStatusTrackers.clear();
   }
 
-  async getConfigBySucursal(sucursalId: string) {
+  async getConfigBySucursal(_sucursalId: string) {
+    return this.getGlobalConfig();
+  }
+
+  async getGlobalConfig() {
     const [config, signature] = await Promise.all([
       this.configRepo.findOne({
-        where: { sucursal_id: sucursalId, is_deleted: false },
+        where: { is_deleted: false },
+        order: { updated_at: 'DESC', created_at: 'DESC' },
       }),
       this.loadGlobalSignature(),
     ]);
@@ -468,19 +473,22 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
   }
 
   async upsertConfig(dto: UpsertSriEmissionConfigDto) {
-    const sucursal = await this.sucursalRepo.findOne({
-      where: { id: dto.sucursal_id, is_deleted: false },
+    const existingConfigs = await this.configRepo.find({
+      where: { is_deleted: false },
+      order: { updated_at: 'DESC', created_at: 'DESC' },
     });
-    if (!sucursal) {
-      throw new NotFoundException('La sucursal seleccionada no existe.');
-    }
-
-    let config = await this.configRepo.findOne({
-      where: { sucursal_id: dto.sucursal_id, is_deleted: false },
-    });
+    let config = existingConfigs[0] || null;
+    const anchorSucursalId =
+      config?.sucursal_id ||
+      (await this.resolveGlobalConfigAnchorSucursalId(dto.sucursal_id));
+    const highestSequential = existingConfigs.reduce(
+      (maxValue, item) =>
+        Math.max(maxValue, Number(item?.ultimo_secuencial || 0)),
+      0,
+    );
 
     const payload = {
-      sucursal_id: dto.sucursal_id,
+      sucursal_id: anchorSucursalId,
       ambiente_default: this.normalizeEnvironment(dto.ambiente_default || 'PRUEBAS'),
       ruc: this.onlyDigits(dto.ruc, 13),
       razon_social: this.cleanText(dto.razon_social, 300),
@@ -510,10 +518,15 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     if (!config) {
       config = this.configRepo.create({
         ...payload,
+        ultimo_secuencial: highestSequential,
         created_by: this.resolveUser(dto.created_by || dto.updated_by),
       });
     } else {
       Object.assign(config, payload);
+      config.ultimo_secuencial = Math.max(
+        Number(config.ultimo_secuencial || 0),
+        highestSequential,
+      );
     }
 
     const saved = await this.configRepo.save(config);
@@ -1284,7 +1297,8 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
       throw new BadRequestException('La bodega origen no tiene una sucursal válida asociada.');
     }
     const config = await repo.findOne(SriEmissionConfig, {
-      where: { sucursal_id: sucursal.id, is_deleted: false },
+      where: { is_deleted: false },
+      order: { updated_at: 'DESC', created_at: 'DESC' },
       select: {
         id: true,
         sucursal_id: true,
@@ -2483,6 +2497,31 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     return digits;
   }
 
+  private async resolveGlobalConfigAnchorSucursalId(
+    preferredSucursalId?: string | null,
+  ) {
+    const preferredId = String(preferredSucursalId || '').trim();
+    if (preferredId) {
+      const preferredSucursal = await this.sucursalRepo.findOne({
+        where: { id: preferredId, is_deleted: false },
+      });
+      if (preferredSucursal) {
+        return preferredSucursal.id;
+      }
+    }
+
+    const fallbackSucursal = await this.sucursalRepo.findOne({
+      where: { is_deleted: false },
+      order: { created_at: 'ASC' },
+    });
+    if (!fallbackSucursal) {
+      throw new NotFoundException(
+        'No existen sucursales activas para asociar la configuracion global SRI.',
+      );
+    }
+    return fallbackSucursal.id;
+  }
+
   private resolveSpecialTaxpayerInfo(value?: unknown) {
     const label = this.cleanOptionalText(value, 20);
     const normalized = String(value || '').trim().toUpperCase();
@@ -2729,3 +2768,4 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     return `${warehouse.codigo || ''} - ${warehouse.nombre || warehouse.id}`.trim();
   }
 }
+

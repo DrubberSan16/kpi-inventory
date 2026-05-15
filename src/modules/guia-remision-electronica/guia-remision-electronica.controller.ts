@@ -88,6 +88,15 @@ export class GuiaRemisionElectronicaController {
     };
   }
 
+  @Get('config')
+  @ApiOperation({ summary: 'Obtener configuracion SRI global' })
+  async getGlobalConfig() {
+    return {
+      message: 'Configuracion SRI global obtenida correctamente.',
+      data: await this.service.getGlobalConfig(),
+    };
+  }
+
   @Get('config/firma-global')
   @ApiOperation({ summary: 'Obtener la firma electronica global del sistema' })
   async getGlobalSignatureConfig(@Headers('x-role-name') roleName?: string) {
@@ -133,7 +142,7 @@ export class GuiaRemisionElectronicaController {
   }
 
   @Post('config')
-  @ApiOperation({ summary: 'Crear o actualizar configuracion SRI por sucursal' })
+  @ApiOperation({ summary: 'Crear o actualizar configuracion SRI global' })
   @ApiBody({ type: UpsertSriEmissionConfigDto })
   async upsertConfig(@Body() payload: UpsertSriEmissionConfigDto) {
     return {

@@ -13,9 +13,10 @@ import {
 } from 'class-validator';
 
 export class UpsertSriEmissionConfigDto {
-  @ApiProperty({ format: 'uuid' })
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
   @IsUUID()
-  sucursal_id: string;
+  sucursal_id?: string;
 
   @ApiPropertyOptional({ enum: ['PRUEBAS', 'PRODUCCION'] })
   @IsOptional()
