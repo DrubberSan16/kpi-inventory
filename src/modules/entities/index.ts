@@ -7,6 +7,8 @@ import { MovimientoInventario } from "./movimiento-inventario.entity";
 import { MovimientoInventarioDet } from "./movimiento-inventario-det.entity";
 import { OrdenCompra } from "./orden-compra.entity";
 import { OrdenCompraDet } from "./orden-compra-det.entity";
+import { OrdenServicio } from "./orden-servicio.entity";
+import { OrdenServicioDet } from "./orden-servicio-det.entity";
 import { Producto } from "./producto.entity";
 import { StockBodega } from "./stock-bodega.entity";
 import { Sucursal } from "./sucursal.entity";
@@ -18,6 +20,6 @@ import { SriEmissionConfig } from "./sri-emission-config.entity";
 import { SriSignatureConfig } from "./sri-signature-config.entity";
 import { GuiaRemisionElectronica } from "./guia-remision-electronica.entity";
 
-export const ENTITIES = [Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica];
+export const ENTITIES = [Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, OrdenServicio, OrdenServicioDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica];
 
-export { Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica };
+export { Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, OrdenServicio, OrdenServicioDet, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica };
