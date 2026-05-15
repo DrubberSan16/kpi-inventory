@@ -504,6 +504,11 @@ export class OrdenCompraService {
           'Uno de los materiales seleccionados no existe.',
         );
       }
+      if (product.es_servicio) {
+        throw new BadRequestException(
+          `El material ${product.nombre} esta marcado como servicio y no puede usarse en una orden de compra.`,
+        );
+      }
 
       const cantidad = this.toNumber(detail.cantidad, 0);
       if (!(cantidad > 0)) {
