@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
   IsNumber,
   IsOptional,
@@ -113,6 +114,21 @@ export class CreateOrdenServicioDto {
   @IsString()
   updated_by?: string;
 
+  @ApiPropertyOptional({
+    description: 'Equipos atendidos en la orden',
+    type: [String],
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  equipo_ids?: string[];
+
+  @ApiPropertyOptional({ description: 'Indica si el servicio fue realizado' })
+  @IsOptional()
+  @IsBoolean()
+  servicio_realizado?: boolean;
+
   @ApiProperty({ type: () => [OrdenServicioDetalleDto] })
   @IsArray()
   @ValidateNested({ each: true })
@@ -121,6 +137,13 @@ export class CreateOrdenServicioDto {
 }
 
 export class UpdateOrdenServicioDto extends CreateOrdenServicioDto {}
+
+export class MarkOrdenServicioRealizadoDto {
+  @ApiPropertyOptional({ description: 'Confirma la realizacion del servicio' })
+  @IsOptional()
+  @IsBoolean()
+  servicio_realizado?: boolean;
+}
 
 export class OrdenServicioQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({ description: 'estado de la orden' })

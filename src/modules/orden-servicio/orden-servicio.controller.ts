@@ -7,14 +7,25 @@ import {
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   CreateOrdenServicioDto,
+  MarkOrdenServicioRealizadoDto,
   OrdenServicioQueryDto,
   UpdateOrdenServicioDto,
 } from './orden-servicio.dto';
 import { OrdenServicioService } from './orden-servicio.service';
+
+function getRequestActor(req?: any) {
+  return {
+    userId: String(req?.headers?.['x-user-id'] || req?.user?.userId || req?.user?.id || '').trim() || null,
+    username: String(req?.headers?.['x-user-name'] || req?.user?.nameUser || req?.user?.username || '').trim() || null,
+    displayName: String(req?.headers?.['x-user-display-name'] || req?.user?.nameSurname || req?.user?.nameUser || req?.user?.username || '').trim() || null,
+    email: String(req?.headers?.['x-user-email'] || req?.user?.email || '').trim() || null,
+  };
+}
 
 @ApiTags('ordenes-servicio')
 @Controller('ordenes-servicio')
@@ -35,14 +46,28 @@ export class OrdenServicioController {
 
   @Post()
   @ApiOperation({ summary: 'Crear orden de servicio' })
-  create(@Body() payload: CreateOrdenServicioDto) {
-    return this.service.create(payload);
+  create(@Body() payload: CreateOrdenServicioDto, @Req() req: any) {
+    return this.service.create(payload, getRequestActor(req));
   }
 
   @Patch(':id')
   @ApiOperation({ summary: 'Actualizar orden de servicio' })
-  update(@Param('id') id: string, @Body() payload: UpdateOrdenServicioDto) {
-    return this.service.update(id, payload);
+  update(
+    @Param('id') id: string,
+    @Body() payload: UpdateOrdenServicioDto,
+    @Req() req: any,
+  ) {
+    return this.service.update(id, payload, getRequestActor(req));
+  }
+
+  @Patch(':id/servicio-realizado')
+  @ApiOperation({ summary: 'Marcar orden de servicio como realizada' })
+  markAsPerformed(
+    @Param('id') id: string,
+    @Body() payload: MarkOrdenServicioRealizadoDto,
+    @Req() req: any,
+  ) {
+    return this.service.markServicePerformed(id, payload, getRequestActor(req));
   }
 
   @Delete(':id')

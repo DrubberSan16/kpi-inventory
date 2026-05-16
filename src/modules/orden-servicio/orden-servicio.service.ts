@@ -7,13 +7,16 @@ import {
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, ILike, Repository } from 'typeorm';
 import {
+  MaintenanceEquipo,
   OrdenServicio,
   OrdenServicioDet,
+  OrdenServicioEquipo,
   Producto,
   Tercero,
 } from '../entities';
 import {
   CreateOrdenServicioDto,
+  MarkOrdenServicioRealizadoDto,
   OrdenServicioDetalleDto,
   OrdenServicioQueryDto,
   UpdateOrdenServicioDto,
@@ -27,6 +30,13 @@ type Totals = {
   total: number;
 };
 
+type RequestActorContext = {
+  userId?: string | null;
+  username?: string | null;
+  displayName?: string | null;
+  email?: string | null;
+};
+
 @Injectable()
 export class OrdenServicioService implements OnModuleInit {
   constructor(
@@ -34,10 +44,14 @@ export class OrdenServicioService implements OnModuleInit {
     private readonly ordenRepo: Repository<OrdenServicio>,
     @InjectRepository(OrdenServicioDet)
     private readonly detalleRepo: Repository<OrdenServicioDet>,
+    @InjectRepository(OrdenServicioEquipo)
+    private readonly ordenEquipoRepo: Repository<OrdenServicioEquipo>,
     @InjectRepository(Producto)
     private readonly productoRepo: Repository<Producto>,
     @InjectRepository(Tercero)
     private readonly terceroRepo: Repository<Tercero>,
+    @InjectRepository(MaintenanceEquipo)
+    private readonly maintenanceEquipoRepo: Repository<MaintenanceEquipo>,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
@@ -126,13 +140,17 @@ export class OrdenServicioService implements OnModuleInit {
     return hydrated;
   }
 
-  async create(dto: CreateOrdenServicioDto) {
+  async create(dto: CreateOrdenServicioDto, actor?: RequestActorContext | null) {
     return this.dataSource.transaction(async (manager) =>
-      this.saveOrder(manager, dto),
+      this.saveOrder(manager, dto, undefined, actor),
     );
   }
 
-  async update(id: string, dto: UpdateOrdenServicioDto) {
+  async update(
+    id: string,
+    dto: UpdateOrdenServicioDto,
+    actor?: RequestActorContext | null,
+  ) {
     return this.dataSource.transaction(async (manager) => {
       const current = await manager.findOne(OrdenServicio, {
         where: { id, is_deleted: false },
@@ -153,7 +171,116 @@ export class OrdenServicioService implements OnModuleInit {
         await manager.save(OrdenServicioDet, details);
       }
 
-      return this.saveOrder(manager, dto, current);
+      const linkedEquipments = await manager.find(OrdenServicioEquipo, {
+        where: { orden_servicio_id: id, is_deleted: false },
+      });
+      if (linkedEquipments.length) {
+        linkedEquipments.forEach((item) => {
+          item.is_deleted = true;
+          item.deleted_at = new Date();
+          item.deleted_by = this.resolveUserName(dto, actor);
+        });
+        await manager.save(OrdenServicioEquipo, linkedEquipments);
+      }
+
+      return this.saveOrder(manager, dto, current, actor);
+    });
+  }
+
+  async markServicePerformed(
+    id: string,
+    dto: MarkOrdenServicioRealizadoDto,
+    actor?: RequestActorContext | null,
+  ) {
+    if (dto.servicio_realizado === false) {
+      throw new BadRequestException(
+        'La orden solo puede marcarse como servicio realizado.',
+      );
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const current = await manager.findOne(OrdenServicio, {
+        where: { id, is_deleted: false },
+      });
+      if (!current) {
+        throw new NotFoundException('La orden de servicio no existe.');
+      }
+
+      if (current.servicio_realizado) {
+        const [hydrated] = await this.hydrateOrdersWithManager(
+          manager,
+          [current],
+          true,
+        );
+        return hydrated;
+      }
+
+      const linkedEquipments = await manager.find(OrdenServicioEquipo, {
+        where: { orden_servicio_id: id, is_deleted: false },
+      });
+      const actorName = this.resolveActorLabel(actor) ?? this.resolveUserName({}, actor);
+      const actorEmail = this.normalizeEmail(actor?.email);
+      const performedDate = this.currentAppDateString();
+
+      current.servicio_realizado = true;
+      current.servicio_realizado_at = new Date();
+      current.servicio_realizado_by = actorName;
+      current.servicio_realizado_by_email = actorEmail;
+      current.estado = 'SERVICIO_REALIZADO';
+      current.updated_by = actorName;
+      await manager.save(OrdenServicio, current);
+
+      if (linkedEquipments.length) {
+        const equipmentIds = linkedEquipments.map((item) => item.equipo_id);
+        const equipmentRows = await manager.find(MaintenanceEquipo, {
+          where: equipmentIds.map((equipoId) => ({
+            id: equipoId,
+            is_deleted: false,
+          })),
+        });
+        for (const equipment of equipmentRows) {
+          if (!equipment.es_servicio) continue;
+          const intervalValue = this.toNumber(
+            equipment.intervalo_mantenimiento_valor,
+            0,
+          );
+          if (!(intervalValue > 0)) continue;
+          const intervalUnit = this.normalizeIntervalUnit(
+            equipment.intervalo_mantenimiento_unidad,
+          );
+          equipment.ultimo_servicio_fecha = performedDate;
+          equipment.proximo_servicio_fecha = this.addIntervalDateOnly(
+            performedDate,
+            intervalUnit,
+            intervalValue,
+          );
+          equipment.ultimo_servicio_orden_id = current.id;
+          equipment.ultimo_servicio_orden_codigo = current.codigo;
+          equipment.updated_by = actorName;
+          await manager.save(MaintenanceEquipo, equipment);
+        }
+        await manager.query(
+          `
+            UPDATE kpi_maintenance.tb_alerta_mantenimiento
+            SET estado = 'CERRADA',
+                resolved_at = now(),
+                ultima_evaluacion_at = now()
+            WHERE is_deleted = false
+              AND origen = 'SYSTEM'
+              AND estado IN ('ABIERTA', 'EN_PROCESO')
+              AND equipo_id = ANY($1::uuid[])
+              AND referencia LIKE 'EQUIPO_SERVICIO:%'
+          `,
+          [equipmentIds],
+        );
+      }
+
+      const [hydrated] = await this.hydrateOrdersWithManager(
+        manager,
+        [current],
+        true,
+      );
+      return hydrated;
     });
   }
 
@@ -184,6 +311,18 @@ export class OrdenServicioService implements OnModuleInit {
         await manager.save(OrdenServicioDet, details);
       }
 
+      const linkedEquipments = await manager.find(OrdenServicioEquipo, {
+        where: { orden_servicio_id: id, is_deleted: false },
+      });
+      if (linkedEquipments.length) {
+        linkedEquipments.forEach((item) => {
+          item.is_deleted = true;
+          item.deleted_at = new Date();
+          item.deleted_by = deletedBy ?? null;
+        });
+        await manager.save(OrdenServicioEquipo, linkedEquipments);
+      }
+
       return {
         message: `Orden de servicio ${current.codigo} eliminada correctamente`,
       };
@@ -194,9 +333,11 @@ export class OrdenServicioService implements OnModuleInit {
     manager: EntityManager,
     dto: CreateOrdenServicioDto,
     current?: OrdenServicio,
+    actor?: RequestActorContext | null,
   ) {
-    const userName = this.resolveUserName(dto);
+    const userName = this.resolveUserName(dto, actor);
     const details = Array.isArray(dto.detalles) ? dto.detalles : [];
+    const requestedEquipmentIds = this.normalizeUuidArray(dto.equipo_ids);
     if (!details.length) {
       throw new BadRequestException(
         'Debes agregar al menos un servicio a la orden.',
@@ -224,6 +365,10 @@ export class OrdenServicioService implements OnModuleInit {
     }
 
     const preparedDetails = await this.prepareDetails(manager, details);
+    const linkedEquipments = await this.prepareLinkedEquipments(
+      manager,
+      requestedEquipmentIds,
+    );
     const totals = this.calculateTotals(preparedDetails);
     const entity =
       current ??
@@ -256,7 +401,17 @@ export class OrdenServicioService implements OnModuleInit {
     );
     entity.iva_total = this.toFixedText(totals.ivaTotal, 4);
     entity.total = this.toFixedText(totals.total, 4);
-    entity.estado = current?.estado === 'ANULADA' ? 'ANULADA' : 'EMITIDA';
+    entity.estado =
+      current?.estado === 'ANULADA'
+        ? 'ANULADA'
+        : current?.servicio_realizado
+          ? 'SERVICIO_REALIZADO'
+          : 'EMITIDA';
+    entity.servicio_realizado = Boolean(current?.servicio_realizado);
+    entity.servicio_realizado_at = current?.servicio_realizado_at ?? null;
+    entity.servicio_realizado_by = current?.servicio_realizado_by ?? null;
+    entity.servicio_realizado_by_email =
+      current?.servicio_realizado_by_email ?? null;
     entity.updated_by = userName;
 
     const savedOrder = await manager.save(OrdenServicio, entity);
@@ -280,6 +435,22 @@ export class OrdenServicioService implements OnModuleInit {
       }),
     );
     await manager.save(OrdenServicioDet, detailEntities);
+    if (linkedEquipments.length) {
+      await manager.save(
+        OrdenServicioEquipo,
+        linkedEquipments.map((equipment) =>
+          manager.create(OrdenServicioEquipo, {
+            orden_servicio_id: savedOrder.id,
+            equipo_id: equipment.id,
+            equipo_codigo: equipment.codigo ?? null,
+            equipo_nombre:
+              equipment.nombre_real ?? equipment.nombre ?? equipment.codigo ?? null,
+            created_by: current?.created_by ?? userName,
+            updated_by: userName,
+          }),
+        ),
+      );
+    }
 
     const [hydrated] = await this.hydrateOrdersWithManager(
       manager,
@@ -292,19 +463,33 @@ export class OrdenServicioService implements OnModuleInit {
   private async hydrateOrders(rows: OrdenServicio[], includeDetails = false) {
     if (!rows.length) return [];
     const ids = rows.map((item) => item.id);
-    const details = await this.detalleRepo.find({
-      where: ids.map((ordenId) => ({ orden_servicio_id: ordenId, is_deleted: false })),
-      order: { created_at: 'ASC' },
-    });
+    const [details, linkedEquipments] = await Promise.all([
+      this.detalleRepo.find({
+        where: ids.map((ordenId) => ({ orden_servicio_id: ordenId, is_deleted: false })),
+        order: { created_at: 'ASC' },
+      }),
+      this.ordenEquipoRepo.find({
+        where: ids.map((ordenId) => ({ orden_servicio_id: ordenId, is_deleted: false })),
+        order: { created_at: 'ASC' },
+      }),
+    ]);
     const detailMap = details.reduce((acc, item) => {
       (acc[item.orden_servicio_id] ??= []).push(item);
       return acc;
     }, {} as Record<string, OrdenServicioDet[]>);
+    const equipmentMap = linkedEquipments.reduce((acc, item) => {
+      (acc[item.orden_servicio_id] ??= []).push(item);
+      return acc;
+    }, {} as Record<string, OrdenServicioEquipo[]>);
 
     return rows.map((item) => ({
       ...item,
       proveedor_label: item.proveedor_nombre || 'Sin destinatario',
       emitido_por_label: item.emitido_por_nombre || 'Sin emisor',
+      equipos: equipmentMap[item.id] ?? [],
+      equipos_label: (equipmentMap[item.id] ?? [])
+        .map((equipment) => equipment.equipo_nombre || equipment.equipo_codigo || equipment.equipo_id)
+        .filter(Boolean),
       detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
     }));
   }
@@ -316,19 +501,33 @@ export class OrdenServicioService implements OnModuleInit {
   ) {
     if (!rows.length) return [];
     const ids = rows.map((item) => item.id);
-    const details = await manager.find(OrdenServicioDet, {
-      where: ids.map((ordenId) => ({ orden_servicio_id: ordenId, is_deleted: false })),
-      order: { created_at: 'ASC' },
-    });
+    const [details, linkedEquipments] = await Promise.all([
+      manager.find(OrdenServicioDet, {
+        where: ids.map((ordenId) => ({ orden_servicio_id: ordenId, is_deleted: false })),
+        order: { created_at: 'ASC' },
+      }),
+      manager.find(OrdenServicioEquipo, {
+        where: ids.map((ordenId) => ({ orden_servicio_id: ordenId, is_deleted: false })),
+        order: { created_at: 'ASC' },
+      }),
+    ]);
     const detailMap = details.reduce((acc, item) => {
       (acc[item.orden_servicio_id] ??= []).push(item);
       return acc;
     }, {} as Record<string, OrdenServicioDet[]>);
+    const equipmentMap = linkedEquipments.reduce((acc, item) => {
+      (acc[item.orden_servicio_id] ??= []).push(item);
+      return acc;
+    }, {} as Record<string, OrdenServicioEquipo[]>);
 
     return rows.map((item) => ({
       ...item,
       proveedor_label: item.proveedor_nombre || 'Sin destinatario',
       emitido_por_label: item.emitido_por_nombre || 'Sin emisor',
+      equipos: equipmentMap[item.id] ?? [],
+      equipos_label: (equipmentMap[item.id] ?? [])
+        .map((equipment) => equipment.equipo_nombre || equipment.equipo_codigo || equipment.equipo_id)
+        .filter(Boolean),
       detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
     }));
   }
@@ -468,8 +667,83 @@ export class OrdenServicioService implements OnModuleInit {
     return (letter.charCodeAt(0) - 64) * 10000000 + number;
   }
 
-  private resolveUserName(dto: CreateOrdenServicioDto | UpdateOrdenServicioDto) {
-    return this.toText(dto.updated_by) || this.toText(dto.created_by) || 'SYSTEM';
+  private resolveUserName(
+    dto: Partial<CreateOrdenServicioDto | UpdateOrdenServicioDto>,
+    actor?: RequestActorContext | null,
+  ) {
+    return (
+      this.toText(dto.updated_by) ||
+      this.toText(dto.created_by) ||
+      this.resolveActorLabel(actor) ||
+      'SYSTEM'
+    );
+  }
+
+  private resolveActorLabel(actor?: RequestActorContext | null) {
+    return (
+      this.toText(actor?.displayName) ||
+      this.toText(actor?.username) ||
+      null
+    );
+  }
+
+  private normalizeEmail(value: unknown) {
+    const normalized = this.toText(value).toLowerCase();
+    return normalized || null;
+  }
+
+  private normalizeUuidArray(values: unknown) {
+    if (!Array.isArray(values)) return [];
+    return [...new Set(values.map((item) => this.toText(item)).filter(Boolean))];
+  }
+
+  private normalizeIntervalUnit(value: unknown) {
+    const raw = this.toText(value).toUpperCase();
+    if (['SEMANA', 'SEMANAS', 'WEEK', 'WEEKS'].includes(raw)) return 'SEMANAS';
+    if (['ANIO', 'ANIOS', 'AÑO', 'AÑOS', 'YEAR', 'YEARS'].includes(raw)) {
+      return 'ANIOS';
+    }
+    return 'DIAS';
+  }
+
+  private addIntervalDateOnly(
+    dateInput: string,
+    intervalUnit: string,
+    intervalValue: number,
+  ) {
+    const base = new Date(`${dateInput}T00:00:00`);
+    const value = Math.max(0, Math.round(this.toNumber(intervalValue, 0)));
+    const unit = this.normalizeIntervalUnit(intervalUnit);
+    if (!value || Number.isNaN(base.getTime())) return dateInput;
+    if (unit === 'SEMANAS') {
+      base.setDate(base.getDate() + value * 7);
+    } else if (unit === 'ANIOS') {
+      base.setFullYear(base.getFullYear() + value);
+    } else {
+      base.setDate(base.getDate() + value);
+    }
+    return base.toISOString().slice(0, 10);
+  }
+
+  private async prepareLinkedEquipments(
+    manager: EntityManager,
+    equipmentIds: string[],
+  ) {
+    if (!equipmentIds.length) return [];
+    const equipments = await manager.find(MaintenanceEquipo, {
+      where: equipmentIds.map((equipoId) => ({
+        id: equipoId,
+        is_deleted: false,
+      })),
+    });
+    const foundIds = new Set(equipments.map((item) => item.id));
+    const missing = equipmentIds.filter((item) => !foundIds.has(item));
+    if (missing.length) {
+      throw new BadRequestException(
+        'Uno de los equipos seleccionados para la orden de servicio no existe.',
+      );
+    }
+    return equipments;
   }
 
   private toText(value: unknown) {
@@ -534,7 +808,11 @@ export class OrdenServicioService implements OnModuleInit {
         subtotal_con_descuento numeric(18,4) NOT NULL DEFAULT 0,
         iva_total numeric(18,4) NOT NULL DEFAULT 0,
         total numeric(18,4) NOT NULL DEFAULT 0,
-        estado text NOT NULL DEFAULT 'EMITIDA'
+        estado text NOT NULL DEFAULT 'EMITIDA',
+        servicio_realizado boolean NOT NULL DEFAULT false,
+        servicio_realizado_at timestamp without time zone NULL,
+        servicio_realizado_by varchar(200) NULL,
+        servicio_realizado_by_email varchar(200) NULL
       )
     `);
     await this.dataSource.query(`
@@ -564,6 +842,23 @@ export class OrdenServicioService implements OnModuleInit {
       )
     `);
     await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS kpi_inventory.tb_orden_servicio_equipo (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        status text NOT NULL DEFAULT 'ACTIVE',
+        created_at timestamp without time zone NOT NULL DEFAULT now(),
+        updated_at timestamp without time zone NOT NULL DEFAULT now(),
+        created_by text NULL,
+        updated_by text NULL,
+        is_deleted boolean NOT NULL DEFAULT false,
+        deleted_at timestamp without time zone NULL,
+        deleted_by text NULL,
+        orden_servicio_id uuid NOT NULL,
+        equipo_id uuid NOT NULL,
+        equipo_codigo varchar(60) NULL,
+        equipo_nombre varchar(200) NULL
+      )
+    `);
+    await this.dataSource.query(`
       CREATE INDEX IF NOT EXISTS idx_tb_orden_servicio_codigo
       ON kpi_inventory.tb_orden_servicio (codigo)
       WHERE is_deleted = false
@@ -577,6 +872,27 @@ export class OrdenServicioService implements OnModuleInit {
       CREATE INDEX IF NOT EXISTS idx_tb_orden_servicio_det_orden
       ON kpi_inventory.tb_orden_servicio_det (orden_servicio_id)
       WHERE is_deleted = false
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_orden_servicio_equipo_orden
+      ON kpi_inventory.tb_orden_servicio_equipo (orden_servicio_id)
+      WHERE is_deleted = false
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE kpi_inventory.tb_orden_servicio
+      ADD COLUMN IF NOT EXISTS servicio_realizado boolean NOT NULL DEFAULT false
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE kpi_inventory.tb_orden_servicio
+      ADD COLUMN IF NOT EXISTS servicio_realizado_at timestamp without time zone NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE kpi_inventory.tb_orden_servicio
+      ADD COLUMN IF NOT EXISTS servicio_realizado_by varchar(200) NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE kpi_inventory.tb_orden_servicio
+      ADD COLUMN IF NOT EXISTS servicio_realizado_by_email varchar(200) NULL
     `);
     await this.dataSource.query(`
       ALTER TABLE kpi_inventory.tb_orden_servicio

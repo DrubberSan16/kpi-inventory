@@ -71,4 +71,20 @@ export class OrdenServicio extends BaseAuditEntity {
   @Column({ type: 'text', default: 'EMITIDA' })
   @ApiProperty({ description: 'estado de la orden' })
   estado: string;
+
+  @Column({ type: 'boolean', default: false })
+  @ApiProperty({ description: 'indica si el servicio fue realizado' })
+  servicio_realizado: boolean;
+
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  @ApiPropertyOptional({ description: 'fecha y hora de confirmacion del servicio' })
+  servicio_realizado_at?: Date | null;
+
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  @ApiPropertyOptional({ description: 'usuario que confirmo el servicio' })
+  servicio_realizado_by?: string | null;
+
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  @ApiPropertyOptional({ description: 'correo del usuario que confirmo el servicio' })
+  servicio_realizado_by_email?: string | null;
 }
