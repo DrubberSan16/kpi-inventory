@@ -17,6 +17,10 @@ export class StockBodega extends BaseAuditEntity {
   stock_actual: string;
 
   @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
+  @ApiProperty({ description: 'stock fisico' })
+  stock_fisico: string;
+
+  @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
   @ApiProperty({ description: 'stock min bodega' })
   stock_min_bodega: string;
 
@@ -35,4 +39,8 @@ export class StockBodega extends BaseAuditEntity {
   @Column({ type: 'numeric', precision: 14, scale: 4, default: 0 })
   @ApiProperty({ description: 'costo promedio bodega' })
   costo_promedio_bodega: string;
+
+  @Column({ type: 'boolean', default: false })
+  @ApiProperty({ description: 'material usado' })
+  es_usado: boolean;
 }

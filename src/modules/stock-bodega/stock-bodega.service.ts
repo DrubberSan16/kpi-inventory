@@ -1,7 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
-import { DeepPartial, Repository, Brackets } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DeepPartial, Repository, Brackets, DataSource } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { Bodega } from '../entities/bodega.entity';
 import { Producto } from '../entities/producto.entity';
@@ -9,7 +9,10 @@ import { StockBodega } from '../entities/stock-bodega.entity';
 import { StockBodegaQueryDto } from './stock-bodega-query.dto';
 
 @Injectable()
-export class StockBodegaService extends CrudService<StockBodega> {
+export class StockBodegaService
+  extends CrudService<StockBodega>
+  implements OnModuleInit
+{
   private readonly logger = new Logger(StockBodegaService.name);
   private readonly closedWorkOrderStatuses = [
     'CANCELLED',
@@ -27,20 +30,29 @@ export class StockBodegaService extends CrudService<StockBodega> {
 
   constructor(
     @InjectRepository(StockBodega) repository: Repository<StockBodega>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
   ) {
     super(repository);
   }
 
+  async onModuleInit() {
+    await this.ensureSchema();
+  }
+
   create(payload: DeepPartial<StockBodega>) {
-    return super.create(payload).then((created) => {
+    return super.create(this.normalizeStockPayload(payload)).then((created) => {
       void this.notifyMaintenanceAlertRecalculation('create', created.id);
       return created;
     });
   }
 
   async update(id: string, payload: DeepPartial<StockBodega>) {
-    const updated = await super.update(id, payload);
+    const current = await this.findOne(id);
+    const updated = await super.update(
+      id,
+      this.normalizeStockPayload(payload, current),
+    );
     void this.notifyMaintenanceAlertRecalculation('update', id);
     return updated;
   }
@@ -134,6 +146,10 @@ export class StockBodegaService extends CrudService<StockBodega> {
         'bodega_label',
       )
       .addSelect('COALESCE(producto.es_aceite, false)', 'producto_es_aceite')
+      .addSelect(
+        `COALESCE(stock.stock_actual, 0) - COALESCE(stock.stock_fisico, 0)`,
+        'stock_diferencia',
+      )
       .addSelect(activeReservationSql, 'cantidad_reservada_activa')
       .addSelect(
         `GREATEST(COALESCE(stock.stock_actual, 0) - ${activeReservationSql}, 0)`,
@@ -150,6 +166,7 @@ export class StockBodegaService extends CrudService<StockBodega> {
       producto_label: raw[index]?.producto_label ?? null,
       bodega_label: raw[index]?.bodega_label ?? null,
       es_aceite: Boolean(raw[index]?.producto_es_aceite ?? false),
+      diferencia: Number(raw[index]?.stock_diferencia ?? 0),
       cantidad_reservada_activa: Number(
         raw[index]?.cantidad_reservada_activa ?? 0,
       ),
@@ -212,5 +229,70 @@ export class StockBodegaService extends CrudService<StockBodega> {
         `Error notificando recálculo de alertas desde inventario (${action}:${stockId}): ${message}`,
       );
     }
+  }
+
+  private normalizeStockPayload(
+    payload: DeepPartial<StockBodega>,
+    current?: StockBodega | null,
+  ): DeepPartial<StockBodega> {
+    const stockActual = this.toDecimalText(
+      Object.prototype.hasOwnProperty.call(payload, 'stock_actual')
+        ? payload.stock_actual
+        : current?.stock_actual,
+      current?.stock_actual ?? '0',
+    );
+    const hasPhysicalStock = Object.prototype.hasOwnProperty.call(
+      payload,
+      'stock_fisico',
+    );
+    const stockFisico = this.toDecimalText(
+      hasPhysicalStock ? payload.stock_fisico : current?.stock_fisico,
+      current?.stock_fisico ?? stockActual,
+    );
+
+    return {
+      ...payload,
+      stock_actual: stockActual,
+      stock_fisico: stockFisico,
+      es_usado: this.toBoolean(
+        Object.prototype.hasOwnProperty.call(payload, 'es_usado')
+          ? payload.es_usado
+          : current?.es_usado,
+      ),
+    };
+  }
+
+  private toDecimalText(value: unknown, fallback = '0') {
+    if (value === null || value === undefined || value === '') return fallback;
+    const normalized = String(value).replace(',', '.').trim();
+    const numeric = Number(normalized);
+    if (!Number.isFinite(numeric)) return fallback;
+    return numeric.toString();
+  }
+
+  private toBoolean(value: unknown) {
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value ?? '')
+      .trim()
+      .toLowerCase();
+    return ['true', '1', 'si', 'sí', 's', 'yes', 'y', 'on'].includes(
+      normalized,
+    );
+  }
+
+  private async ensureSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_fisico numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS es_usado boolean NOT NULL DEFAULT false
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_stock_bodega_es_usado
+      ON kpi_inventory.tb_stock_bodega (es_usado)
+      WHERE is_deleted = false
+    `);
   }
 }

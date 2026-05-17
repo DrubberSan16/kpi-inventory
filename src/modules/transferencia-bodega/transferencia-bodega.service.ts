@@ -384,6 +384,7 @@ export class TransferenciaBodegaService {
         if (order && movementReceipt) {
           currentSourceStock += quantity;
           sourceStock.stock_actual = this.toFixedText(currentSourceStock, 6);
+          sourceStock.stock_fisico = this.toFixedText(currentSourceStock, 6);
           sourceStock.costo_promedio_bodega = this.toFixedText(unitCost, 4);
           sourceStock.updated_by = userName;
           await manager.save(StockBodega, sourceStock);
@@ -439,6 +440,10 @@ export class TransferenciaBodegaService {
           currentSourceStock - quantity,
           6,
         );
+        sourceStock.stock_fisico = this.toFixedText(
+          this.toNumber(sourceStock.stock_fisico, currentSourceStock) - quantity,
+          6,
+        );
         sourceStock.updated_by = userName;
         await manager.save(StockBodega, sourceStock);
         changedStockIds.add(sourceStock.id);
@@ -451,6 +456,10 @@ export class TransferenciaBodegaService {
         });
         const currentDestStock = this.toNumber(destStock.stock_actual, 0);
         destStock.stock_actual = this.toFixedText(currentDestStock + quantity, 6);
+        destStock.stock_fisico = this.toFixedText(
+          this.toNumber(destStock.stock_fisico, currentDestStock) + quantity,
+          6,
+        );
         destStock.costo_promedio_bodega = this.toFixedText(unitCost, 4);
         destStock.updated_by = userName;
         await manager.save(StockBodega, destStock);
@@ -941,6 +950,7 @@ export class TransferenciaBodegaService {
         bodega_id: args.bodegaId,
         producto_id: args.productoId,
         stock_actual: '0.000000',
+        stock_fisico: '0.000000',
         stock_min_bodega: '0.000000',
         stock_max_bodega: '0.000000',
         stock_min_global: '0.000000',
