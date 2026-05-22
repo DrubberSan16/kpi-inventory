@@ -1,9 +1,12 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { DataSource, EntityManager, ILike, In, Repository } from 'typeorm';
 import {
   Bodega,
@@ -29,6 +32,8 @@ type Totals = {
 
 @Injectable()
 export class OrdenCompraService {
+  private readonly logger = new Logger(OrdenCompraService.name);
+
   constructor(
     @InjectRepository(OrdenCompra)
     private readonly ordenRepo: Repository<OrdenCompra>,
@@ -42,8 +47,56 @@ export class OrdenCompraService {
     private readonly bodegaRepo: Repository<Bodega>,
     @InjectRepository(TransferenciaBodega)
     private readonly transferenciaRepo: Repository<TransferenciaBodega>,
+    private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  private get securityServiceUrl() {
+    return String(
+      this.configService.get('SECURITY_SERVICE_URL') ||
+        this.configService.get('KPI_SECURITY_URL') ||
+        '',
+    )
+      .trim()
+      .replace(/\/$/, '');
+  }
+
+  private queueTransactionLog(payload: {
+    traceId: string;
+    typeLog: string;
+    description: string;
+    createdBy?: string | null;
+    status?: string;
+  }) {
+    void this.writeTransactionLog(payload);
+  }
+
+  private async writeTransactionLog(payload: {
+    traceId: string;
+    typeLog: string;
+    description: string;
+    createdBy?: string | null;
+    status?: string;
+  }) {
+    if (!this.securityServiceUrl) return;
+    try {
+      await fetch(`${this.securityServiceUrl}/log-transacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          moduleMicroservice: 'kpi_inventory',
+          status: payload.status ?? 'SUCCESS',
+          typeLog: payload.typeLog,
+          description: `[TRACE:${payload.traceId}] ${payload.description}`,
+          createdBy: payload.createdBy ?? null,
+        }),
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo registrar log transaccional de orden de compra: ${error?.message ?? 'desconocido'}`,
+      );
+    }
+  }
 
   private async getWarehouseIdsBySucursal(sucursalId?: string | null) {
     if (!sucursalId) return null;
@@ -161,88 +214,168 @@ export class OrdenCompraService {
   }
 
   async create(dto: CreateOrdenCompraDto) {
-    return this.dataSource.transaction(async (manager) => {
-      return this.saveOrder(manager, dto);
+    const traceId = randomUUID();
+    const createdBy = this.resolveUserName(dto);
+    this.queueTransactionLog({
+      traceId,
+      typeLog: 'PURCHASE_ORDER_FLOW',
+      createdBy,
+      description: 'Inicio de registro de orden de compra.',
     });
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
+        return this.saveOrder(manager, dto, undefined, traceId);
+      });
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy,
+        description: `Orden de compra ${this.toText((result as any)?.codigo) || 'sin-codigo'} registrada correctamente.`,
+      });
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy,
+        status: 'ERROR',
+        description: `Fallo al registrar orden de compra: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
   }
 
   async update(id: string, dto: UpdateOrdenCompraDto) {
-    return this.dataSource.transaction(async (manager) => {
-      const current = await manager.findOne(OrdenCompra, {
-        where: { id, is_deleted: false },
-      });
-      if (!current) {
-        throw new NotFoundException('La orden de compra no existe.');
-      }
-
-      const transfer = await manager.findOne(TransferenciaBodega, {
-        where: { orden_compra_id: id, is_deleted: false },
-      });
-      if (transfer) {
-        throw new BadRequestException(
-          'La orden ya tiene una transferencia registrada y no se puede modificar.',
-        );
-      }
-
-      const details = await manager.find(OrdenCompraDet, {
-        where: { orden_compra_id: id, is_deleted: false },
-      });
-      if (details.length) {
-        details.forEach((item) => {
-          item.is_deleted = true;
-          item.deleted_at = new Date();
-          item.deleted_by = this.resolveUserName(dto);
-        });
-        await manager.save(OrdenCompraDet, details);
-      }
-
-      return this.saveOrder(manager, dto, current);
+    const traceId = randomUUID();
+    const createdBy = this.resolveUserName(dto);
+    this.queueTransactionLog({
+      traceId,
+      typeLog: 'PURCHASE_ORDER_FLOW',
+      createdBy,
+      description: `Inicio de actualizacion de orden de compra ${id}.`,
     });
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
+        const current = await manager.findOne(OrdenCompra, {
+          where: { id, is_deleted: false },
+        });
+        if (!current) {
+          throw new NotFoundException('La orden de compra no existe.');
+        }
+
+        const transfer = await manager.findOne(TransferenciaBodega, {
+          where: { orden_compra_id: id, is_deleted: false },
+        });
+        if (transfer) {
+          throw new BadRequestException(
+            'La orden ya tiene una transferencia registrada y no se puede modificar.',
+          );
+        }
+
+        const details = await manager.find(OrdenCompraDet, {
+          where: { orden_compra_id: id, is_deleted: false },
+        });
+        if (details.length) {
+          details.forEach((item) => {
+            item.is_deleted = true;
+            item.deleted_at = new Date();
+            item.deleted_by = this.resolveUserName(dto);
+          });
+          await manager.save(OrdenCompraDet, details);
+        }
+
+        return this.saveOrder(manager, dto, current, traceId);
+      });
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy,
+        description: `Orden de compra ${this.toText((result as any)?.codigo) || id} actualizada correctamente.`,
+      });
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy,
+        status: 'ERROR',
+        description: `Fallo al actualizar orden de compra ${id}: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
   }
 
   async remove(id: string, deletedBy?: string) {
-    return this.dataSource.transaction(async (manager) => {
-      const current = await manager.findOne(OrdenCompra, {
-        where: { id, is_deleted: false },
-      });
-      if (!current) {
-        throw new NotFoundException('La orden de compra no existe.');
-      }
-      const transfer = await manager.findOne(TransferenciaBodega, {
-        where: { orden_compra_id: id, is_deleted: false },
-      });
-      if (transfer) {
-        throw new BadRequestException(
-          'La orden ya tiene una transferencia registrada y no se puede eliminar.',
-        );
-      }
-
-      current.is_deleted = true;
-      current.deleted_at = new Date();
-      current.deleted_by = deletedBy ?? null;
-      current.estado = 'ANULADA';
-      await manager.save(OrdenCompra, current);
-
-      const details = await manager.find(OrdenCompraDet, {
-        where: { orden_compra_id: id, is_deleted: false },
-      });
-      if (details.length) {
-        details.forEach((item) => {
-          item.is_deleted = true;
-          item.deleted_at = new Date();
-          item.deleted_by = deletedBy ?? null;
-        });
-        await manager.save(OrdenCompraDet, details);
-      }
-
-      return { message: `Orden de compra ${current.codigo} eliminada correctamente` };
+    const traceId = randomUUID();
+    this.queueTransactionLog({
+      traceId,
+      typeLog: 'PURCHASE_ORDER_FLOW',
+      createdBy: deletedBy ?? null,
+      description: `Inicio de anulacion de orden de compra ${id}.`,
     });
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
+        const current = await manager.findOne(OrdenCompra, {
+          where: { id, is_deleted: false },
+        });
+        if (!current) {
+          throw new NotFoundException('La orden de compra no existe.');
+        }
+        const transfer = await manager.findOne(TransferenciaBodega, {
+          where: { orden_compra_id: id, is_deleted: false },
+        });
+        if (transfer) {
+          throw new BadRequestException(
+            'La orden ya tiene una transferencia registrada y no se puede eliminar.',
+          );
+        }
+
+        current.is_deleted = true;
+        current.deleted_at = new Date();
+        current.deleted_by = deletedBy ?? null;
+        current.estado = 'ANULADA';
+        await manager.save(OrdenCompra, current);
+
+        const details = await manager.find(OrdenCompraDet, {
+          where: { orden_compra_id: id, is_deleted: false },
+        });
+        if (details.length) {
+          details.forEach((item) => {
+            item.is_deleted = true;
+            item.deleted_at = new Date();
+            item.deleted_by = deletedBy ?? null;
+          });
+          await manager.save(OrdenCompraDet, details);
+        }
+
+        return {
+          message: `Orden de compra ${current.codigo} eliminada correctamente`,
+        };
+      });
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy: deletedBy ?? null,
+        description: `Orden de compra ${id} anulada correctamente.`,
+      });
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy: deletedBy ?? null,
+        status: 'ERROR',
+        description: `Fallo al anular orden de compra ${id}: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
   }
 
   private async saveOrder(
     manager: EntityManager,
     dto: CreateOrdenCompraDto,
     current?: OrdenCompra,
+    traceId?: string,
   ) {
     const userName = this.resolveUserName(dto);
     const details = Array.isArray(dto.detalles) ? dto.detalles : [];
@@ -281,6 +414,14 @@ export class OrdenCompraService {
 
     const preparedDetails = await this.prepareDetails(manager, details, warehouseId);
     const totals = this.calculateTotals(preparedDetails);
+    if (traceId) {
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy: userName,
+        description: `Validacion completada para orden de compra. Materiales=${preparedDetails.length}.`,
+      });
+    }
 
     const entity =
       current ??
@@ -320,6 +461,14 @@ export class OrdenCompraService {
     entity.updated_by = userName;
 
     const savedOrder = await manager.save(OrdenCompra, entity);
+    if (traceId) {
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy: userName,
+        description: `Cabecera persistida para orden de compra ${savedOrder.codigo}.`,
+      });
+    }
 
     const detailEntities = preparedDetails.map((detail) =>
       manager.create(OrdenCompraDet, {
@@ -344,6 +493,14 @@ export class OrdenCompraService {
       }),
     );
     await manager.save(OrdenCompraDet, detailEntities);
+    if (traceId) {
+      this.queueTransactionLog({
+        traceId,
+        typeLog: 'PURCHASE_ORDER_FLOW',
+        createdBy: userName,
+        description: `Detalle persistido para orden de compra ${savedOrder.codigo}. Filas=${detailEntities.length}.`,
+      });
+    }
 
     const [hydrated] = await this.hydrateOrdersWithManager(manager, [savedOrder], true);
     return hydrated;

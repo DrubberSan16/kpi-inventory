@@ -1,10 +1,13 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { DataSource, EntityManager, ILike, Repository } from 'typeorm';
 import {
   MaintenanceEquipo,
@@ -39,6 +42,8 @@ type RequestActorContext = {
 
 @Injectable()
 export class OrdenServicioService implements OnModuleInit {
+  private readonly logger = new Logger(OrdenServicioService.name);
+
   constructor(
     @InjectRepository(OrdenServicio)
     private readonly ordenRepo: Repository<OrdenServicio>,
@@ -52,8 +57,54 @@ export class OrdenServicioService implements OnModuleInit {
     private readonly terceroRepo: Repository<Tercero>,
     @InjectRepository(MaintenanceEquipo)
     private readonly maintenanceEquipoRepo: Repository<MaintenanceEquipo>,
+    private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  private get securityServiceUrl() {
+    return String(
+      this.configService.get('SECURITY_SERVICE_URL') ||
+        this.configService.get('KPI_SECURITY_URL') ||
+        '',
+    )
+      .trim()
+      .replace(/\/$/, '');
+  }
+
+  private queueTransactionLog(payload: {
+    traceId: string;
+    description: string;
+    createdBy?: string | null;
+    status?: string;
+  }) {
+    void this.writeTransactionLog(payload);
+  }
+
+  private async writeTransactionLog(payload: {
+    traceId: string;
+    description: string;
+    createdBy?: string | null;
+    status?: string;
+  }) {
+    if (!this.securityServiceUrl) return;
+    try {
+      await fetch(`${this.securityServiceUrl}/log-transacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          moduleMicroservice: 'kpi_inventory',
+          status: payload.status ?? 'SUCCESS',
+          typeLog: 'SERVICE_ORDER_FLOW',
+          description: `[TRACE:${payload.traceId}] ${payload.description}`,
+          createdBy: payload.createdBy ?? null,
+        }),
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo registrar log transaccional de orden de servicio: ${error?.message ?? 'desconocido'}`,
+      );
+    }
+  }
 
   async onModuleInit() {
     await this.ensureSchema();
@@ -141,9 +192,32 @@ export class OrdenServicioService implements OnModuleInit {
   }
 
   async create(dto: CreateOrdenServicioDto, actor?: RequestActorContext | null) {
-    return this.dataSource.transaction(async (manager) =>
-      this.saveOrder(manager, dto, undefined, actor),
-    );
+    const traceId = randomUUID();
+    const createdBy = this.resolveUserName(dto, actor);
+    this.queueTransactionLog({
+      traceId,
+      createdBy,
+      description: 'Inicio de registro de orden de servicio.',
+    });
+    try {
+      const result = await this.dataSource.transaction(async (manager) =>
+        this.saveOrder(manager, dto, undefined, actor, traceId),
+      );
+      this.queueTransactionLog({
+        traceId,
+        createdBy,
+        description: `Orden de servicio ${this.toText((result as any)?.codigo) || 'sin-codigo'} registrada correctamente.`,
+      });
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy,
+        status: 'ERROR',
+        description: `Fallo al registrar orden de servicio: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
   }
 
   async update(
@@ -151,40 +225,63 @@ export class OrdenServicioService implements OnModuleInit {
     dto: UpdateOrdenServicioDto,
     actor?: RequestActorContext | null,
   ) {
-    return this.dataSource.transaction(async (manager) => {
-      const current = await manager.findOne(OrdenServicio, {
-        where: { id, is_deleted: false },
-      });
-      if (!current) {
-        throw new NotFoundException('La orden de servicio no existe.');
-      }
-
-      const details = await manager.find(OrdenServicioDet, {
-        where: { orden_servicio_id: id, is_deleted: false },
-      });
-      if (details.length) {
-        details.forEach((item) => {
-          item.is_deleted = true;
-          item.deleted_at = new Date();
-          item.deleted_by = this.resolveUserName(dto);
-        });
-        await manager.save(OrdenServicioDet, details);
-      }
-
-      const linkedEquipments = await manager.find(OrdenServicioEquipo, {
-        where: { orden_servicio_id: id, is_deleted: false },
-      });
-      if (linkedEquipments.length) {
-        linkedEquipments.forEach((item) => {
-          item.is_deleted = true;
-          item.deleted_at = new Date();
-          item.deleted_by = this.resolveUserName(dto, actor);
-        });
-        await manager.save(OrdenServicioEquipo, linkedEquipments);
-      }
-
-      return this.saveOrder(manager, dto, current, actor);
+    const traceId = randomUUID();
+    const createdBy = this.resolveUserName(dto, actor);
+    this.queueTransactionLog({
+      traceId,
+      createdBy,
+      description: `Inicio de actualizacion de orden de servicio ${id}.`,
     });
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
+        const current = await manager.findOne(OrdenServicio, {
+          where: { id, is_deleted: false },
+        });
+        if (!current) {
+          throw new NotFoundException('La orden de servicio no existe.');
+        }
+
+        const details = await manager.find(OrdenServicioDet, {
+          where: { orden_servicio_id: id, is_deleted: false },
+        });
+        if (details.length) {
+          details.forEach((item) => {
+            item.is_deleted = true;
+            item.deleted_at = new Date();
+            item.deleted_by = this.resolveUserName(dto);
+          });
+          await manager.save(OrdenServicioDet, details);
+        }
+
+        const linkedEquipments = await manager.find(OrdenServicioEquipo, {
+          where: { orden_servicio_id: id, is_deleted: false },
+        });
+        if (linkedEquipments.length) {
+          linkedEquipments.forEach((item) => {
+            item.is_deleted = true;
+            item.deleted_at = new Date();
+            item.deleted_by = this.resolveUserName(dto, actor);
+          });
+          await manager.save(OrdenServicioEquipo, linkedEquipments);
+        }
+
+        return this.saveOrder(manager, dto, current, actor, traceId);
+      });
+      this.queueTransactionLog({
+        traceId,
+        createdBy,
+        description: `Orden de servicio ${this.toText((result as any)?.codigo) || id} actualizada correctamente.`,
+      });
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy,
+        status: 'ERROR',
+        description: `Fallo al actualizar orden de servicio ${id}: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
   }
 
   async markServicePerformed(
@@ -334,6 +431,7 @@ export class OrdenServicioService implements OnModuleInit {
     dto: CreateOrdenServicioDto,
     current?: OrdenServicio,
     actor?: RequestActorContext | null,
+    traceId?: string,
   ) {
     const userName = this.resolveUserName(dto, actor);
     const details = Array.isArray(dto.detalles) ? dto.detalles : [];
@@ -370,6 +468,13 @@ export class OrdenServicioService implements OnModuleInit {
       requestedEquipmentIds,
     );
     const totals = this.calculateTotals(preparedDetails);
+    if (traceId) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy: userName,
+        description: `Validacion completada para orden de servicio. Servicios=${preparedDetails.length}, equipos=${linkedEquipments.length}.`,
+      });
+    }
     const entity =
       current ??
       manager.create(OrdenServicio, {
@@ -415,6 +520,13 @@ export class OrdenServicioService implements OnModuleInit {
     entity.updated_by = userName;
 
     const savedOrder = await manager.save(OrdenServicio, entity);
+    if (traceId) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy: userName,
+        description: `Cabecera persistida para orden de servicio ${savedOrder.codigo}.`,
+      });
+    }
     const detailEntities = preparedDetails.map((detail) =>
       manager.create(OrdenServicioDet, {
         orden_servicio_id: savedOrder.id,
@@ -450,6 +562,13 @@ export class OrdenServicioService implements OnModuleInit {
           }),
         ),
       );
+    }
+    if (traceId) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy: userName,
+        description: `Detalle persistido para orden de servicio ${savedOrder.codigo}. Filas=${detailEntities.length}.`,
+      });
     }
 
     const [hydrated] = await this.hydrateOrdersWithManager(

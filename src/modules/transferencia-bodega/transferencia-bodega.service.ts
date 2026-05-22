@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
 import {
   Bodega,
@@ -66,6 +67,51 @@ export class TransferenciaBodegaService {
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  private get securityServiceUrl() {
+    return String(
+      this.configService.get('SECURITY_SERVICE_URL') ||
+        this.configService.get('KPI_SECURITY_URL') ||
+        '',
+    )
+      .trim()
+      .replace(/\/$/, '');
+  }
+
+  private queueTransactionLog(payload: {
+    traceId: string;
+    description: string;
+    createdBy?: string | null;
+    status?: string;
+  }) {
+    void this.writeTransactionLog(payload);
+  }
+
+  private async writeTransactionLog(payload: {
+    traceId: string;
+    description: string;
+    createdBy?: string | null;
+    status?: string;
+  }) {
+    if (!this.securityServiceUrl) return;
+    try {
+      await fetch(`${this.securityServiceUrl}/log-transacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          moduleMicroservice: 'kpi_inventory',
+          status: payload.status ?? 'SUCCESS',
+          typeLog: 'WAREHOUSE_TRANSFER_FLOW',
+          description: `[TRACE:${payload.traceId}] ${payload.description}`,
+          createdBy: payload.createdBy ?? null,
+        }),
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo registrar log transaccional de transferencia: ${error?.message ?? 'desconocido'}`,
+      );
+    }
+  }
 
   private async getWarehouseIdsBySucursal(sucursalId?: string | null) {
     if (!sucursalId) return null;
@@ -164,7 +210,15 @@ export class TransferenciaBodegaService {
   }
 
   async create(dto: CreateTransferenciaBodegaDto) {
-    return this.dataSource.transaction(async (manager) => {
+    const traceId = randomUUID();
+    const createdBy = this.resolveUserName(dto);
+    this.queueTransactionLog({
+      traceId,
+      createdBy,
+      description: 'Inicio de registro de transferencia de bodega.',
+    });
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
       const userName = this.resolveUserName(dto);
       const orderId = this.toText(dto.orden_compra_id) || null;
       const order = orderId
@@ -243,6 +297,11 @@ export class TransferenciaBodegaService {
             : 'Debes agregar al menos un material para registrar la transferencia.',
         );
       }
+      this.queueTransactionLog({
+        traceId,
+        createdBy: userName,
+        description: `Validacion completada para transferencia. Materiales=${requestedDetails.length}.`,
+      });
       const code = await this.generateCode(manager, 'TB');
       const egressCode = await this.generateMovementDocumentCode(manager, 'EB');
       const fechaTransferencia = dto.fecha_transferencia
@@ -273,6 +332,11 @@ export class TransferenciaBodegaService {
             }),
           )
         : null;
+      this.queueTransactionLog({
+        traceId,
+        createdBy: userName,
+        description: `Documentos base generados para transferencia ${code}.`,
+      });
 
       const ingressCode = await this.generateMovementDocumentCode(manager, 'IB');
 
@@ -336,6 +400,11 @@ export class TransferenciaBodegaService {
           updated_by: userName,
         }),
       );
+      this.queueTransactionLog({
+        traceId,
+        createdBy: userName,
+        description: `Cabecera de transferencia ${transfer.codigo} persistida.`,
+      });
 
       const changedStockIds = new Set<string>();
       let totalCost = 0;
@@ -600,6 +669,11 @@ export class TransferenciaBodegaService {
       );
       await manager.save(MovimientoInventario, movementBatch);
       await manager.save(TransferenciaBodegaDet, transferDetailEntities);
+      this.queueTransactionLog({
+        traceId,
+        createdBy: userName,
+        description: `Detalle y movimientos confirmados para transferencia ${transfer.codigo}. Filas=${transferDetailEntities.length}.`,
+      });
 
       transfer.total_items = transferDetailEntities.length;
       transfer.total_cantidad = this.toFixedText(
@@ -625,7 +699,22 @@ export class TransferenciaBodegaService {
         true,
       );
       return hydrated;
-    });
+      });
+      this.queueTransactionLog({
+        traceId,
+        createdBy,
+        description: `Transferencia ${this.toText((result as any)?.codigo) || 'sin-codigo'} registrada correctamente.`,
+      });
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy,
+        status: 'ERROR',
+        description: `Fallo al registrar transferencia de bodega: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
   }
 
   private async hydrateTransfers(
