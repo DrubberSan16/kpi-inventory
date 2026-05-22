@@ -545,6 +545,7 @@ export class KardexService extends CrudService<Kardex> {
         'movimiento.numero_documento AS movimiento_numero_documento',
         'movimiento.referencia AS movimiento_referencia',
         'movimiento.tipo_documento AS movimiento_tipo_documento',
+        'movimiento.work_order_id AS movimiento_work_order_id',
         'movimiento.observacion AS movimiento_observacion',
         'transferencia.codigo AS transferencia_codigo',
       ])
@@ -1217,6 +1218,12 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private resolveDocumentTypeLabel(item: MovimientoInventario) {
+    if (
+      String(item.tipo_movimiento || '').toUpperCase() === 'SALIDA' &&
+      this.toText(item.work_order_id)
+    ) {
+      return 'Egreso por orden de trabajo';
+    }
     const documentNumber = this.toText(item.numero_documento).toUpperCase();
     if (documentNumber.startsWith('IB-')) return 'Ingreso de bodega';
     if (documentNumber.startsWith('EB-')) return 'Egreso de bodega';
@@ -1288,6 +1295,7 @@ export class KardexService extends CrudService<Kardex> {
     const tipoDocumento = this.toText(row.movimiento_tipo_documento).toUpperCase();
     const tipo = this.normalizeMovementType(row.tipo_movimiento);
     const referencia = this.toText(row.movimiento_referencia).toUpperCase();
+    const workOrderId = this.toText(row.movimiento_work_order_id);
     if (tipoDocumento === 'INGRESO_BODEGA') {
       if (referencia.startsWith('TB-')) return 'IN-TRANSFERENCIAS';
       if (referencia.startsWith('OC-') || referencia.startsWith('IB-')) {
@@ -1296,6 +1304,9 @@ export class KardexService extends CrudService<Kardex> {
       return 'IN-BODEGA';
     }
     if (tipoDocumento === 'EGRESO_BODEGA') {
+      if (workOrderId || referencia.startsWith('OT-')) {
+        return 'EG-ORDEN TRABAJO';
+      }
       if (referencia.startsWith('TB-')) return 'EG-TRANSFERENCIAS';
       return 'EG-BODEGA';
     }
@@ -1304,6 +1315,9 @@ export class KardexService extends CrudService<Kardex> {
     }
     if (tipoDocumento === 'ORDEN_COMPRA') {
       return 'IN-ORDEN_COMPRA';
+    }
+    if (tipo === 'SALIDA' && (workOrderId || referencia.startsWith('OT-'))) {
+      return 'EG-ORDEN TRABAJO';
     }
     if (tipo === 'INGRESO') return 'IN-MANUAL';
     if (tipo === 'SALIDA') return 'EG-MANUAL';

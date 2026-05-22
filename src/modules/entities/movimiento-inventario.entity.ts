@@ -29,6 +29,10 @@ export class MovimientoInventario extends BaseAuditEntity {
   observacion?: string | null;
 
   @Column({ type: 'uuid', nullable: true })
+  @ApiPropertyOptional({ description: 'orden de trabajo id' })
+  work_order_id?: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
   @ApiPropertyOptional({ description: 'bodega origen id' })
   bodega_origen_id?: string | null;
 
