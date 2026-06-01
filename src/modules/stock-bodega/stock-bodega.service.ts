@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
   OnModuleInit,
+  NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -12,12 +14,19 @@ import {
   Brackets,
   DataSource,
   QueryFailedError,
+  EntityManager,
 } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { Bodega } from '../entities/bodega.entity';
+import { Kardex } from '../entities/kardex.entity';
+import { MovimientoInventario } from '../entities/movimiento-inventario.entity';
+import { MovimientoInventarioDet } from '../entities/movimiento-inventario-det.entity';
 import { Producto } from '../entities/producto.entity';
 import { StockBodega } from '../entities/stock-bodega.entity';
 import { StockBodegaQueryDto } from './stock-bodega-query.dto';
+
+type StockMovementType = 'INGRESO' | 'SALIDA';
+type StockMaterialCondition = 'NUEVO' | 'USADO';
 
 @Injectable()
 export class StockBodegaService
@@ -56,7 +65,18 @@ export class StockBodegaService
     await this.ensureUniqueWarehouseProductStock(preparedPayload);
 
     try {
-      const created = await super.create(preparedPayload);
+      const created = await this.dataSource.transaction(async (manager) => {
+        const stockRepo = manager.getRepository(StockBodega);
+        const createdRow = await stockRepo.save(
+          stockRepo.create(preparedPayload),
+        );
+        await this.createStockAdjustmentArtifacts(manager, {
+          previous: null,
+          current: createdRow,
+          payload,
+        });
+        return createdRow;
+      });
       void this.notifyMaintenanceAlertRecalculation('create', created.id);
       return created;
     } catch (error) {
@@ -74,7 +94,24 @@ export class StockBodegaService
     );
 
     try {
-      const updated = await super.update(id, preparedPayload);
+      const updated = await this.dataSource.transaction(async (manager) => {
+        const stockRepo = manager.getRepository(StockBodega);
+        const currentInTx = await stockRepo.findOne({
+          where: { id, is_deleted: false },
+        });
+        if (!currentInTx) {
+          throw new NotFoundException(`Registro ${id} no encontrado`);
+        }
+        const previousSnapshot = stockRepo.create({ ...currentInTx });
+        const merged = stockRepo.merge(currentInTx, preparedPayload);
+        const updatedRow = await stockRepo.save(merged);
+        await this.createStockAdjustmentArtifacts(manager, {
+          previous: previousSnapshot,
+          current: updatedRow,
+          payload,
+        });
+        return updatedRow;
+      });
       void this.notifyMaintenanceAlertRecalculation('update', id);
       return updated;
     } catch (error) {
@@ -409,6 +446,223 @@ export class StockBodegaService
     return null;
   }
 
+  private async createStockAdjustmentArtifacts(
+    manager: EntityManager,
+    args: {
+      previous?: StockBodega | null;
+      current: StockBodega;
+      payload?: DeepPartial<StockBodega>;
+    },
+  ) {
+    const previousTotal = this.toNumeric(args.previous?.stock_actual, 0);
+    const currentTotal = this.toNumeric(args.current.stock_actual, 0);
+    const delta = Number((currentTotal - previousTotal).toFixed(6));
+    if (Math.abs(delta) < 0.000001) return null;
+
+    if (currentTotal < -0.000001) {
+      throw new BadRequestException('El stock actual no puede ser negativo.');
+    }
+
+    const productoId = this.firstNonEmptyString(args.current.producto_id);
+    const bodegaId = this.firstNonEmptyString(args.current.bodega_id);
+    if (!productoId || !bodegaId) return null;
+
+    const producto = await manager.findOne(Producto, {
+      where: { id: productoId, is_deleted: false },
+    });
+    const bodega = await manager.findOne(Bodega, {
+      where: { id: bodegaId, is_deleted: false },
+    });
+    if (!producto || !bodega) return null;
+
+    const tipo: StockMovementType = delta > 0 ? 'INGRESO' : 'SALIDA';
+    const cantidad = Math.abs(delta);
+    const condicionMaterial = this.resolveStockAdjustmentCondition(
+      args.previous,
+      args.current,
+      tipo,
+    );
+    const costoUnitario = this.resolveStockAdjustmentUnitCost(
+      args.current,
+      producto,
+    );
+    const userName =
+      this.firstNonEmptyString(
+        (args.payload as any)?.updated_by,
+        (args.payload as any)?.created_by,
+        args.current.updated_by,
+        args.current.created_by,
+      ) ?? 'SYSTEM';
+    const observacion =
+      this.firstNonEmptyString((args.payload as any)?.observacion) ??
+      `Ajuste de stock por bodega (${previousTotal.toFixed(2)} -> ${currentTotal.toFixed(2)})`;
+
+    return this.createMovementArtifacts(manager, {
+      tipo,
+      bodegaId,
+      productoId,
+      cantidad,
+      costoUnitario,
+      saldoCantidad: currentTotal,
+      condicionMaterial,
+      observacion,
+      userName,
+    });
+  }
+
+  private resolveStockAdjustmentCondition(
+    previous: StockBodega | null | undefined,
+    current: StockBodega,
+    tipo: StockMovementType,
+  ): StockMaterialCondition {
+    const previousNuevo = this.toNumeric(
+      previous?.stock_nuevo,
+      this.toNumeric(previous?.stock_actual, 0) - this.toNumeric(previous?.stock_usado, 0),
+    );
+    const previousUsado = this.toNumeric(previous?.stock_usado, 0);
+    const currentNuevo = this.toNumeric(
+      current.stock_nuevo,
+      this.toNumeric(current.stock_actual, 0) - this.toNumeric(current.stock_usado, 0),
+    );
+    const currentUsado = this.toNumeric(current.stock_usado, 0);
+    const nuevoDelta = Number((currentNuevo - previousNuevo).toFixed(6));
+    const usadoDelta = Number((currentUsado - previousUsado).toFixed(6));
+
+    if (tipo === 'INGRESO') {
+      return usadoDelta > 0 && usadoDelta >= nuevoDelta ? 'USADO' : 'NUEVO';
+    }
+    return usadoDelta < 0 && Math.abs(usadoDelta) >= Math.abs(nuevoDelta)
+      ? 'USADO'
+      : 'NUEVO';
+  }
+
+  private resolveStockAdjustmentUnitCost(
+    stock: StockBodega,
+    producto?: Producto | null,
+  ) {
+    const stockCost = this.toNumeric(stock.costo_promedio_bodega, 0);
+    if (stockCost > 0) return stockCost;
+
+    const productCost = this.toNumeric(
+      producto?.costo_promedio ?? producto?.ultimo_costo,
+      0,
+    );
+    return productCost > 0 ? productCost : 0;
+  }
+
+  private async generateMovementDocumentCode(
+    manager: EntityManager,
+    prefix: 'IB' | 'EB',
+  ) {
+    const rows = await manager.find(MovimientoInventario, {
+      where: { is_deleted: false },
+      select: { numero_documento: true } as any,
+      take: 500,
+      order: { created_at: 'DESC' } as any,
+    });
+    const maxNumber = rows.reduce((max, current: any) => {
+      const match = new RegExp(`^${prefix}-(\\d{8})$`, 'i').exec(
+        String(current?.numero_documento || '').trim(),
+      );
+      const numeric = match ? Number(match[1]) : 0;
+      return numeric > max ? numeric : max;
+    }, 0);
+    return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
+  }
+
+  private async createMovementArtifacts(
+    manager: EntityManager,
+    args: {
+      tipo: StockMovementType;
+      bodegaId: string;
+      productoId: string;
+      cantidad: number;
+      costoUnitario: number;
+      saldoCantidad: number;
+      condicionMaterial: StockMaterialCondition;
+      observacion: string;
+      userName: string;
+    },
+  ) {
+    const subtotal = args.cantidad * args.costoUnitario;
+    const now = new Date();
+    const numeroDocumento = await this.generateMovementDocumentCode(
+      manager,
+      args.tipo === 'INGRESO' ? 'IB' : 'EB',
+    );
+
+    const movimiento = await manager.save(
+      MovimientoInventario,
+      manager.create(MovimientoInventario, {
+        status: 'ACTIVE',
+        tipo_movimiento: args.tipo,
+        fecha_movimiento: now,
+        tipo_documento:
+          args.tipo === 'INGRESO' ? 'INGRESO_BODEGA' : 'EGRESO_BODEGA',
+        numero_documento: numeroDocumento,
+        tipo_cambio: '1',
+        total_costos: this.toFixedText(subtotal, 4),
+        estado: 'CONFIRMADO',
+        observacion: args.observacion,
+        bodega_origen_id: args.tipo === 'SALIDA' ? args.bodegaId : null,
+        bodega_destino_id: args.tipo === 'INGRESO' ? args.bodegaId : null,
+        created_by: args.userName,
+        updated_by: args.userName,
+      }),
+    );
+
+    const detalle = await manager.save(
+      MovimientoInventarioDet,
+      manager.create(MovimientoInventarioDet, {
+        status: 'ACTIVE',
+        movimiento_id: movimiento.id,
+        producto_id: args.productoId,
+        cantidad: this.toFixedText(args.cantidad, 6),
+        costo_unitario: this.toFixedText(args.costoUnitario, 4),
+        subtotal_costo: this.toFixedText(subtotal, 4),
+        condicion_material: args.condicionMaterial,
+        observacion: args.observacion,
+        created_by: args.userName,
+        updated_by: args.userName,
+      }),
+    );
+
+    const kardex = await manager.save(
+      Kardex,
+      manager.create(Kardex, {
+        status: 'ACTIVE',
+        fecha: now,
+        bodega_id: args.bodegaId,
+        producto_id: args.productoId,
+        movimiento_id: movimiento.id,
+        movimiento_det_id: detalle.id,
+        tipo_movimiento: args.tipo,
+        entrada_cantidad: this.toFixedText(
+          args.tipo === 'INGRESO' ? args.cantidad : 0,
+          6,
+        ),
+        salida_cantidad: this.toFixedText(
+          args.tipo === 'SALIDA' ? args.cantidad : 0,
+          6,
+        ),
+        condicion_material: args.condicionMaterial,
+        costo_unitario: this.toFixedText(args.costoUnitario, 4),
+        costo_total: this.toFixedText(subtotal, 4),
+        saldo_cantidad: this.toFixedText(args.saldoCantidad, 6),
+        saldo_costo_promedio: this.toFixedText(args.costoUnitario, 4),
+        saldo_valorizado: this.toFixedText(
+          args.saldoCantidad * args.costoUnitario,
+          4,
+        ),
+        observacion: args.observacion,
+        created_by: args.userName,
+        updated_by: args.userName,
+      }),
+    );
+
+    return { movimiento, detalle, kardex };
+  }
+
   private normalizeStockPayload(
     payload: DeepPartial<StockBodega>,
     current?: StockBodega | null,
@@ -454,6 +708,15 @@ export class StockBodegaService
       this.toNumeric(stockNuevo) + this.toNumeric(stockUsado),
       stockActual,
     );
+    if (
+      this.toNumeric(stockNuevo, 0) < 0 ||
+      this.toNumeric(stockUsado, 0) < 0 ||
+      this.toNumeric(stockActualTotal, 0) < 0
+    ) {
+      throw new BadRequestException(
+        'El stock nuevo, usado y total no pueden ser negativos.',
+      );
+    }
     const hasPhysicalStock = Object.prototype.hasOwnProperty.call(
       payload,
       'stock_fisico',
@@ -515,6 +778,10 @@ export class StockBodegaService
     return Number.isFinite(numeric) ? numeric : fallback;
   }
 
+  private toFixedText(value: number, decimals: number) {
+    return Number.isFinite(value) ? value.toFixed(decimals) : '0';
+  }
+
   private toBoolean(value: unknown) {
     if (typeof value === 'boolean') return value;
     const normalized = String(value ?? '')
@@ -568,6 +835,14 @@ export class StockBodegaService
       CREATE INDEX IF NOT EXISTS idx_tb_stock_bodega_stock_usado
       ON kpi_inventory.tb_stock_bodega (stock_usado)
       WHERE is_deleted = false AND COALESCE(es_usado, false) = true
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_movimiento_inventario_det
+      ADD COLUMN IF NOT EXISTS condicion_material varchar(12) NOT NULL DEFAULT 'NUEVO'
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_kardex
+      ADD COLUMN IF NOT EXISTS condicion_material varchar(12) NOT NULL DEFAULT 'NUEVO'
     `);
   }
 }
