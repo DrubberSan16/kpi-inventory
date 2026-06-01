@@ -451,8 +451,7 @@ export class TransferenciaBodegaService {
         totalCost += subtotal;
 
         if (order && movementReceipt) {
-          currentSourceStock += quantity;
-          sourceStock.stock_actual = this.toFixedText(currentSourceStock, 6);
+          currentSourceStock = this.applyNewStockDelta(sourceStock, quantity);
           sourceStock.stock_fisico = this.toFixedText(currentSourceStock, 6);
           sourceStock.costo_promedio_bodega = this.toFixedText(unitCost, 4);
           sourceStock.updated_by = userName;
@@ -505,9 +504,9 @@ export class TransferenciaBodegaService {
           );
         }
 
-        sourceStock.stock_actual = this.toFixedText(
-          currentSourceStock - quantity,
-          6,
+        const sourceStockAfterOut = this.applyNewStockDelta(
+          sourceStock,
+          -quantity,
         );
         sourceStock.stock_fisico = this.toFixedText(
           this.toNumber(sourceStock.stock_fisico, currentSourceStock) - quantity,
@@ -524,7 +523,7 @@ export class TransferenciaBodegaService {
           userName,
         });
         const currentDestStock = this.toNumber(destStock.stock_actual, 0);
-        destStock.stock_actual = this.toFixedText(currentDestStock + quantity, 6);
+        this.applyNewStockDelta(destStock, quantity);
         destStock.stock_fisico = this.toFixedText(
           this.toNumber(destStock.stock_fisico, currentDestStock) + quantity,
           6,
@@ -569,8 +568,8 @@ export class TransferenciaBodegaService {
         );
 
         const kardexOut = await manager.save(
-          Kardex,
-          manager.create(Kardex, {
+            Kardex,
+            manager.create(Kardex, {
             fecha: fechaTransferencia,
             bodega_id: sourceWarehouse.id,
             producto_id: product.id,
@@ -581,10 +580,10 @@ export class TransferenciaBodegaService {
             salida_cantidad: this.toFixedText(quantity, 6),
             costo_unitario: this.toFixedText(unitCost, 4),
             costo_total: this.toFixedText(subtotal, 4),
-            saldo_cantidad: sourceStock.stock_actual,
+            saldo_cantidad: this.toFixedText(sourceStockAfterOut, 6),
             saldo_costo_promedio: this.toFixedText(unitCost, 4),
             saldo_valorizado: this.toFixedText(
-              this.toNumber(sourceStock.stock_actual, 0) * unitCost,
+              sourceStockAfterOut * unitCost,
               4,
             ),
             observacion:
@@ -1039,6 +1038,8 @@ export class TransferenciaBodegaService {
         bodega_id: args.bodegaId,
         producto_id: args.productoId,
         stock_actual: '0.000000',
+        stock_nuevo: '0.000000',
+        stock_usado: '0.000000',
         stock_fisico: '0.000000',
         stock_min_bodega: '0.000000',
         stock_max_bodega: '0.000000',
@@ -1049,6 +1050,39 @@ export class TransferenciaBodegaService {
         updated_by: args.userName,
       }),
     );
+  }
+
+  private getStockNuevoAmount(stockRow: StockBodega) {
+    const actual = this.toNumber(stockRow.stock_actual, 0);
+    const usado = this.toNumber(stockRow.stock_usado, 0);
+    const nuevo = this.toNumber(stockRow.stock_nuevo, actual - usado);
+    if (nuevo > 0 || usado > 0 || actual === 0) return Math.max(nuevo, 0);
+    return Math.max(actual, 0);
+  }
+
+  private setStockBreakdown(
+    stockRow: StockBodega,
+    stockNuevo: number,
+    stockUsado = this.toNumber(stockRow.stock_usado, 0),
+  ) {
+    const normalizedNuevo = Math.max(this.toNumber(stockNuevo, 0), 0);
+    const normalizedUsado = Math.max(this.toNumber(stockUsado, 0), 0);
+    const total = normalizedNuevo + normalizedUsado;
+    stockRow.stock_nuevo = this.toFixedText(normalizedNuevo, 6);
+    stockRow.stock_usado = this.toFixedText(normalizedUsado, 6);
+    stockRow.stock_actual = this.toFixedText(total, 6);
+    return total;
+  }
+
+  private applyNewStockDelta(stockRow: StockBodega, delta: number) {
+    const currentNuevo = this.getStockNuevoAmount(stockRow);
+    const nextNuevo = currentNuevo + this.toNumber(delta, 0);
+    if (nextNuevo < -0.000001) {
+      throw new BadRequestException(
+        `Stock nuevo insuficiente. Disponible ${currentNuevo.toFixed(2)}, requerido ${Math.abs(delta).toFixed(2)}.`,
+      );
+    }
+    return this.setStockBreakdown(stockRow, nextNuevo);
   }
 
   private async generateCode(manager: EntityManager, prefix: string) {

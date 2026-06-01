@@ -28,6 +28,10 @@ export class MovimientoInventarioDet extends BaseAuditEntity {
   @ApiProperty({ description: 'subtotal costo' })
   subtotal_costo: string;
 
+  @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
+  @ApiProperty({ description: 'condicion del material: NUEVO o USADO' })
+  condicion_material: string;
+
   @Column({ type: 'varchar', length: 80, nullable: true })
   @ApiPropertyOptional({ description: 'lote' })
   lote?: string | null;

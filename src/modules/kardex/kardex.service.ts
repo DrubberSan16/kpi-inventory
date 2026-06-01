@@ -894,7 +894,9 @@ export class KardexService extends CrudService<Kardex> {
         const costoUnitario = this.resolveProductoUnitCost(producto, stockRow);
         const subtotal = cantidad * costoUnitario;
         const stockNuevo =
-          tipo === 'INGRESO' ? stockAnterior + cantidad : stockAnterior - cantidad;
+          tipo === 'INGRESO'
+            ? this.applyNewStockDelta(stockRow, cantidad)
+            : this.applyNewStockDelta(stockRow, -cantidad);
         const stockFisicoAnterior = this.toNumber(
           stockRow.stock_fisico,
           stockAnterior,
@@ -904,7 +906,6 @@ export class KardexService extends CrudService<Kardex> {
             ? stockFisicoAnterior + cantidad
             : stockFisicoAnterior - cantidad;
 
-        stockRow.stock_actual = this.toFixedText(stockNuevo, 6);
         stockRow.stock_fisico = this.toFixedText(stockFisicoNuevo, 6);
         stockRow.costo_promedio_bodega = this.toFixedText(costoUnitario, 4);
         stockRow.updated_by = userName;
@@ -1927,6 +1928,8 @@ export class KardexService extends CrudService<Kardex> {
         bodega_id: args.bodegaId,
         producto_id: args.productoId,
         stock_actual: '0.000000',
+        stock_nuevo: '0.000000',
+        stock_usado: '0.000000',
         stock_fisico: '0.000000',
         stock_min_bodega: '0.000000',
         stock_max_bodega: '0.000000',
@@ -1937,6 +1940,39 @@ export class KardexService extends CrudService<Kardex> {
         updated_by: args.userName,
       }),
     );
+  }
+
+  private getStockNuevoAmount(stockRow: StockBodega) {
+    const actual = this.toNumber(stockRow.stock_actual, 0);
+    const usado = this.toNumber(stockRow.stock_usado, 0);
+    const nuevo = this.toNumber(stockRow.stock_nuevo, actual - usado);
+    if (nuevo > 0 || usado > 0 || actual === 0) return Math.max(nuevo, 0);
+    return Math.max(actual, 0);
+  }
+
+  private setStockBreakdown(
+    stockRow: StockBodega,
+    stockNuevo: number,
+    stockUsado = this.toNumber(stockRow.stock_usado, 0),
+  ) {
+    const normalizedNuevo = Math.max(this.toNumber(stockNuevo, 0), 0);
+    const normalizedUsado = Math.max(this.toNumber(stockUsado, 0), 0);
+    const total = normalizedNuevo + normalizedUsado;
+    stockRow.stock_nuevo = this.toFixedText(normalizedNuevo, 6);
+    stockRow.stock_usado = this.toFixedText(normalizedUsado, 6);
+    stockRow.stock_actual = this.toFixedText(total, 6);
+    return total;
+  }
+
+  private applyNewStockDelta(stockRow: StockBodega, delta: number) {
+    const currentNuevo = this.getStockNuevoAmount(stockRow);
+    const nextNuevo = currentNuevo + this.toNumber(delta, 0);
+    if (nextNuevo < -0.000001) {
+      throw new BadRequestException(
+        `Stock nuevo insuficiente. Disponible ${currentNuevo.toFixed(2)}, requerido ${Math.abs(delta).toFixed(2)}.`,
+      );
+    }
+    return this.setStockBreakdown(stockRow, nextNuevo);
   }
 
   private async createMovementArtifacts(
@@ -2231,8 +2267,7 @@ export class KardexService extends CrudService<Kardex> {
 
       if (delta !== 0) {
         const tipo = delta > 0 ? 'INGRESO' : 'SALIDA';
-        const stockNuevo = stockAnterior + delta;
-        stockRow.stock_actual = this.toFixedText(stockNuevo, 6);
+        const stockNuevo = this.setStockBreakdown(stockRow, stockObjetivo, 0);
         stockRow.stock_fisico = this.toFixedText(stockObjetivo, 6);
         await manager.save(StockBodega, stockRow);
         changedStockIds.add(stockRow.id);
@@ -2251,7 +2286,7 @@ export class KardexService extends CrudService<Kardex> {
         if (delta > 0) summary.ingresos += 1;
         else summary.salidas += 1;
       } else {
-        stockRow.stock_actual = this.toFixedText(stockObjetivo, 6);
+        this.setStockBreakdown(stockRow, stockObjetivo, 0);
         stockRow.stock_fisico = this.toFixedText(stockObjetivo, 6);
         await manager.save(StockBodega, stockRow);
         changedStockIds.add(stockRow.id);
@@ -2565,8 +2600,7 @@ export class KardexService extends CrudService<Kardex> {
 
       if (delta !== 0) {
         const tipo = delta > 0 ? 'INGRESO' : 'SALIDA';
-        const stockNuevo = stockAnterior + delta;
-        stockRow.stock_actual = this.toFixedText(stockNuevo, 6);
+        const stockNuevo = this.setStockBreakdown(stockRow, stockObjetivo, 0);
         stockRow.stock_fisico = this.toFixedText(stockObjetivo, 6);
         await manager.save(StockBodega, stockRow);
         changedStockIds.add(stockRow.id);
@@ -2585,7 +2619,7 @@ export class KardexService extends CrudService<Kardex> {
         if (delta > 0) summary.ingresos += 1;
         else summary.salidas += 1;
       } else {
-        stockRow.stock_actual = this.toFixedText(stockObjetivo, 6);
+        this.setStockBreakdown(stockRow, stockObjetivo, 0);
         stockRow.stock_fisico = this.toFixedText(stockObjetivo, 6);
         await manager.save(StockBodega, stockRow);
         changedStockIds.add(stockRow.id);

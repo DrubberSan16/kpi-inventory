@@ -241,6 +241,41 @@ export class StockBodegaService
         : current?.stock_actual,
       current?.stock_actual ?? '0',
     );
+    const hasStockNuevo = Object.prototype.hasOwnProperty.call(
+      payload,
+      'stock_nuevo',
+    );
+    const hasStockUsado = Object.prototype.hasOwnProperty.call(
+      payload,
+      'stock_usado',
+    );
+    const hasStockActual = Object.prototype.hasOwnProperty.call(
+      payload,
+      'stock_actual',
+    );
+    const esUsado = this.toBoolean(
+      Object.prototype.hasOwnProperty.call(payload, 'es_usado')
+        ? payload.es_usado
+        : current?.es_usado,
+    );
+    const stockUsado = esUsado
+      ? this.toDecimalText(
+          hasStockUsado ? payload.stock_usado : current?.stock_usado,
+          current?.stock_usado ?? '0',
+        )
+      : '0';
+    const stockNuevo = this.resolveStockNuevoText({
+      payload,
+      current,
+      hasStockNuevo,
+      hasStockActual,
+      stockActual,
+      stockUsado,
+    });
+    const stockActualTotal = this.toDecimalText(
+      this.toNumeric(stockNuevo) + this.toNumeric(stockUsado),
+      stockActual,
+    );
     const hasPhysicalStock = Object.prototype.hasOwnProperty.call(
       payload,
       'stock_fisico',
@@ -252,14 +287,40 @@ export class StockBodegaService
 
     return {
       ...payload,
-      stock_actual: stockActual,
+      stock_actual: stockActualTotal,
+      stock_nuevo: stockNuevo,
+      stock_usado: stockUsado,
       stock_fisico: stockFisico,
-      es_usado: this.toBoolean(
-        Object.prototype.hasOwnProperty.call(payload, 'es_usado')
-          ? payload.es_usado
-          : current?.es_usado,
-      ),
+      es_usado: esUsado,
     };
+  }
+
+  private resolveStockNuevoText(args: {
+    payload: DeepPartial<StockBodega>;
+    current?: StockBodega | null;
+    hasStockNuevo: boolean;
+    hasStockActual: boolean;
+    stockActual: string;
+    stockUsado: string;
+  }) {
+    if (args.hasStockNuevo) {
+      return this.toDecimalText(args.payload.stock_nuevo, '0');
+    }
+
+    if (args.hasStockActual && !args.current?.stock_nuevo) {
+      return this.toDecimalText(
+        Math.max(
+          this.toNumeric(args.stockActual) - this.toNumeric(args.stockUsado),
+          0,
+        ),
+        '0',
+      );
+    }
+
+    return this.toDecimalText(
+      args.current?.stock_nuevo ?? args.current?.stock_actual,
+      args.stockActual,
+    );
   }
 
   private toDecimalText(value: unknown, fallback = '0') {
@@ -268,6 +329,12 @@ export class StockBodegaService
     const numeric = Number(normalized);
     if (!Number.isFinite(numeric)) return fallback;
     return numeric.toString();
+  }
+
+  private toNumeric(value: unknown, fallback = 0) {
+    const normalized = String(value ?? '').replace(',', '.').trim();
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) ? numeric : fallback;
   }
 
   private toBoolean(value: unknown) {
@@ -290,9 +357,39 @@ export class StockBodegaService
       ADD COLUMN IF NOT EXISTS es_usado boolean NOT NULL DEFAULT false
     `);
     await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_nuevo numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_usado numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_stock_bodega
+      SET stock_nuevo = COALESCE(stock_actual, 0)
+      WHERE COALESCE(stock_nuevo, 0) = 0
+        AND COALESCE(stock_usado, 0) = 0
+        AND COALESCE(stock_actual, 0) <> 0
+    `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_stock_bodega
+      SET stock_usado = 0
+      WHERE COALESCE(es_usado, false) = false
+        AND COALESCE(stock_usado, 0) <> 0
+    `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_stock_bodega
+      SET stock_actual = COALESCE(stock_nuevo, 0) + COALESCE(stock_usado, 0)
+    `);
+    await this.dataSource.query(`
       CREATE INDEX IF NOT EXISTS idx_tb_stock_bodega_es_usado
       ON kpi_inventory.tb_stock_bodega (es_usado)
       WHERE is_deleted = false
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_stock_bodega_stock_usado
+      ON kpi_inventory.tb_stock_bodega (stock_usado)
+      WHERE is_deleted = false AND COALESCE(es_usado, false) = true
     `);
   }
 }
