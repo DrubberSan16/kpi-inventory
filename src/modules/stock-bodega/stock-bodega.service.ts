@@ -1,7 +1,18 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DeepPartial, Repository, Brackets, DataSource } from 'typeorm';
+import {
+  DeepPartial,
+  Repository,
+  Brackets,
+  DataSource,
+  QueryFailedError,
+} from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { Bodega } from '../entities/bodega.entity';
 import { Producto } from '../entities/producto.entity';
@@ -40,21 +51,40 @@ export class StockBodegaService
     await this.ensureSchema();
   }
 
-  create(payload: DeepPartial<StockBodega>) {
-    return super.create(this.normalizeStockPayload(payload)).then((created) => {
+  async create(payload: DeepPartial<StockBodega>) {
+    const preparedPayload = this.normalizeStockPayload(payload);
+    await this.ensureUniqueWarehouseProductStock(preparedPayload);
+
+    try {
+      const created = await super.create(preparedPayload);
       void this.notifyMaintenanceAlertRecalculation('create', created.id);
       return created;
-    });
+    } catch (error) {
+      throw await this.normalizeStockWriteError(error, preparedPayload);
+    }
   }
 
   async update(id: string, payload: DeepPartial<StockBodega>) {
     const current = await this.findOne(id);
-    const updated = await super.update(
+    const preparedPayload = this.normalizeStockPayload(payload, current);
+    await this.ensureUniqueWarehouseProductStock(
+      preparedPayload,
       id,
-      this.normalizeStockPayload(payload, current),
+      current,
     );
-    void this.notifyMaintenanceAlertRecalculation('update', id);
-    return updated;
+
+    try {
+      const updated = await super.update(id, preparedPayload);
+      void this.notifyMaintenanceAlertRecalculation('update', id);
+      return updated;
+    } catch (error) {
+      throw await this.normalizeStockWriteError(
+        error,
+        preparedPayload,
+        id,
+        current,
+      );
+    }
   }
 
   async remove(id: string, deletedBy?: string) {
@@ -229,6 +259,154 @@ export class StockBodegaService
         `Error notificando recálculo de alertas desde inventario (${action}:${stockId}): ${message}`,
       );
     }
+  }
+
+  private async ensureUniqueWarehouseProductStock(
+    payload: DeepPartial<StockBodega>,
+    currentId?: string,
+    current?: StockBodega | null,
+  ) {
+    const productoId = this.firstNonEmptyString(
+      payload.producto_id,
+      current?.producto_id,
+    );
+    const bodegaId = this.firstNonEmptyString(
+      payload.bodega_id,
+      current?.bodega_id,
+    );
+
+    if (!productoId || !bodegaId) return;
+
+    const qb = this.repository
+      .createQueryBuilder('stock')
+      .where('stock.is_deleted = false')
+      .andWhere('stock.producto_id = :productoId', { productoId })
+      .andWhere('stock.bodega_id = :bodegaId', { bodegaId });
+
+    if (currentId) {
+      qb.andWhere('stock.id <> :currentId', { currentId });
+    }
+
+    const existing = await qb.getOne();
+    if (!existing) return;
+
+    throw await this.buildWarehouseProductStockConflict(
+      productoId,
+      bodegaId,
+      existing.id,
+    );
+  }
+
+  private async normalizeStockWriteError(
+    error: unknown,
+    payload: DeepPartial<StockBodega>,
+    currentId?: string,
+    current?: StockBodega | null,
+  ) {
+    if (!this.isWarehouseProductUniqueError(error)) {
+      return error;
+    }
+
+    const productoId = this.firstNonEmptyString(
+      payload.producto_id,
+      current?.producto_id,
+    );
+    const bodegaId = this.firstNonEmptyString(
+      payload.bodega_id,
+      current?.bodega_id,
+    );
+
+    return this.buildWarehouseProductStockConflict(
+      productoId,
+      bodegaId,
+      currentId,
+    );
+  }
+
+  private isWarehouseProductUniqueError(error: unknown) {
+    if (!(error instanceof QueryFailedError)) return false;
+    const driverError = (error as any)?.driverError ?? {};
+    const code = String(driverError?.code || '');
+    const constraint = String(driverError?.constraint || '').toLowerCase();
+    const detail = String(driverError?.detail || '').toLowerCase();
+    const message = String((error as any)?.message || '').toLowerCase();
+
+    if (code !== '23505') return false;
+    return (
+      constraint.includes('stock_bodega') ||
+      detail.includes('producto_id') ||
+      detail.includes('bodega_id') ||
+      message.includes('producto_id') ||
+      message.includes('bodega_id')
+    );
+  }
+
+  private async buildWarehouseProductStockConflict(
+    productoId?: string | null,
+    bodegaId?: string | null,
+    existingStockId?: string | null,
+  ) {
+    const [producto, bodega] = await Promise.all([
+      productoId
+        ? this.dataSource.getRepository(Producto).findOne({
+            where: { id: productoId, is_deleted: false },
+          })
+        : Promise.resolve(null),
+      bodegaId
+        ? this.dataSource.getRepository(Bodega).findOne({
+            where: { id: bodegaId, is_deleted: false },
+          })
+        : Promise.resolve(null),
+    ]);
+    const productoLabel = this.buildProductLabel(producto, productoId);
+    const bodegaLabel = this.buildWarehouseLabel(bodega, bodegaId);
+
+    return new ConflictException({
+      message: `Ya existe un registro de stock para el material ${productoLabel} en la bodega ${bodegaLabel}. Edita el registro existente en lugar de crear uno duplicado.`,
+      duplicate: {
+        stock_id: existingStockId ?? null,
+        producto_id: productoId ?? null,
+        producto_label: productoLabel,
+        bodega_id: bodegaId ?? null,
+        bodega_label: bodegaLabel,
+      },
+    });
+  }
+
+  private buildProductLabel(
+    producto?: Producto | null,
+    fallback?: string | null,
+  ) {
+    return (
+      [producto?.codigo, producto?.nombre]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .join(' - ') ||
+      String(fallback || 'seleccionado').trim() ||
+      'seleccionado'
+    );
+  }
+
+  private buildWarehouseLabel(
+    bodega?: Bodega | null,
+    fallback?: string | null,
+  ) {
+    return (
+      [bodega?.codigo, bodega?.nombre]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .join(' - ') ||
+      String(fallback || 'seleccionada').trim() ||
+      'seleccionada'
+    );
+  }
+
+  private firstNonEmptyString(...values: unknown[]) {
+    for (const value of values) {
+      const normalized = String(value ?? '').trim();
+      if (normalized) return normalized;
+    }
+    return null;
   }
 
   private normalizeStockPayload(
