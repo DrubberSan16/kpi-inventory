@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { DeepPartial, FindOptionsWhere, Repository, Brackets } from 'typeorm';
+import { normalizeTimestampPayload } from '../utils/local-timestamp.util';
 
 @Injectable()
 export class CrudService<
@@ -14,7 +15,9 @@ export class CrudService<
   constructor(protected readonly repository: Repository<T>) {}
 
   create(payload: DeepPartial<T>) {
-    const entity = this.repository.create(payload);
+    const entity = this.repository.create(
+      normalizeTimestampPayload(this.repository, payload),
+    );
     return this.repository.save(entity);
   }
 
@@ -90,7 +93,10 @@ export class CrudService<
 
   async update(id: string, payload: DeepPartial<T>) {
     const current = await this.findOne(id);
-    const merged = this.repository.merge(current, payload);
+    const merged = this.repository.merge(
+      current,
+      normalizeTimestampPayload(this.repository, payload),
+    );
     return this.repository.save(merged);
   }
 
