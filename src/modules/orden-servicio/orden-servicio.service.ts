@@ -482,7 +482,9 @@ export class OrdenServicioService implements OnModuleInit {
         created_by: userName,
       });
 
-    entity.codigo = this.toText(dto.codigo) || entity.codigo;
+    if (current) {
+      entity.codigo = this.toText(dto.codigo) || entity.codigo;
+    }
     entity.fecha_emision =
       this.normalizeDateOnly(dto.fecha_emision) ||
       this.normalizeDateOnly(current?.fecha_emision) ||
@@ -743,47 +745,32 @@ export class OrdenServicioService implements OnModuleInit {
   }
 
   private async generateCode(manager: EntityManager) {
-    const year = new Date().getFullYear();
-    const rows = await manager.find(OrdenServicio, {
-      where: { is_deleted: false } as any,
-      select: { codigo: true } as any,
-      take: 500,
-      order: { created_at: 'DESC' } as any,
-    });
-    const lastCode = rows
-      .map((item: any) => String(item?.codigo || '').trim())
-      .filter((item) =>
-        new RegExp(`^RJCTI-${year}-([A-Z])(\\d{7})$`, 'i').test(item),
-      )
-      .sort((a, b) => this.getCodeRank(b, year) - this.getCodeRank(a, year))[0];
-
-    if (!lastCode) return `RJCTI-${year}-A0000001`;
-    const match = new RegExp(`^RJCTI-${year}-([A-Z])(\\d{7})$`, 'i').exec(
-      lastCode,
+    await manager.query(
+      `SELECT pg_advisory_xact_lock(hashtext('kpi_inventory.tb_orden_servicio.codigo')::bigint)`,
     );
-    if (!match) return `RJCTI-${year}-A0000001`;
-    const currentLetter = (match[1] ?? 'A').toUpperCase();
-    const currentNumber = Number(match[2] ?? '0');
-    if (currentNumber >= 9999999) {
-      return `RJCTI-${year}-${this.incrementAlphaPrefix(currentLetter)}0000001`;
-    }
-    return `RJCTI-${year}-${currentLetter}${String(currentNumber + 1).padStart(7, '0')}`;
-  }
-
-  private incrementAlphaPrefix(letter: string) {
-    const nextCharCode = letter.toUpperCase().charCodeAt(0) + 1;
-    if (nextCharCode > 90) return 'A';
-    return String.fromCharCode(nextCharCode);
-  }
-
-  private getCodeRank(code: string, year: number) {
-    const match = new RegExp(`^RJCTI-${year}-([A-Z])(\\d{7})$`, 'i').exec(
-      String(code || '').trim(),
-    );
-    if (!match) return -1;
-    const letter = (match[1] ?? 'A').toUpperCase();
-    const number = Number(match[2] ?? '0');
-    return (letter.charCodeAt(0) - 64) * 10000000 + number;
+    const [{ max_number: maxNumber = 0 } = {}] = await manager.query(`
+      SELECT COALESCE(MAX(code_number), 0) AS max_number
+      FROM (
+        SELECT
+          CASE
+            WHEN codigo ~ '^JCTI-OS[0-9]+$'
+              THEN substring(codigo from '^JCTI-OS([0-9]+)$')::bigint
+            WHEN codigo ~ '^RJCTI-[0-9]{4}-[A-Z][0-9]{7}$'
+              THEN (
+                (ascii(upper(substring(codigo from '^RJCTI-[0-9]{4}-([A-Z])[0-9]{7}$'))) - ascii('A'))::bigint * 9999999
+              ) + substring(codigo from '^RJCTI-[0-9]{4}-[A-Z]([0-9]{7})$')::bigint
+            ELSE 0
+          END AS code_number
+        FROM kpi_inventory.tb_orden_servicio
+        WHERE is_deleted = false
+          AND (
+            codigo ~ '^JCTI-OS[0-9]+$'
+            OR codigo ~ '^RJCTI-[0-9]{4}-[A-Z][0-9]{7}$'
+          )
+      ) ranked_codes
+    `);
+    const nextNumber = Number(maxNumber) + 1;
+    return `JCTI-OS${String(nextNumber).padStart(6, '0')}`;
   }
 
   private resolveUserName(

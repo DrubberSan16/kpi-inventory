@@ -426,11 +426,13 @@ export class OrdenCompraService {
     const entity =
       current ??
       manager.create(OrdenCompra, {
-        codigo: await this.generateCode(manager, 'OC'),
+        codigo: await this.generateCode(manager),
         created_by: userName,
       });
 
-    entity.codigo = this.toText(dto.codigo) || entity.codigo;
+    if (current) {
+      entity.codigo = this.toText(dto.codigo) || entity.codigo;
+    }
     entity.fecha_emision = dto.fecha_emision
       ? new Date(dto.fecha_emision)
       : current?.fecha_emision ?? new Date();
@@ -740,27 +742,33 @@ export class OrdenCompraService {
     return warehouse?.id || null;
   }
 
-  private async generateCode(manager: EntityManager, prefix: string) {
-    const rows = await manager.find(OrdenCompra, {
-      where: { is_deleted: false } as any,
-      select: { codigo: true } as any,
-      take: 200,
-      order: { created_at: 'DESC' } as any,
-    });
-    const lastCode = rows
-      .map((item: any) => String(item?.codigo || '').trim())
-      .filter(Boolean)
-      .sort((a, b) => this.getCodeRank(b, prefix) - this.getCodeRank(a, prefix))[0];
-
-    if (!lastCode) return `${prefix}-A00001`;
-    const match = new RegExp(`^${prefix}-([A-Z])(\\d{5})$`, 'i').exec(lastCode);
-    if (!match) return `${prefix}-A00001`;
-    const currentLetter = (match[1] ?? 'A').toUpperCase();
-    const currentNumber = Number(match[2] ?? '0');
-    if (currentNumber >= 99999) {
-      return `${prefix}-${this.incrementAlphaPrefix(currentLetter)}00001`;
-    }
-    return `${prefix}-${currentLetter}${String(currentNumber + 1).padStart(5, '0')}`;
+  private async generateCode(manager: EntityManager) {
+    await manager.query(
+      `SELECT pg_advisory_xact_lock(hashtext('kpi_inventory.tb_orden_compra.codigo')::bigint)`,
+    );
+    const [{ max_number: maxNumber = 0 } = {}] = await manager.query(`
+      SELECT COALESCE(MAX(code_number), 0) AS max_number
+      FROM (
+        SELECT
+          CASE
+            WHEN codigo ~ '^JCTI-OC[0-9]+$'
+              THEN substring(codigo from '^JCTI-OC([0-9]+)$')::bigint
+            WHEN codigo ~ '^OC-[A-Z][0-9]{5}$'
+              THEN (
+                (ascii(upper(substring(codigo from '^OC-([A-Z])[0-9]{5}$'))) - ascii('A'))::bigint * 99999
+              ) + substring(codigo from '^OC-[A-Z]([0-9]{5})$')::bigint
+            ELSE 0
+          END AS code_number
+        FROM kpi_inventory.tb_orden_compra
+        WHERE is_deleted = false
+          AND (
+            codigo ~ '^JCTI-OC[0-9]+$'
+            OR codigo ~ '^OC-[A-Z][0-9]{5}$'
+          )
+      ) ranked_codes
+    `);
+    const nextNumber = Number(maxNumber) + 1;
+    return `JCTI-OC${String(nextNumber).padStart(6, '0')}`;
   }
 
   private async generateReference(manager: EntityManager) {
@@ -776,22 +784,6 @@ export class OrdenCompraService {
       return numeric > max ? numeric : max;
     }, 0);
     return `IB-${String(maxNumber + 1).padStart(8, '0')}`;
-  }
-
-  private incrementAlphaPrefix(letter: string) {
-    const nextCharCode = letter.toUpperCase().charCodeAt(0) + 1;
-    if (nextCharCode > 90) return 'A';
-    return String.fromCharCode(nextCharCode);
-  }
-
-  private getCodeRank(code: string, prefix: string) {
-    const match = new RegExp(`^${prefix}-([A-Z])(\\d{5})$`, 'i').exec(
-      String(code || '').trim(),
-    );
-    if (!match) return -1;
-    const letter = (match[1] ?? 'A').toUpperCase();
-    const number = Number(match[2] ?? '0');
-    return (letter.charCodeAt(0) - 64) * 100000 + number;
   }
 
   private resolveUserName(dto: CreateOrdenCompraDto | UpdateOrdenCompraDto) {
