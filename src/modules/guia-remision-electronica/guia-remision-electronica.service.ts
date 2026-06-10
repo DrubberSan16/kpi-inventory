@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -90,7 +91,9 @@ type SignatureCarrier = {
 };
 
 @Injectable()
-export class GuiaRemisionElectronicaService implements OnModuleDestroy {
+export class GuiaRemisionElectronicaService
+  implements OnModuleDestroy, OnModuleInit
+{
   private readonly logger = new Logger(GuiaRemisionElectronicaService.name);
   private readonly guideStatusTrackers = new Map<
     string,
@@ -123,11 +126,49 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
+  async onModuleInit() {
+    await this.resumePendingGuideStatusTracking();
+  }
+
   onModuleDestroy() {
     for (const timer of this.guideStatusTrackers.values()) {
       clearTimeout(timer);
     }
     this.guideStatusTrackers.clear();
+  }
+
+  private async resumePendingGuideStatusTracking() {
+    try {
+      const pendingGuides = await this.guideRepo
+        .createQueryBuilder('guide')
+        .select(['guide.id', 'guide.estado_emision', 'guide.sri_estado'])
+        .where('guide.is_deleted = false')
+        .andWhere(
+          `(
+            upper(coalesce(guide.estado_emision, '')) IN (:...pendingStates)
+            OR upper(coalesce(guide.sri_estado, '')) IN (:...pendingStates)
+          )`,
+          { pendingStates: ['RECIBIDA', 'PENDIENTE'] },
+        )
+        .andWhere(`upper(coalesce(guide.estado_emision, '')) <> 'AUTORIZADA'`)
+        .andWhere(`upper(coalesce(guide.sri_estado, '')) <> 'AUTORIZADO'`)
+        .getMany();
+
+      pendingGuides.forEach((guide) =>
+        this.syncGuideStatusTracking(guide, 'SYSTEM'),
+      );
+      if (pendingGuides.length) {
+        this.logger.log(
+          `Se reanudo el seguimiento automatico de ${pendingGuides.length} guia(s) pendiente(s) de autorizacion SRI.`,
+        );
+      }
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo reanudar el seguimiento automatico de guias SRI: ${
+          error?.message || error
+        }`,
+      );
+    }
   }
 
   async getConfigBySucursal(_sucursalId: string) {
@@ -683,25 +724,15 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
     });
     const fallbackSupplier =
       context.supplier || this.buildSupplierContextFromGuideDraft(existingGuide);
-    const isAuthorizedExistingGuide = this.isGuideAuthorized(existingGuide);
-    const refreshGuideDates = Boolean(existingGuide) && !isAuthorizedExistingGuide;
-    const defaultGuideDate = refreshGuideDates
-      ? this.currentDateOnly()
-      : this.formatDateOnly(
-          existingGuide?.fecha_emision || context.transfer.fecha_transferencia,
-        );
-    const defaultTransportStartDate = refreshGuideDates
-      ? defaultGuideDate
-      : this.formatDateOnly(
-          existingGuide?.fecha_ini_transporte ||
-            context.transfer.fecha_transferencia,
-        );
-    const defaultTransportEndDate = refreshGuideDates
-      ? defaultGuideDate
-      : this.formatDateOnly(
-          existingGuide?.fecha_fin_transporte ||
-            context.transfer.fecha_transferencia,
-        );
+    const defaultGuideDate = this.formatDateOnly(
+      existingGuide?.fecha_emision || context.transfer.fecha_transferencia,
+    );
+    const defaultTransportStartDate = this.formatDateOnly(
+      existingGuide?.fecha_ini_transporte || context.transfer.fecha_transferencia,
+    );
+    const defaultTransportEndDate = this.formatDateOnly(
+      existingGuide?.fecha_fin_transporte || context.transfer.fecha_transferencia,
+    );
 
     return {
       transferencia: {
@@ -729,8 +760,8 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
         fecha_ini_transporte: defaultTransportStartDate,
         fecha_fin_transporte: defaultTransportEndDate,
         dir_partida:
-          context.sourceWarehouse.direccion ||
           existingGuide?.dir_partida ||
+          context.sourceWarehouse.direccion ||
           context.config.dir_partida_default ||
           context.config.dir_establecimiento ||
           context.config.dir_matriz,
@@ -746,8 +777,8 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
         razon_social_destinatario:
           existingGuide?.razon_social_destinatario || '',
         dir_destinatario:
-          context.destinationWarehouse.direccion ||
           existingGuide?.dir_destinatario ||
+          context.destinationWarehouse.direccion ||
           context.config.dir_establecimiento ||
           '',
         motivo_traslado:
@@ -911,7 +942,7 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
       this.ensureCertificatePresent(globalSignature);
 
       const defaultGuideDate = shouldRegenerateExistingGuide
-        ? this.currentDateOnly()
+        ? this.formatDateOnly(existingGuide?.fecha_emision || this.currentDateOnly())
         : this.formatDateOnly(context.transfer.fecha_transferencia);
       const normalizedFechaEmision = this.formatDateOnly(
         dto.fecha_emision || defaultGuideDate,
@@ -974,6 +1005,16 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
       const autoMotive = context.purchaseOrder?.codigo
         ? `Traslado asociado a orden ${context.purchaseOrder.codigo}`
         : `Transferencia interna ${context.transfer.codigo}`;
+      const dirPartidaInput = shouldRegenerateExistingGuide
+        ? dto.dir_partida ||
+          existingGuide?.dir_partida ||
+          context.sourceWarehouse.direccion
+        : context.sourceWarehouse.direccion || dto.dir_partida;
+      const dirDestinatarioInput = shouldRegenerateExistingGuide
+        ? dto.dir_destinatario ||
+          existingGuide?.dir_destinatario ||
+          context.destinationWarehouse.direccion
+        : context.destinationWarehouse.direccion || dto.dir_destinatario;
 
       const model = {
         ambiente,
@@ -986,8 +1027,7 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
         fecha_ini_transporte: normalizedFechaIniTransporte,
         fecha_fin_transporte: normalizedFechaFinTransporte,
         dir_partida: this.requireGuideText(
-          context.sourceWarehouse.direccion ||
-            dto.dir_partida ||
+          dirPartidaInput ||
             lockedConfig.dir_partida_default ||
             lockedConfig.dir_establecimiento ||
             lockedConfig.dir_matriz,
@@ -1024,8 +1064,7 @@ export class GuiaRemisionElectronicaService implements OnModuleDestroy {
           'Razón social del destinatario',
         ),
         dir_destinatario: this.requireGuideText(
-          context.destinationWarehouse.direccion ||
-            dto.dir_destinatario ||
+          dirDestinatarioInput ||
             lockedConfig.dir_establecimiento ||
             lockedConfig.dir_matriz,
           300,
