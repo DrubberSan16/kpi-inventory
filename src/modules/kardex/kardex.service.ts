@@ -1457,7 +1457,14 @@ export class KardexService extends CrudService<Kardex> {
     },
   ) {
     const workbook = this.readInventoryWorkbook(buffer, options);
-    const firstSheetName = workbook.SheetNames[0];
+    const firstSheetName =
+      workbook.SheetNames.find(
+        (name) => this.normalizeHeader(name) === this.normalizeHeader('INVENTARIO_CARGA'),
+      ) ??
+      workbook.SheetNames.find(
+        (name) => this.normalizeHeader(name) !== this.normalizeHeader('INSTRUCCIONES'),
+      ) ??
+      workbook.SheetNames[0];
     if (!firstSheetName) {
       throw new BadRequestException(
         'El archivo no contiene hojas válidas para importar.',
@@ -1625,23 +1632,41 @@ export class KardexService extends CrudService<Kardex> {
       'Sucursal',
       'Codigo Bodega',
       'Bodega',
+      'Direccion Bodega',
+      'Bodega Principal',
+      'Bodega Default Compra',
+      'Bodega Chatarra',
       'Codigo Linea',
       'Linea',
-      'Tipo',
+      'Codigo Categoria',
       'Categoria',
-      'Registro Sanitario',
+      'Descripcion Categoria',
       'Marca',
+      'Codigo Unidad',
+      'Unidad',
+      'Abreviatura Unidad',
       'Codigo Material',
       'Material',
+      'Descripcion Producto',
+      'Registro Sanitario',
+      'SKU',
+      'Codigo Barras',
+      'Tipo Producto',
       'Seccion',
       'Nivel',
+      'Es Aceite',
+      'Por Contenedores',
+      'Es Servicio',
+      'Requiere Lote',
+      'Requiere Serie',
       'Ultimo Costo',
       'Costo Promedio',
       'Precio Referencial',
       'Porcentaje Utilidad',
-      'Tipo Unidad',
-      'Por Contenedores',
       'Stock Actual',
+      'Stock Nuevo',
+      'Stock Usado',
+      'Stock Fisico',
       'Stock Minimo Bodega',
       'Stock Maximo Bodega',
       'Stock Contenedores',
@@ -1653,23 +1678,41 @@ export class KardexService extends CrudService<Kardex> {
       Sucursal: 'MATRIZ',
       'Codigo Bodega': 'BOD-001',
       Bodega: 'BODEGA PRINCIPAL',
+      'Direccion Bodega': 'Km 1 Via Principal',
+      'Bodega Principal': 'S',
+      'Bodega Default Compra': 'S',
+      'Bodega Chatarra': 'N',
       'Codigo Linea': 'MNT',
       Linea: 'MANTENIMIENTO',
-      Tipo: 'Mercaderia',
+      'Codigo Categoria': 'HER',
       Categoria: 'HERRAMIENTAS',
-      'Registro Sanitario': '',
+      'Descripcion Categoria': 'Herramientas y consumibles de mantenimiento',
       Marca: 'GULF',
+      'Codigo Unidad': 'UND',
+      Unidad: 'UNIDAD',
+      'Abreviatura Unidad': 'UND',
       'Codigo Material': '175',
       Material: 'PROBADOR DE TIERRA DIGITAL',
+      'Descripcion Producto': 'Probador de tierra digital para mantenimiento',
+      'Registro Sanitario': '',
+      SKU: 'SKU-175',
+      'Codigo Barras': '7750000001750',
+      'Tipo Producto': 'Mercaderia',
       Seccion: 'MATERIAL VARIOS',
       Nivel: 'GENERAL',
+      'Es Aceite': 'N',
+      'Por Contenedores': 'N',
+      'Es Servicio': 'N',
+      'Requiere Lote': 'N',
+      'Requiere Serie': 'N',
       'Ultimo Costo': 25.5,
       'Costo Promedio': 25.5,
       'Precio Referencial': 35,
       'Porcentaje Utilidad': 37.25,
-      'Tipo Unidad': 'UNIDAD',
-      'Por Contenedores': 'N',
       'Stock Actual': 80,
+      'Stock Nuevo': 80,
+      'Stock Usado': 0,
+      'Stock Fisico': 80,
       'Stock Minimo Bodega': 2,
       'Stock Maximo Bodega': 10000,
       'Stock Contenedores': 0,
@@ -1682,7 +1725,10 @@ export class KardexService extends CrudService<Kardex> {
         'Usa la hoja INVENTARIO_CARGA. Codigo Sucursal, Codigo Bodega, Codigo Material y Material son obligatorios.',
       ],
       [
-        'Si la sucursal, bodega, linea, categoria o marca no existen, el sistema las crea automaticamente.',
+        'Si sucursal, bodega, linea, categoria, marca o unidad no existen, el sistema los crea automaticamente.',
+      ],
+      [
+        'La bodega se valida por Codigo Sucursal + Codigo Bodega. Cada fila asigna el stock a esa bodega.',
       ],
       [
         'Stock Minimo Bodega: si llega en 0 se normaliza a 2. Stock Maximo Bodega: si llega en 0 se normaliza a 10000.',
@@ -1692,18 +1738,37 @@ export class KardexService extends CrudService<Kardex> {
       ],
     ]);
 
+    const dictionary = XLSX.utils.aoa_to_sheet([
+      ['Campo', 'Uso'],
+      ['Codigo Sucursal', 'Obligatorio. Crea o localiza la sucursal.'],
+      ['Codigo Bodega', 'Obligatorio. Crea o localiza la bodega dentro de la sucursal.'],
+      ['Codigo Material', 'Obligatorio. Identificador unico del producto/material.'],
+      ['Material', 'Obligatorio. Nombre del producto/material.'],
+      ['Codigo Linea / Linea', 'Crea o actualiza la linea del producto.'],
+      ['Codigo Categoria / Categoria', 'Crea o actualiza la categoria del producto.'],
+      ['Marca', 'Crea o asigna la marca del producto.'],
+      ['Codigo Unidad / Unidad', 'Crea o asigna la unidad de medida.'],
+      ['SKU / Codigo Barras', 'Campos comerciales del producto.'],
+      ['Es Aceite / Es Servicio / Requiere Lote / Requiere Serie', 'Valores aceptados: S, SI, TRUE, 1, N, NO, FALSE, 0.'],
+      ['Stock Actual', 'Stock objetivo total. Se compara contra el stock vigente y genera ingreso o egreso en Kardex.'],
+      ['Stock Nuevo / Stock Usado', 'Opcional. Si se informan, definen el desglose del stock por condicion.'],
+      ['Stock Fisico', 'Opcional. Si se omite, toma el Stock Actual.'],
+    ]);
+
     const worksheet = XLSX.utils.json_to_sheet([sample], {
       header: headers,
       skipHeader: false,
     });
 
     instructions['!cols'] = [{ wch: 140 }];
+    dictionary['!cols'] = [{ wch: 34 }, { wch: 110 }];
     worksheet['!cols'] = headers.map((header) => ({
       wch: Math.max(header.length + 4, 20),
     }));
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, instructions, 'INSTRUCCIONES');
+    XLSX.utils.book_append_sheet(workbook, dictionary, 'DICCIONARIO');
     XLSX.utils.book_append_sheet(workbook, worksheet, 'INVENTARIO_CARGA');
 
     return XLSX.write(workbook, {
@@ -1785,6 +1850,25 @@ export class KardexService extends CrudService<Kardex> {
     return null;
   }
 
+  private rowHasValue(row: Record<string, unknown>, headers: string[]) {
+    const value = this.rowValue(row, headers);
+    return value !== null && value !== undefined && this.toText(value) !== '';
+  }
+
+  private toBoolean(value: unknown, fallback = false) {
+    const normalized = this.toText(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase();
+    if (['S', 'SI', 'TRUE', '1', 'YES', 'Y', 'X'].includes(normalized)) {
+      return true;
+    }
+    if (['N', 'NO', 'FALSE', '0'].includes(normalized)) {
+      return false;
+    }
+    return fallback;
+  }
+
   private buildCodeFromLabel(value: string, prefix: string) {
     const normalized = this.repairText(value)
       .normalize('NFD')
@@ -1808,12 +1892,19 @@ export class KardexService extends CrudService<Kardex> {
   private async resolveUnidadMedidaForProduct(
     manager: EntityManager,
     options: {
+      codigoUnidad?: string | null;
+      nombreUnidad?: string | null;
+      abreviaturaUnidad?: string | null;
       tipoUnidad?: string | null;
       productName?: string | null;
       userName: string;
     },
   ) {
-    const requestedUnit = this.toText(options.tipoUnidad);
+    const requestedCode = this.toText(options.codigoUnidad);
+    const requestedName =
+      this.toText(options.nombreUnidad) || this.toText(options.tipoUnidad);
+    const requestedAbbreviation = this.toText(options.abreviaturaUnidad);
+    const requestedUnit = requestedName || requestedCode || requestedAbbreviation;
     const prefersGallons =
       this.isOilLikeProductName(options.productName) ||
       ['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase());
@@ -1826,12 +1917,15 @@ export class KardexService extends CrudService<Kardex> {
       return this.ensureGallonsUnit(manager, options.userName);
     }
 
-    const unidadNombre = requestedUnit || 'UNIDAD';
-    const unidadCodigo = this.buildCodeFromLabel(unidadNombre, 'UM');
+    const unidadNombre = requestedName || requestedCode || 'UNIDAD';
+    const unidadCodigo = requestedCode || this.buildCodeFromLabel(unidadNombre, 'UM');
     let unidad = await manager.findOne(UnidadMedida, {
       where: [
         { codigo: unidadCodigo, is_deleted: false },
         { nombre: unidadNombre, is_deleted: false },
+        ...(requestedAbbreviation
+          ? [{ abreviatura: requestedAbbreviation, is_deleted: false }]
+          : []),
       ],
     });
     if (!unidad) {
@@ -1841,11 +1935,18 @@ export class KardexService extends CrudService<Kardex> {
           status: 'ACTIVE',
           codigo: unidadCodigo,
           nombre: unidadNombre,
+          abreviatura: requestedAbbreviation || unidadCodigo,
           es_base: true,
           created_by: options.userName,
           updated_by: options.userName,
         }),
       );
+    } else {
+      unidad.codigo = unidad.codigo || unidadCodigo;
+      if (requestedName) unidad.nombre = requestedName;
+      unidad.abreviatura = requestedAbbreviation || unidad.abreviatura || unidadCodigo;
+      unidad.updated_by = options.userName;
+      await manager.save(UnidadMedida, unidad);
     }
     return unidad;
   }
@@ -2089,6 +2190,7 @@ export class KardexService extends CrudService<Kardex> {
       cantidad: number;
       costoUnitario: number;
       stockNuevo: number;
+      condicionMaterial?: string;
       observacion: string;
       userName: string;
     },
@@ -2129,6 +2231,7 @@ export class KardexService extends CrudService<Kardex> {
         cantidad: this.toFixedText(args.cantidad, 6),
         costo_unitario: this.toFixedText(args.costoUnitario, 4),
         subtotal_costo: this.toFixedText(subtotal, 4),
+        condicion_material: args.condicionMaterial || 'NUEVO',
         observacion: args.observacion,
         created_by: args.userName,
         updated_by: args.userName,
@@ -2156,6 +2259,7 @@ export class KardexService extends CrudService<Kardex> {
         costo_unitario: this.toFixedText(args.costoUnitario, 4),
         costo_total: this.toFixedText(subtotal, 4),
         saldo_cantidad: this.toFixedText(args.stockNuevo, 6),
+        condicion_material: args.condicionMaterial || 'NUEVO',
         saldo_costo_promedio: this.toFixedText(args.costoUnitario, 4),
         saldo_valorizado: this.toFixedText(
           args.stockNuevo * args.costoUnitario,
@@ -2241,6 +2345,10 @@ export class KardexService extends CrudService<Kardex> {
             updated_by: userName,
           }),
         );
+      } else if (nomSucursal && sucursal.nombre !== nomSucursal) {
+        sucursal.nombre = nomSucursal;
+        sucursal.updated_by = userName;
+        await manager.save(Sucursal, sucursal);
       }
 
       let bodega = await manager.findOne(Bodega, {
@@ -2263,6 +2371,10 @@ export class KardexService extends CrudService<Kardex> {
             updated_by: userName,
           }),
         );
+      } else if (nomBodega && bodega.nombre !== nomBodega) {
+        bodega.nombre = nomBodega;
+        bodega.updated_by = userName;
+        await manager.save(Bodega, bodega);
       }
 
       const lineaNombre = nomLinea || 'GENERAL';
@@ -2417,13 +2529,55 @@ export class KardexService extends CrudService<Kardex> {
       this.rowValue(row, ['Codigo Bodega', 'Cod. Bodega']),
     );
     const nomBodega = this.toText(this.rowValue(row, ['Bodega']));
+    const direccionBodega = this.toText(
+      this.rowValue(row, ['Direccion Bodega', 'Direccion']),
+    );
+    const hasBodegaPrincipal = this.rowHasValue(row, [
+      'Bodega Principal',
+      'Es Principal',
+    ]);
+    const bodegaPrincipal = this.toBoolean(
+      this.rowValue(row, ['Bodega Principal', 'Es Principal']),
+      false,
+    );
+    const hasBodegaDefaultCompra = this.rowHasValue(row, [
+      'Bodega Default Compra',
+      'Default Compra',
+    ]);
+    const bodegaDefaultCompra = this.toBoolean(
+      this.rowValue(row, ['Bodega Default Compra', 'Default Compra']),
+      false,
+    );
+    const hasBodegaChatarra = this.rowHasValue(row, [
+      'Bodega Chatarra',
+      'Es Chatarra',
+    ]);
+    const bodegaChatarra = this.toBoolean(
+      this.rowValue(row, ['Bodega Chatarra', 'Es Chatarra']),
+      false,
+    );
     const codLinea = this.toText(
       this.rowValue(row, ['Codigo Linea', 'Cod. Línea', 'Cod. Linea']),
     );
     const nomLinea = this.toText(this.rowValue(row, ['Linea', 'Línea', 'Linea']));
-    const tipoProducto = this.toText(this.rowValue(row, ['Tipo']));
+    const codCategoria = this.toText(
+      this.rowValue(row, ['Codigo Categoria', 'Cod. Categoria']),
+    );
+    const tipoProducto = this.toText(this.rowValue(row, ['Tipo Producto', 'Tipo']));
     const nomCategoria = this.toText(
       this.rowValue(row, ['Categoria', 'Categoría', 'Categoria']),
+    );
+    const descripcionCategoria = this.toText(
+      this.rowValue(row, ['Descripcion Categoria']),
+    );
+    const codUnidad = this.toText(
+      this.rowValue(row, ['Codigo Unidad', 'Cod. Unidad']),
+    );
+    const nombreUnidad = this.toText(
+      this.rowValue(row, ['Unidad', 'Tipo Unidad', 'Tipo de unidad']),
+    );
+    const abreviaturaUnidad = this.toText(
+      this.rowValue(row, ['Abreviatura Unidad', 'Abreviatura']),
     );
     const registroSanitario = this.toText(
       this.rowValue(row, [
@@ -2445,10 +2599,33 @@ export class KardexService extends CrudService<Kardex> {
     const nomItem = this.toText(
       this.rowValue(row, ['Material', 'Ítem', 'Item']),
     );
+    const descripcionProducto = this.toText(
+      this.rowValue(row, ['Descripcion Producto', 'Descripcion']),
+    );
+    const sku = this.toText(this.rowValue(row, ['SKU']));
+    const codigoBarras = this.toText(
+      this.rowValue(row, ['Codigo Barras', 'Codigo de Barras', 'Codigo Barra']),
+    );
     const seccion = this.toText(
       this.rowValue(row, ['Seccion', 'Sección', 'Seccion']),
     );
     const nivel = this.toText(this.rowValue(row, ['Nivel']));
+    const hasEsAceite = this.rowHasValue(row, ['Es Aceite']);
+    const esAceite = hasEsAceite
+      ? this.toBoolean(this.rowValue(row, ['Es Aceite']), false)
+      : this.isOilLikeProductName(nomItem);
+    const hasEsServicio = this.rowHasValue(row, ['Es Servicio']);
+    const esServicio = this.toBoolean(this.rowValue(row, ['Es Servicio']), false);
+    const hasRequiereLote = this.rowHasValue(row, ['Requiere Lote']);
+    const requiereLote = this.toBoolean(
+      this.rowValue(row, ['Requiere Lote']),
+      false,
+    );
+    const hasRequiereSerie = this.rowHasValue(row, ['Requiere Serie']);
+    const requiereSerie = this.toBoolean(
+      this.rowValue(row, ['Requiere Serie']),
+      false,
+    );
     const ultimoCosto = this.toNumber(
       this.rowValue(row, ['Ultimo Costo', 'Último costo', 'Ultimo costo']),
       0,
@@ -2474,13 +2651,48 @@ export class KardexService extends CrudService<Kardex> {
     const tipoUnidad = this.toText(
       this.rowValue(row, ['Tipo Unidad', 'Tipo de unidad']),
     );
-    const porContenedoresRaw = this.toText(
+    const hasPorContenedores = this.rowHasValue(row, [
+      'Por Contenedores',
+      'Por contenedores',
+    ]);
+    const porContenedores = this.toBoolean(
       this.rowValue(row, ['Por Contenedores', 'Por contenedores']),
-    ).toUpperCase();
-    const stockObjetivo = this.toNumber(
+      false,
+    );
+    const hasStockActual = this.rowHasValue(row, ['Stock Actual', 'Stock']);
+    const hasStockNuevo = this.rowHasValue(row, ['Stock Nuevo']);
+    const hasStockUsado = this.rowHasValue(row, ['Stock Usado']);
+    const stockActual = this.toNumber(
       this.rowValue(row, ['Stock Actual', 'Stock']),
       0,
     );
+    const stockUsadoObjetivo = hasStockUsado
+      ? this.toNumber(this.rowValue(row, ['Stock Usado']), 0)
+      : 0;
+    let stockNuevoObjetivo = hasStockNuevo
+      ? this.toNumber(this.rowValue(row, ['Stock Nuevo']), 0)
+      : Math.max(stockActual - stockUsadoObjetivo, 0);
+    let stockObjetivo = hasStockActual
+      ? stockActual
+      : stockNuevoObjetivo + stockUsadoObjetivo;
+    if (hasStockNuevo || hasStockUsado) {
+      const breakdownTotal = stockNuevoObjetivo + stockUsadoObjetivo;
+      if (hasStockActual && Math.abs(breakdownTotal - stockActual) > 0.000001) {
+        throw new BadRequestException(
+          `Stock Actual (${stockActual}) no coincide con Stock Nuevo + Stock Usado (${breakdownTotal}).`,
+        );
+      }
+      stockObjetivo = breakdownTotal;
+      if (!hasStockNuevo) {
+        stockNuevoObjetivo = Math.max(stockObjetivo - stockUsadoObjetivo, 0);
+      }
+    }
+    const stockFisicoObjetivo = this.rowHasValue(row, ['Stock Fisico'])
+      ? this.toNumber(this.rowValue(row, ['Stock Fisico']), stockObjetivo)
+      : stockObjetivo;
+    if (stockObjetivo < 0 || stockNuevoObjetivo < 0 || stockUsadoObjetivo < 0) {
+      throw new BadRequestException('Los valores de stock no pueden ser negativos.');
+    }
     const stockMinBodega = this.toNumber(
       this.rowValue(row, [
         'Stock Minimo Bodega',
@@ -2514,11 +2726,10 @@ export class KardexService extends CrudService<Kardex> {
       return false;
     }
 
-    const porContenedores = ['S', 'SI', 'TRUE', '1'].includes(
-      porContenedoresRaw,
-    );
     const descripcion =
-      [tipoProducto, seccion, nivel].filter(Boolean).join(' / ') || null;
+      descripcionProducto ||
+      [tipoProducto, seccion, nivel].filter(Boolean).join(' / ') ||
+      null;
     const costoUnitario = this.resolveInventoryUnitCost({
       costoPromedio: costoPromedioOrigen,
       ultimoCosto,
@@ -2546,6 +2757,10 @@ export class KardexService extends CrudService<Kardex> {
             updated_by: userName,
           }),
         );
+      } else if (nomSucursal && sucursal.nombre !== nomSucursal) {
+        sucursal.nombre = nomSucursal;
+        sucursal.updated_by = userName;
+        await manager.save(Sucursal, sucursal);
       }
 
       let bodega = await manager.findOne(Bodega, {
@@ -2556,6 +2771,14 @@ export class KardexService extends CrudService<Kardex> {
         },
       });
       if (!bodega) {
+        const bodegaEnOtraSucursal = await manager.findOne(Bodega, {
+          where: { codigo: codBodega, is_deleted: false },
+        });
+        if (bodegaEnOtraSucursal) {
+          throw new BadRequestException(
+            `La bodega ${codBodega} ya existe en otra sucursal. Verifica Codigo Sucursal y Codigo Bodega.`,
+          );
+        }
         bodega = await manager.save(
           Bodega,
           manager.create(Bodega, {
@@ -2563,11 +2786,24 @@ export class KardexService extends CrudService<Kardex> {
             sucursal_id: sucursal.id,
             codigo: codBodega,
             nombre: nomBodega || codBodega,
-            es_principal: false,
+            direccion: direccionBodega || null,
+            es_principal: bodegaPrincipal,
+            es_default_compra: bodegaDefaultCompra,
+            es_chatarra: bodegaChatarra,
             created_by: userName,
             updated_by: userName,
           }),
         );
+      } else {
+        bodega.nombre = nomBodega || bodega.nombre;
+        bodega.direccion = direccionBodega || bodega.direccion || null;
+        if (hasBodegaPrincipal) bodega.es_principal = bodegaPrincipal;
+        if (hasBodegaDefaultCompra) {
+          bodega.es_default_compra = bodegaDefaultCompra;
+        }
+        if (hasBodegaChatarra) bodega.es_chatarra = bodegaChatarra;
+        bodega.updated_by = userName;
+        await manager.save(Bodega, bodega);
       }
 
       const lineaNombre = nomLinea || 'GENERAL';
@@ -2589,10 +2825,15 @@ export class KardexService extends CrudService<Kardex> {
             updated_by: userName,
           }),
         );
+      } else if (nomLinea && linea.nombre !== nomLinea) {
+        linea.nombre = nomLinea;
+        linea.updated_by = userName;
+        await manager.save(Linea, linea);
       }
 
       const categoriaNombre = nomCategoria || 'GENERAL';
-      const categoriaCodigo = this.buildCodeFromLabel(categoriaNombre, 'CAT');
+      const categoriaCodigo =
+        codCategoria || this.buildCodeFromLabel(categoriaNombre, 'CAT');
       let categoria = await manager.findOne(Categoria, {
         where: [
           { codigo: categoriaCodigo, is_deleted: false },
@@ -2606,10 +2847,18 @@ export class KardexService extends CrudService<Kardex> {
             status: 'ACTIVE',
             codigo: categoriaCodigo,
             nombre: categoriaNombre,
+            descripcion: descripcionCategoria || null,
             created_by: userName,
             updated_by: userName,
           }),
         );
+      } else {
+        categoria.nombre = categoriaNombre || categoria.nombre;
+        categoria.codigo = categoria.codigo || categoriaCodigo;
+        categoria.descripcion =
+          descripcionCategoria || categoria.descripcion || null;
+        categoria.updated_by = userName;
+        await manager.save(Categoria, categoria);
       }
 
       let marca: Marca | null = null;
@@ -2631,8 +2880,10 @@ export class KardexService extends CrudService<Kardex> {
         }
       }
 
-      const esAceite = this.isOilLikeProductName(nomItem);
       const unidad = await this.resolveUnidadMedidaForProduct(manager, {
+        codigoUnidad: codUnidad,
+        nombreUnidad,
+        abreviaturaUnidad,
         tipoUnidad,
         productName: nomItem,
         userName,
@@ -2656,9 +2907,11 @@ export class KardexService extends CrudService<Kardex> {
             unidad_medida_id: unidad.id,
             es_aceite: esAceite,
             por_contenedores: porContenedores,
-            es_servicio: false,
-            requiere_lote: false,
-            requiere_serie: false,
+            sku: sku || null,
+            codigo_barras: codigoBarras || null,
+            es_servicio: esServicio,
+            requiere_lote: requiereLote,
+            requiere_serie: requiereSerie,
             ultimo_costo: this.toFixedText(ultimoCosto || costoUnitario, 4),
             costo_promedio: this.toFixedText(costoUnitario, 4),
             precio_venta: this.toFixedText(precio, 4),
@@ -2673,11 +2926,27 @@ export class KardexService extends CrudService<Kardex> {
         producto.descripcion = descripcion ?? producto.descripcion ?? null;
         producto.linea_id = linea.id;
         producto.categoria_id = categoria.id;
-        producto.marca_id = marca?.id ?? null;
-        producto.registro_sanitario = registroSanitario || null;
+        producto.marca_id = marca?.id ?? producto.marca_id ?? null;
+        producto.registro_sanitario =
+          registroSanitario || producto.registro_sanitario || null;
         producto.unidad_medida_id = unidad.id;
-        producto.es_aceite = producto.es_aceite || esAceite;
-        producto.por_contenedores = porContenedores;
+        producto.es_aceite = hasEsAceite
+          ? esAceite
+          : producto.es_aceite || esAceite;
+        producto.por_contenedores = hasPorContenedores
+          ? porContenedores
+          : producto.por_contenedores;
+        producto.sku = sku || producto.sku || null;
+        producto.codigo_barras = codigoBarras || producto.codigo_barras || null;
+        producto.es_servicio = hasEsServicio
+          ? esServicio
+          : producto.es_servicio;
+        producto.requiere_lote = hasRequiereLote
+          ? requiereLote
+          : producto.requiere_lote;
+        producto.requiere_serie = hasRequiereSerie
+          ? requiereSerie
+          : producto.requiere_serie;
         producto.ultimo_costo = this.toFixedText(ultimoCosto || costoUnitario, 4);
         producto.costo_promedio = this.toFixedText(costoUnitario, 4);
         producto.precio_venta = this.toFixedText(precio, 4);
@@ -2694,19 +2963,28 @@ export class KardexService extends CrudService<Kardex> {
         userName,
       });
       const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
+      const stockNuevoAnterior = this.getStockNuevoAmount(stockRow);
+      const stockUsadoAnterior = this.toNumber(stockRow.stock_usado, 0);
       const delta = stockObjetivo - stockAnterior;
+      const deltaNuevo = stockNuevoObjetivo - stockNuevoAnterior;
+      const deltaUsado = stockUsadoObjetivo - stockUsadoAnterior;
 
       stockRow.stock_min_bodega = this.toFixedText(normalizedStockMinBodega, 6);
       stockRow.stock_max_bodega = this.toFixedText(normalizedStockMaxBodega, 6);
       stockRow.stock_min_global = this.toFixedText(normalizedStockMinGlobal, 6);
       stockRow.stock_contenedores = this.toFixedText(stockContenedores, 6);
       stockRow.costo_promedio_bodega = this.toFixedText(costoUnitario, 4);
+      stockRow.es_usado = stockUsadoObjetivo > 0;
       stockRow.updated_by = userName;
 
       if (delta !== 0) {
         const tipo = delta > 0 ? 'INGRESO' : 'SALIDA';
-        const stockNuevo = this.setStockBreakdown(stockRow, stockObjetivo, 0);
-        stockRow.stock_fisico = this.toFixedText(stockObjetivo, 6);
+        const stockNuevo = this.setStockBreakdown(
+          stockRow,
+          stockNuevoObjetivo,
+          stockUsadoObjetivo,
+        );
+        stockRow.stock_fisico = this.toFixedText(stockFisicoObjetivo, 6);
         await manager.save(StockBodega, stockRow);
         changedStockIds.add(stockRow.id);
 
@@ -2718,14 +2996,16 @@ export class KardexService extends CrudService<Kardex> {
           costoUnitario,
           stockNuevo,
           observacion: 'Ajuste por carga masiva CSV/XLSX',
+          condicionMaterial:
+            Math.abs(deltaUsado) > Math.abs(deltaNuevo) ? 'USADO' : 'NUEVO',
           userName,
         });
 
         if (delta > 0) summary.ingresos += 1;
         else summary.salidas += 1;
       } else {
-        this.setStockBreakdown(stockRow, stockObjetivo, 0);
-        stockRow.stock_fisico = this.toFixedText(stockObjetivo, 6);
+        this.setStockBreakdown(stockRow, stockNuevoObjetivo, stockUsadoObjetivo);
+        stockRow.stock_fisico = this.toFixedText(stockFisicoObjetivo, 6);
         await manager.save(StockBodega, stockRow);
         changedStockIds.add(stockRow.id);
       }

@@ -326,7 +326,7 @@ export class KardexController extends CrudController<Kardex> {
     );
     res.setHeader(
       'Content-Disposition',
-      'attachment; filename="FORMATO_CARGA_INVENTARIO.xlsx"',
+      'attachment; filename="FORMATO_CARGA_MASIVA_INVENTARIO.xlsx"',
     );
     res.send(buffer);
   }
