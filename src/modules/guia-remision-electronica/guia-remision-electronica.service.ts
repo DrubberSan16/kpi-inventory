@@ -193,6 +193,63 @@ export class GuiaRemisionElectronicaService
     return this.maskSignature(signature);
   }
 
+  async listRecipientCatalog(search?: string, limit?: string | number) {
+    const normalizedSearch = String(search ?? '').trim();
+    const requestedLimit = Number(limit ?? 25);
+    const safeLimit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(Math.trunc(requestedLimit), 50)
+        : 25;
+
+    const rows = await this.guideRepo.query(
+      `
+        SELECT
+          recipients.identificacion_destinatario,
+          recipients.razon_social_destinatario,
+          recipients.dir_destinatario,
+          recipients.cod_estab_destino,
+          recipients.last_used_at
+        FROM (
+          SELECT DISTINCT ON (guide.identificacion_destinatario)
+            guide.identificacion_destinatario,
+            guide.razon_social_destinatario,
+            guide.dir_destinatario,
+            guide.cod_estab_destino,
+            COALESCE(guide.updated_at, guide.created_at) AS last_used_at
+          FROM kpi_inventory.tb_guia_remision_electronica guide
+          WHERE guide.is_deleted = false
+            AND NULLIF(TRIM(guide.identificacion_destinatario), '') IS NOT NULL
+            AND (
+              $2::text = ''
+              OR guide.identificacion_destinatario ILIKE '%' || $2::text || '%'
+              OR guide.razon_social_destinatario ILIKE '%' || $2::text || '%'
+              OR guide.dir_destinatario ILIKE '%' || $2::text || '%'
+            )
+          ORDER BY
+            guide.identificacion_destinatario,
+            COALESCE(guide.updated_at, guide.created_at) DESC NULLS LAST
+        ) recipients
+        ORDER BY recipients.last_used_at DESC NULLS LAST
+        LIMIT $1
+      `,
+      [safeLimit, normalizedSearch],
+    );
+
+    return rows.map((row: Record<string, unknown>) => ({
+      identificacion_destinatario: this.cleanOptionalText(
+        row.identificacion_destinatario,
+        20,
+      ),
+      razon_social_destinatario: this.cleanOptionalText(
+        row.razon_social_destinatario,
+        300,
+      ),
+      dir_destinatario: this.cleanOptionalText(row.dir_destinatario, 300),
+      cod_estab_destino: this.cleanOptionalText(row.cod_estab_destino, 3),
+      last_used_at: row.last_used_at ?? null,
+    }));
+  }
+
   assertSuperAdministratorRole(roleName?: string) {
     const normalizedRole = String(roleName || '')
       .normalize('NFD')

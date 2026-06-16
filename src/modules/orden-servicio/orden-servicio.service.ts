@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -424,6 +425,60 @@ export class OrdenServicioService implements OnModuleInit {
         message: `Orden de servicio ${current.codigo} eliminada correctamente`,
       };
     });
+  }
+
+  private isSuperAdministratorRoleName(roleName?: string): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return [
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ].includes(normalized);
+  }
+
+  private assertCanPurge(roleName?: string) {
+    if (this.isSuperAdministratorRoleName(roleName)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
+    );
+  }
+
+  async purgeAll(roleName?: string) {
+    this.assertCanPurge(roleName);
+    const result = await this.dataSource.transaction(async (manager) => {
+      const linkedEquipments = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(OrdenServicioEquipo)
+        .execute();
+      const details = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(OrdenServicioDet)
+        .execute();
+      const orders = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(OrdenServicio)
+        .execute();
+
+      return {
+        equipos: Number(linkedEquipments.affected || 0),
+        detalles: Number(details.affected || 0),
+        ordenes: Number(orders.affected || 0),
+      };
+    });
+
+    return {
+      message: `Eliminacion real masiva ejecutada correctamente (${result.ordenes} ordenes de servicio).`,
+      affected: result.ordenes,
+      details: result,
+    };
   }
 
   private async saveOrder(

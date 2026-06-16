@@ -141,6 +141,22 @@ export class GuiaRemisionElectronicaController {
     };
   }
 
+  @Get('destinatarios')
+  @ApiOperation({
+    summary: 'Listar destinatarios usados previamente en guias de remision',
+  })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 25 })
+  async listRecipients(
+    @Query('search') search?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return {
+      message: 'Destinatarios obtenidos correctamente.',
+      data: await this.service.listRecipientCatalog(search, limit),
+    };
+  }
+
   @Post('config')
   @ApiOperation({ summary: 'Crear o actualizar configuracion SRI global' })
   @ApiBody({ type: UpsertSriEmissionConfigDto })

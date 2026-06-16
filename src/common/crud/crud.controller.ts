@@ -1,4 +1,4 @@
-import { Body, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Delete, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
 
 import {
   ApiBody,
@@ -74,6 +74,18 @@ export abstract class CrudController<
   @ApiResponse({ status: 404, description: 'Registro no encontrado' })
   update(@Param('id') id: string, @Body() payload: Record<string, unknown>) {
     return this.service.update(id, payload as never);
+  }
+
+  @Delete('purge-all')
+  @ApiOperation({
+    summary: 'Eliminar fisicamente todos los registros del modulo',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Registros eliminados fisicamente',
+  })
+  purgeAll(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeAll(roleName);
   }
 
   @Delete(':id')

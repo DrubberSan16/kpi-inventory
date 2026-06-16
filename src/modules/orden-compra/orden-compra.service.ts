@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -369,6 +370,61 @@ export class OrdenCompraService {
       });
       throw error;
     }
+  }
+
+  private isSuperAdministratorRoleName(roleName?: string): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return [
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ].includes(normalized);
+  }
+
+  private assertCanPurge(roleName?: string) {
+    if (this.isSuperAdministratorRoleName(roleName)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
+    );
+  }
+
+  async purgeAll(roleName?: string) {
+    this.assertCanPurge(roleName);
+    const result = await this.dataSource.transaction(async (manager) => {
+      const detachedTransfers = await manager
+        .createQueryBuilder()
+        .update(TransferenciaBodega)
+        .set({ orden_compra_id: null })
+        .where('orden_compra_id IS NOT NULL')
+        .execute();
+      const details = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(OrdenCompraDet)
+        .execute();
+      const orders = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(OrdenCompra)
+        .execute();
+
+      return {
+        detached_transferencias: Number(detachedTransfers.affected || 0),
+        detalles: Number(details.affected || 0),
+        ordenes: Number(orders.affected || 0),
+      };
+    });
+
+    return {
+      message: `Eliminacion real masiva ejecutada correctamente (${result.ordenes} ordenes de compra).`,
+      affected: result.ordenes,
+      details: result,
+    };
   }
 
   private async saveOrder(

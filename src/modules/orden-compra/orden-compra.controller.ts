@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -51,6 +52,12 @@ export class OrdenCompraController {
   @ApiOperation({ summary: 'Actualizar orden de compra' })
   update(@Param('id') id: string, @Body() payload: UpdateOrdenCompraDto) {
     return this.service.update(id, payload);
+  }
+
+  @Delete('purge-all')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las ordenes de compra' })
+  purgeAll(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeAll(roleName);
   }
 
   @Delete(':id')

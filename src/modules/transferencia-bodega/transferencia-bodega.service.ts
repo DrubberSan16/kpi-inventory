@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -714,6 +715,60 @@ export class TransferenciaBodegaService {
       });
       throw error;
     }
+  }
+
+  private isSuperAdministratorRoleName(roleName?: string): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return [
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ].includes(normalized);
+  }
+
+  private assertCanPurge(roleName?: string) {
+    if (this.isSuperAdministratorRoleName(roleName)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
+    );
+  }
+
+  async purgeAll(roleName?: string) {
+    this.assertCanPurge(roleName);
+    const result = await this.dataSource.transaction(async (manager) => {
+      const guides = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(GuiaRemisionElectronica)
+        .execute();
+      const details = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(TransferenciaBodegaDet)
+        .execute();
+      const transfers = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(TransferenciaBodega)
+        .execute();
+
+      return {
+        guias: Number(guides.affected || 0),
+        detalles: Number(details.affected || 0),
+        transferencias: Number(transfers.affected || 0),
+      };
+    });
+
+    return {
+      message: `Eliminacion real masiva ejecutada correctamente (${result.transferencias} transferencias).`,
+      affected: result.transferencias,
+      details: result,
+    };
   }
 
   private async hydrateTransfers(

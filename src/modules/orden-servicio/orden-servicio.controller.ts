@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -68,6 +69,12 @@ export class OrdenServicioController {
     @Req() req: any,
   ) {
     return this.service.markServicePerformed(id, payload, getRequestActor(req));
+  }
+
+  @Delete('purge-all')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las ordenes de servicio' })
+  purgeAll(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeAll(roleName);
   }
 
   @Delete(':id')

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { DeepPartial, FindOptionsWhere, Repository, Brackets } from 'typeorm';
 import { normalizeTimestampPayload } from '../utils/local-timestamp.util';
 
@@ -107,5 +107,40 @@ export class CrudService<
     current.deleted_by = deletedBy ?? null;
     await this.repository.save(current);
     return { message: `Registro ${id} eliminado correctamente` };
+  }
+
+  private isSuperAdministratorRoleName(roleName?: string): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return [
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ].includes(normalized);
+  }
+
+  private assertCanPurge(roleName?: string) {
+    if (this.isSuperAdministratorRoleName(roleName)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
+    );
+  }
+
+  async purgeAll(roleName?: string) {
+    this.assertCanPurge(roleName);
+    const result = await this.repository
+      .createQueryBuilder()
+      .delete()
+      .from(this.repository.metadata.target)
+      .execute();
+    const affected = Number(result.affected || 0);
+    return {
+      message: `Eliminacion real masiva ejecutada correctamente (${affected} registros).`,
+      affected,
+    };
   }
 }

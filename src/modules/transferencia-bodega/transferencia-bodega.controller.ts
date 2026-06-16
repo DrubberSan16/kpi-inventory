@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Post, Query, Req } from '@nestjs/common';
 import {
   ApiBody,
   ApiOperation,
@@ -46,5 +46,11 @@ export class TransferenciaBodegaController {
   @ApiResponse({ status: 201, description: 'Transferencia registrada correctamente' })
   create(@Body() payload: CreateTransferenciaBodegaDto) {
     return this.service.create(payload);
+  }
+
+  @Delete('purge-all')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las transferencias de bodega' })
+  purgeAll(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeAll(roleName);
   }
 }
