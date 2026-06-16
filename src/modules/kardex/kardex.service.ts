@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -136,6 +137,110 @@ export class KardexService extends CrudService<Kardex> {
     ).trim();
     this.importRoot =
       configuredImportRoot || join(process.cwd(), 'storage', 'inventory-imports');
+  }
+
+  private isKardexPurgeSuperAdministratorRoleName(roleName?: string): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return [
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ].includes(normalized);
+  }
+
+  private assertCanPurgeKardex(roleName?: string) {
+    if (this.isKardexPurgeSuperAdministratorRoleName(roleName)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
+    );
+  }
+
+  async purgeAll(roleName?: string) {
+    this.assertCanPurgeKardex(roleName);
+
+    const details = await this.dataSource.transaction(async (manager) => {
+      const transferDetailRefs = await manager
+        .createQueryBuilder()
+        .update(TransferenciaBodegaDet)
+        .set({
+          kardex_salida_id: null,
+          kardex_ingreso_id: null,
+          movimiento_salida_det_id: null,
+          movimiento_ingreso_det_id: null,
+        })
+        .where(
+          'kardex_salida_id IS NOT NULL OR kardex_ingreso_id IS NOT NULL OR movimiento_salida_det_id IS NOT NULL OR movimiento_ingreso_det_id IS NOT NULL',
+        )
+        .execute();
+
+      const transferRefs = await manager
+        .createQueryBuilder()
+        .update(TransferenciaBodega)
+        .set({
+          movimiento_salida_id: null,
+          movimiento_ingreso_id: null,
+        })
+        .where('movimiento_salida_id IS NOT NULL OR movimiento_ingreso_id IS NOT NULL')
+        .execute();
+
+      const kardexDeleted = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(Kardex)
+        .execute();
+
+      const movementDetailsDeleted = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(MovimientoInventarioDet)
+        .execute();
+
+      const movementsDeleted = await manager
+        .createQueryBuilder()
+        .delete()
+        .from(MovimientoInventario)
+        .execute();
+
+      const stockReset = await manager
+        .createQueryBuilder()
+        .update(StockBodega)
+        .set({
+          stock_actual: '0.000000',
+          stock_nuevo: '0.000000',
+          stock_usado: '0.000000',
+          stock_fisico: '0.000000',
+          costo_promedio_bodega: '0.0000',
+        })
+        .where(
+          "COALESCE(stock_actual, 0) <> 0 OR COALESCE(stock_nuevo, 0) <> 0 OR COALESCE(stock_usado, 0) <> 0 OR COALESCE(stock_fisico, 0) <> 0 OR COALESCE(costo_promedio_bodega, 0) <> 0",
+        )
+        .execute();
+
+      return {
+        transferencias_referencias_limpiadas: Number(transferRefs.affected || 0),
+        transferencias_detalle_referencias_limpiadas: Number(
+          transferDetailRefs.affected || 0,
+        ),
+        kardex: Number(kardexDeleted.affected || 0),
+        movimientos_detalle: Number(movementDetailsDeleted.affected || 0),
+        movimientos: Number(movementsDeleted.affected || 0),
+        stock_reseteado: Number(stockReset.affected || 0),
+      };
+    });
+
+    const affected =
+      details.kardex + details.movimientos_detalle + details.movimientos;
+
+    return {
+      message: `Eliminacion real masiva de kardex ejecutada correctamente (${affected} registros de movimiento).`,
+      affected,
+      details,
+    };
   }
 
   async findAllPaginated(
