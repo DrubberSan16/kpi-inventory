@@ -109,7 +109,7 @@ export class CrudService<
     return { message: `Registro ${id} eliminado correctamente` };
   }
 
-  private isSuperAdministratorRoleName(roleName?: string): boolean {
+  protected isSuperAdministratorRoleName(roleName?: string): boolean {
     const normalized = String(roleName || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
@@ -123,7 +123,7 @@ export class CrudService<
     ].includes(normalized);
   }
 
-  private assertCanPurge(roleName?: string) {
+  protected assertCanPurge(roleName?: string) {
     if (this.isSuperAdministratorRoleName(roleName)) return;
     throw new ForbiddenException(
       'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
