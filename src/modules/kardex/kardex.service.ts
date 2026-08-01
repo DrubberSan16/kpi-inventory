@@ -136,7 +136,8 @@ export class KardexService extends CrudService<Kardex> {
       this.configService.get('INVENTORY_IMPORT_DIR') || '',
     ).trim();
     this.importRoot =
-      configuredImportRoot || join(process.cwd(), 'storage', 'inventory-imports');
+      configuredImportRoot ||
+      join(process.cwd(), 'storage', 'inventory-imports');
   }
 
   private isKardexPurgeSuperAdministratorRoleName(roleName?: string): boolean {
@@ -185,7 +186,9 @@ export class KardexService extends CrudService<Kardex> {
           movimiento_salida_id: null,
           movimiento_ingreso_id: null,
         })
-        .where('movimiento_salida_id IS NOT NULL OR movimiento_ingreso_id IS NOT NULL')
+        .where(
+          'movimiento_salida_id IS NOT NULL OR movimiento_ingreso_id IS NOT NULL',
+        )
         .execute();
 
       const kardexDeleted = await manager
@@ -217,12 +220,14 @@ export class KardexService extends CrudService<Kardex> {
           costo_promedio_bodega: '0.0000',
         })
         .where(
-          "COALESCE(stock_actual, 0) <> 0 OR COALESCE(stock_nuevo, 0) <> 0 OR COALESCE(stock_usado, 0) <> 0 OR COALESCE(stock_fisico, 0) <> 0 OR COALESCE(costo_promedio_bodega, 0) <> 0",
+          'COALESCE(stock_actual, 0) <> 0 OR COALESCE(stock_nuevo, 0) <> 0 OR COALESCE(stock_usado, 0) <> 0 OR COALESCE(stock_fisico, 0) <> 0 OR COALESCE(costo_promedio_bodega, 0) <> 0',
         )
         .execute();
 
       return {
-        transferencias_referencias_limpiadas: Number(transferRefs.affected || 0),
+        transferencias_referencias_limpiadas: Number(
+          transferRefs.affected || 0,
+        ),
         transferencias_detalle_referencias_limpiadas: Number(
           transferDetailRefs.affected || 0,
         ),
@@ -291,7 +296,7 @@ export class KardexService extends CrudService<Kardex> {
             .orWhere('kardex.tipo_movimiento ILIKE :search', {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(kardex.observacion, \'\') ILIKE :search', {
+            .orWhere("COALESCE(kardex.observacion, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             });
         }),
@@ -380,10 +385,10 @@ export class KardexService extends CrudService<Kardex> {
           searchQb
             .where('producto.nombre ILIKE :search', { search: `%${search}%` })
             .orWhere('producto.codigo ILIKE :search', { search: `%${search}%` })
-            .orWhere('COALESCE(bodega.nombre, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega.nombre, '') ILIKE :search", {
               search: `%${search}%`,
             })
-            .orWhere('COALESCE(bodega.codigo, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega.codigo, '') ILIKE :search", {
               search: `%${search}%`,
             });
         }),
@@ -419,8 +424,8 @@ export class KardexService extends CrudService<Kardex> {
       .addGroupBy('linea.nombre')
       .addGroupBy('categoria.nombre')
       .addGroupBy('unidad.nombre')
-      .orderBy('COALESCE(producto.nombre, \'\')', 'ASC')
-      .addOrderBy('COALESCE(producto.codigo, \'\')', 'ASC');
+      .orderBy("COALESCE(producto.nombre, '')", 'ASC')
+      .addOrderBy("COALESCE(producto.codigo, '')", 'ASC');
 
     const totalGroupsRaw = await this.dataSource
       .createQueryBuilder()
@@ -466,9 +471,7 @@ export class KardexService extends CrudService<Kardex> {
 
     const productIds = [
       ...new Set(
-        rows
-          .map((row) => this.toText(row.producto_id))
-          .filter(Boolean),
+        rows.map((row) => this.toText(row.producto_id)).filter(Boolean),
       ),
     ];
     const initialStockByProduct = await this.getInitialStockByProduct(
@@ -607,22 +610,22 @@ export class KardexService extends CrudService<Kardex> {
       qb.andWhere(
         new Brackets((searchQb) => {
           searchQb
-            .where('COALESCE(movimiento.numero_documento, \'\') ILIKE :search', {
+            .where("COALESCE(movimiento.numero_documento, '') ILIKE :search", {
               search: `%${search}%`,
             })
-            .orWhere('COALESCE(movimiento.referencia, \'\') ILIKE :search', {
+            .orWhere("COALESCE(movimiento.referencia, '') ILIKE :search", {
               search: `%${search}%`,
             })
-            .orWhere('COALESCE(transferencia.codigo, \'\') ILIKE :search', {
+            .orWhere("COALESCE(transferencia.codigo, '') ILIKE :search", {
               search: `%${search}%`,
             })
-            .orWhere('COALESCE(bodega.nombre, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega.nombre, '') ILIKE :search", {
               search: `%${search}%`,
             })
-            .orWhere('COALESCE(bodega.codigo, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega.codigo, '') ILIKE :search", {
               search: `%${search}%`,
             })
-            .orWhere('COALESCE(kardex.observacion, \'\') ILIKE :search', {
+            .orWhere("COALESCE(kardex.observacion, '') ILIKE :search", {
               search: `%${search}%`,
             });
         }),
@@ -806,25 +809,25 @@ export class KardexService extends CrudService<Kardex> {
       qb.andWhere(
         new Brackets((searchQb) => {
           searchQb
-            .where('COALESCE(movimiento.numero_documento, \'\') ILIKE :search', {
+            .where("COALESCE(movimiento.numero_documento, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(movimiento.referencia, \'\') ILIKE :search', {
+            .orWhere("COALESCE(movimiento.referencia, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(movimiento.observacion, \'\') ILIKE :search', {
+            .orWhere("COALESCE(movimiento.observacion, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(bodega_origen.nombre, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega_origen.nombre, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(bodega_origen.codigo, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega_origen.codigo, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(bodega_destino.nombre, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega_destino.nombre, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(bodega_destino.codigo, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega_destino.codigo, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             })
             .orWhere(
@@ -900,7 +903,9 @@ export class KardexService extends CrudService<Kardex> {
     const bodegaId = this.toText(payload.bodega_id);
     const detalles = Array.isArray(payload.detalles) ? payload.detalles : [];
     const userName =
-      this.toText(payload.updated_by) || this.toText(payload.created_by) || 'SYSTEM';
+      this.toText(payload.updated_by) ||
+      this.toText(payload.created_by) ||
+      'SYSTEM';
 
     if (!tipo) {
       throw new BadRequestException(
@@ -916,10 +921,9 @@ export class KardexService extends CrudService<Kardex> {
       );
     }
 
-    const fechaMovimiento = this.parseDateBoundary(
-      this.toText(payload.fecha_movimiento),
-      'start',
-    ) ?? new Date();
+    const fechaMovimiento =
+      this.parseDateBoundary(this.toText(payload.fecha_movimiento), 'start') ??
+      new Date();
 
     return this.dataSource.transaction(async (manager) => {
       const bodega = await manager.findOne(Bodega, {
@@ -1043,8 +1047,14 @@ export class KardexService extends CrudService<Kardex> {
             movimiento_id: movimiento.id,
             movimiento_det_id: movimientoDet.id,
             tipo_movimiento: tipo,
-            entrada_cantidad: this.toFixedText(tipo === 'INGRESO' ? cantidad : 0, 6),
-            salida_cantidad: this.toFixedText(tipo === 'SALIDA' ? cantidad : 0, 6),
+            entrada_cantidad: this.toFixedText(
+              tipo === 'INGRESO' ? cantidad : 0,
+              6,
+            ),
+            salida_cantidad: this.toFixedText(
+              tipo === 'SALIDA' ? cantidad : 0,
+              6,
+            ),
             costo_unitario: this.toFixedText(costoUnitario, 4),
             costo_total: this.toFixedText(subtotal, 4),
             saldo_cantidad: this.toFixedText(stockNuevo, 6),
@@ -1137,9 +1147,7 @@ export class KardexService extends CrudService<Kardex> {
     return `${year}-${month}-${day}`;
   }
 
-  private formatDateTimeForClient(
-    value: unknown,
-  ): string | null {
+  private formatDateTimeForClient(value: unknown): string | null {
     if (!value) return null;
 
     if (value instanceof Date) {
@@ -1217,7 +1225,10 @@ export class KardexService extends CrudService<Kardex> {
     for (const row of rows) {
       const productId = this.toText(row.producto_id);
       if (!productId) continue;
-      out.set(productId, (out.get(productId) ?? 0) + this.toNumber(row.saldo_cantidad, 0));
+      out.set(
+        productId,
+        (out.get(productId) ?? 0) + this.toNumber(row.saldo_cantidad, 0),
+      );
     }
     return out;
   }
@@ -1249,7 +1260,9 @@ export class KardexService extends CrudService<Kardex> {
         : Promise.resolve([] as Bodega[]),
     ]);
 
-    const productIds = [...new Set(details.map((item) => item.producto_id).filter(Boolean))];
+    const productIds = [
+      ...new Set(details.map((item) => item.producto_id).filter(Boolean)),
+    ];
     const unitIds = [
       ...new Set(
         details
@@ -1270,10 +1283,13 @@ export class KardexService extends CrudService<Kardex> {
         : Promise.resolve([] as UnidadMedida[]),
     ]);
 
-    const detailMap = details.reduce((acc, item) => {
-      (acc[item.movimiento_id] ??= []).push(item);
-      return acc;
-    }, {} as Record<string, MovimientoInventarioDet[]>);
+    const detailMap = details.reduce(
+      (acc, item) => {
+        (acc[item.movimiento_id] ??= []).push(item);
+        return acc;
+      },
+      {} as Record<string, MovimientoInventarioDet[]>,
+    );
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const productMap = new Map(products.map((item) => [item.id, item]));
     const unitMap = new Map(units.map((item) => [item.id, item]));
@@ -1398,7 +1414,9 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private resolveMovementConcept(row: Record<string, unknown>) {
-    const tipoDocumento = this.toText(row.movimiento_tipo_documento).toUpperCase();
+    const tipoDocumento = this.toText(
+      row.movimiento_tipo_documento,
+    ).toUpperCase();
     const tipo = this.normalizeMovementType(row.tipo_movimiento);
     const referencia = this.toText(row.movimiento_referencia).toUpperCase();
     const workOrderId = this.toText(row.movimiento_work_order_id);
@@ -1459,10 +1477,13 @@ export class KardexService extends CrudService<Kardex> {
     const workbook = this.readInventoryWorkbook(buffer, options);
     const firstSheetName =
       workbook.SheetNames.find(
-        (name) => this.normalizeHeader(name) === this.normalizeHeader('INVENTARIO_CARGA'),
+        (name) =>
+          this.normalizeHeader(name) ===
+          this.normalizeHeader('INVENTARIO_CARGA'),
       ) ??
       workbook.SheetNames.find(
-        (name) => this.normalizeHeader(name) !== this.normalizeHeader('INSTRUCCIONES'),
+        (name) =>
+          this.normalizeHeader(name) !== this.normalizeHeader('INSTRUCCIONES'),
       ) ??
       workbook.SheetNames[0];
     if (!firstSheetName) {
@@ -1473,7 +1494,9 @@ export class KardexService extends CrudService<Kardex> {
 
     const sheet = workbook.Sheets[firstSheetName];
     if (!sheet) {
-      throw new BadRequestException('No se pudo leer la hoja principal del Excel.');
+      throw new BadRequestException(
+        'No se pudo leer la hoja principal del Excel.',
+      );
     }
 
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
@@ -1528,7 +1551,10 @@ export class KardexService extends CrudService<Kardex> {
       });
     }
 
-    await this.notifyMaintenanceRecalculationForStocks(changedStockIds, 'import');
+    await this.notifyMaintenanceRecalculationForStocks(
+      changedStockIds,
+      'import',
+    );
 
     return {
       ...summary,
@@ -1595,7 +1621,9 @@ export class KardexService extends CrudService<Kardex> {
   getInventoryImportJob(jobId: string) {
     const job = this.importJobs.get(jobId);
     if (!job) {
-      throw new NotFoundException('La carga de inventario solicitada no existe.');
+      throw new NotFoundException(
+        'La carga de inventario solicitada no existe.',
+      );
     }
     return job;
   }
@@ -1728,7 +1756,7 @@ export class KardexService extends CrudService<Kardex> {
         'Si sucursal, bodega, linea, categoria, marca o unidad no existen, el sistema los crea automaticamente.',
       ],
       [
-        'La bodega se valida por Codigo Sucursal + Codigo Bodega. Cada fila asigna el stock a esa bodega.',
+        'La bodega se valida por Codigo Sucursal + Codigo Bodega. Si la sucursal o la bodega ya existen, se reutilizan sin modificar sus datos; solo se crean cuando no existen.',
       ],
       [
         'Stock Minimo Bodega: si llega en 0 se normaliza a 2. Stock Maximo Bodega: si llega en 0 se normaliza a 10000.',
@@ -1740,18 +1768,39 @@ export class KardexService extends CrudService<Kardex> {
 
     const dictionary = XLSX.utils.aoa_to_sheet([
       ['Campo', 'Uso'],
-      ['Codigo Sucursal', 'Obligatorio. Crea o localiza la sucursal.'],
-      ['Codigo Bodega', 'Obligatorio. Crea o localiza la bodega dentro de la sucursal.'],
-      ['Codigo Material', 'Obligatorio. Identificador unico del producto/material.'],
+      [
+        'Codigo Sucursal',
+        'Obligatorio. Crea la sucursal si no existe; si existe, la reutiliza sin editarla.',
+      ],
+      [
+        'Codigo Bodega',
+        'Obligatorio. Crea la bodega dentro de la sucursal si no existe; si existe, la reutiliza sin editarla.',
+      ],
+      [
+        'Codigo Material',
+        'Obligatorio. Identificador unico del producto/material.',
+      ],
       ['Material', 'Obligatorio. Nombre del producto/material.'],
       ['Codigo Linea / Linea', 'Crea o actualiza la linea del producto.'],
-      ['Codigo Categoria / Categoria', 'Crea o actualiza la categoria del producto.'],
+      [
+        'Codigo Categoria / Categoria',
+        'Crea o actualiza la categoria del producto.',
+      ],
       ['Marca', 'Crea o asigna la marca del producto.'],
       ['Codigo Unidad / Unidad', 'Crea o asigna la unidad de medida.'],
       ['SKU / Codigo Barras', 'Campos comerciales del producto.'],
-      ['Es Aceite / Es Servicio / Requiere Lote / Requiere Serie', 'Valores aceptados: S, SI, TRUE, 1, N, NO, FALSE, 0.'],
-      ['Stock Actual', 'Stock objetivo total. Se compara contra el stock vigente y genera ingreso o egreso en Kardex.'],
-      ['Stock Nuevo / Stock Usado', 'Opcional. Si se informan, definen el desglose del stock por condicion.'],
+      [
+        'Es Aceite / Es Servicio / Requiere Lote / Requiere Serie',
+        'Valores aceptados: S, SI, TRUE, 1, N, NO, FALSE, 0.',
+      ],
+      [
+        'Stock Actual',
+        'Stock objetivo total. Se compara contra el stock vigente y genera ingreso o egreso en Kardex.',
+      ],
+      [
+        'Stock Nuevo / Stock Usado',
+        'Opcional. Si se informan, definen el desglose del stock por condicion.',
+      ],
       ['Stock Fisico', 'Opcional. Si se omite, toma el Stock Actual.'],
     ]);
 
@@ -1817,7 +1866,10 @@ export class KardexService extends CrudService<Kardex> {
     return Number.isFinite(value) ? value.toFixed(decimals) : '0';
   }
 
-  private resolveProductoUnitCost(producto: Producto, stock?: StockBodega | null) {
+  private resolveProductoUnitCost(
+    producto: Producto,
+    stock?: StockBodega | null,
+  ) {
     const productCost = this.toNumber(
       producto.costo_promedio ?? producto.ultimo_costo,
       0,
@@ -1904,7 +1956,8 @@ export class KardexService extends CrudService<Kardex> {
     const requestedName =
       this.toText(options.nombreUnidad) || this.toText(options.tipoUnidad);
     const requestedAbbreviation = this.toText(options.abreviaturaUnidad);
-    const requestedUnit = requestedName || requestedCode || requestedAbbreviation;
+    const requestedUnit =
+      requestedName || requestedCode || requestedAbbreviation;
     const prefersGallons =
       this.isOilLikeProductName(options.productName) ||
       ['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase());
@@ -1913,12 +1966,15 @@ export class KardexService extends CrudService<Kardex> {
       return this.ensureGallonsUnit(manager, options.userName);
     }
 
-    if (['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase())) {
+    if (
+      ['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase())
+    ) {
       return this.ensureGallonsUnit(manager, options.userName);
     }
 
     const unidadNombre = requestedName || requestedCode || 'UNIDAD';
-    const unidadCodigo = requestedCode || this.buildCodeFromLabel(unidadNombre, 'UM');
+    const unidadCodigo =
+      requestedCode || this.buildCodeFromLabel(unidadNombre, 'UM');
     let unidad = await manager.findOne(UnidadMedida, {
       where: [
         { codigo: unidadCodigo, is_deleted: false },
@@ -1944,7 +2000,8 @@ export class KardexService extends CrudService<Kardex> {
     } else {
       unidad.codigo = unidad.codigo || unidadCodigo;
       if (requestedName) unidad.nombre = requestedName;
-      unidad.abreviatura = requestedAbbreviation || unidad.abreviatura || unidadCodigo;
+      unidad.abreviatura =
+        requestedAbbreviation || unidad.abreviatura || unidadCodigo;
       unidad.updated_by = options.userName;
       await manager.save(UnidadMedida, unidad);
     }
@@ -1989,7 +2046,10 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private repairText(value: string) {
-    let text = String(value ?? '').replace(/\u0000/g, '').replace(/^\uFEFF/, '').trim();
+    let text = String(value ?? '')
+      .replace(/\u0000/g, '')
+      .replace(/^\uFEFF/, '')
+      .trim();
     if (!text) return '';
 
     const candidates = [text];
@@ -2274,6 +2334,70 @@ export class KardexService extends CrudService<Kardex> {
     return { movimiento, detalle, kardex };
   }
 
+  private async findOrCreateInventoryImportSucursal(
+    manager: EntityManager,
+    input: {
+      codigo: string;
+      nombre: string;
+      userName: string;
+    },
+  ) {
+    const existing = await manager.findOne(Sucursal, {
+      where: { codigo: input.codigo, is_deleted: false },
+    });
+    if (existing) return existing;
+
+    return manager.save(
+      Sucursal,
+      manager.create(Sucursal, {
+        status: 'ACTIVE',
+        codigo: input.codigo,
+        nombre: input.nombre || input.codigo,
+        created_by: input.userName,
+        updated_by: input.userName,
+      }),
+    );
+  }
+
+  private async findOrCreateInventoryImportBodega(
+    manager: EntityManager,
+    input: {
+      sucursalId: string;
+      codigo: string;
+      nombre: string;
+      direccion?: string | null;
+      esPrincipal?: boolean;
+      esDefaultCompra?: boolean;
+      esChatarra?: boolean;
+      userName: string;
+    },
+  ) {
+    const existing = await manager.findOne(Bodega, {
+      where: {
+        codigo: input.codigo,
+        sucursal_id: input.sucursalId,
+        is_deleted: false,
+      },
+    });
+    if (existing) return existing;
+
+    return manager.save(
+      Bodega,
+      manager.create(Bodega, {
+        status: 'ACTIVE',
+        sucursal_id: input.sucursalId,
+        codigo: input.codigo,
+        nombre: input.nombre || input.codigo,
+        direccion: input.direccion || null,
+        es_principal: input.esPrincipal ?? false,
+        es_default_compra: input.esDefaultCompra ?? false,
+        es_chatarra: input.esChatarra ?? false,
+        created_by: input.userName,
+        updated_by: input.userName,
+      }),
+    );
+  }
+
   private async importInventoryRow(
     row: Record<string, unknown>,
     userName: string,
@@ -2331,56 +2455,27 @@ export class KardexService extends CrudService<Kardex> {
     );
 
     const result = await this.dataSource.transaction(async (manager) => {
-      let sucursal = await manager.findOne(Sucursal, {
-        where: { codigo: codSucursal, is_deleted: false },
+      const sucursal = await this.findOrCreateInventoryImportSucursal(manager, {
+        codigo: codSucursal,
+        nombre: nomSucursal,
+        userName,
       });
-      if (!sucursal) {
-        sucursal = await manager.save(
-          Sucursal,
-          manager.create(Sucursal, {
-            status: 'ACTIVE',
-            codigo: codSucursal,
-            nombre: nomSucursal || codSucursal,
-            created_by: userName,
-            updated_by: userName,
-          }),
-        );
-      } else if (nomSucursal && sucursal.nombre !== nomSucursal) {
-        sucursal.nombre = nomSucursal;
-        sucursal.updated_by = userName;
-        await manager.save(Sucursal, sucursal);
-      }
 
-      let bodega = await manager.findOne(Bodega, {
-        where: {
-          codigo: codBodega,
-          sucursal_id: sucursal.id,
-          is_deleted: false,
-        },
+      const bodega = await this.findOrCreateInventoryImportBodega(manager, {
+        sucursalId: sucursal.id,
+        codigo: codBodega,
+        nombre: nomBodega,
+        esPrincipal: false,
+        userName,
       });
-      if (!bodega) {
-        bodega = await manager.save(
-          Bodega,
-          manager.create(Bodega, {
-            status: 'ACTIVE',
-            sucursal_id: sucursal.id,
-            codigo: codBodega,
-            nombre: nomBodega || codBodega,
-            es_principal: false,
-            created_by: userName,
-            updated_by: userName,
-          }),
-        );
-      } else if (nomBodega && bodega.nombre !== nomBodega) {
-        bodega.nombre = nomBodega;
-        bodega.updated_by = userName;
-        await manager.save(Bodega, bodega);
-      }
 
       const lineaNombre = nomLinea || 'GENERAL';
       const lineaCodigo = this.buildCodeFromLabel(lineaNombre, 'LIN');
       let linea = await manager.findOne(Linea, {
-        where: [{ codigo: lineaCodigo, is_deleted: false }, { nombre: lineaNombre, is_deleted: false }],
+        where: [
+          { codigo: lineaCodigo, is_deleted: false },
+          { nombre: lineaNombre, is_deleted: false },
+        ],
       });
       if (!linea) {
         linea = await manager.save(
@@ -2532,26 +2627,14 @@ export class KardexService extends CrudService<Kardex> {
     const direccionBodega = this.toText(
       this.rowValue(row, ['Direccion Bodega', 'Direccion']),
     );
-    const hasBodegaPrincipal = this.rowHasValue(row, [
-      'Bodega Principal',
-      'Es Principal',
-    ]);
     const bodegaPrincipal = this.toBoolean(
       this.rowValue(row, ['Bodega Principal', 'Es Principal']),
       false,
     );
-    const hasBodegaDefaultCompra = this.rowHasValue(row, [
-      'Bodega Default Compra',
-      'Default Compra',
-    ]);
     const bodegaDefaultCompra = this.toBoolean(
       this.rowValue(row, ['Bodega Default Compra', 'Default Compra']),
       false,
     );
-    const hasBodegaChatarra = this.rowHasValue(row, [
-      'Bodega Chatarra',
-      'Es Chatarra',
-    ]);
     const bodegaChatarra = this.toBoolean(
       this.rowValue(row, ['Bodega Chatarra', 'Es Chatarra']),
       false,
@@ -2559,11 +2642,15 @@ export class KardexService extends CrudService<Kardex> {
     const codLinea = this.toText(
       this.rowValue(row, ['Codigo Linea', 'Cod. Línea', 'Cod. Linea']),
     );
-    const nomLinea = this.toText(this.rowValue(row, ['Linea', 'Línea', 'Linea']));
+    const nomLinea = this.toText(
+      this.rowValue(row, ['Linea', 'Línea', 'Linea']),
+    );
     const codCategoria = this.toText(
       this.rowValue(row, ['Codigo Categoria', 'Cod. Categoria']),
     );
-    const tipoProducto = this.toText(this.rowValue(row, ['Tipo Producto', 'Tipo']));
+    const tipoProducto = this.toText(
+      this.rowValue(row, ['Tipo Producto', 'Tipo']),
+    );
     const nomCategoria = this.toText(
       this.rowValue(row, ['Categoria', 'Categoría', 'Categoria']),
     );
@@ -2615,7 +2702,10 @@ export class KardexService extends CrudService<Kardex> {
       ? this.toBoolean(this.rowValue(row, ['Es Aceite']), false)
       : this.isOilLikeProductName(nomItem);
     const hasEsServicio = this.rowHasValue(row, ['Es Servicio']);
-    const esServicio = this.toBoolean(this.rowValue(row, ['Es Servicio']), false);
+    const esServicio = this.toBoolean(
+      this.rowValue(row, ['Es Servicio']),
+      false,
+    );
     const hasRequiereLote = this.rowHasValue(row, ['Requiere Lote']);
     const requiereLote = this.toBoolean(
       this.rowValue(row, ['Requiere Lote']),
@@ -2691,7 +2781,9 @@ export class KardexService extends CrudService<Kardex> {
       ? this.toNumber(this.rowValue(row, ['Stock Fisico']), stockObjetivo)
       : stockObjetivo;
     if (stockObjetivo < 0 || stockNuevoObjetivo < 0 || stockUsadoObjetivo < 0) {
-      throw new BadRequestException('Los valores de stock no pueden ser negativos.');
+      throw new BadRequestException(
+        'Los valores de stock no pueden ser negativos.',
+      );
     }
     const stockMinBodega = this.toNumber(
       this.rowValue(row, [
@@ -2743,71 +2835,26 @@ export class KardexService extends CrudService<Kardex> {
       stockMaxBodega > 0 ? stockMaxBodega : 10000;
 
     return this.dataSource.transaction(async (manager) => {
-      let sucursal = await manager.findOne(Sucursal, {
-        where: { codigo: codSucursal, is_deleted: false },
+      const sucursal = await this.findOrCreateInventoryImportSucursal(manager, {
+        codigo: codSucursal,
+        nombre: nomSucursal,
+        userName,
       });
-      if (!sucursal) {
-        sucursal = await manager.save(
-          Sucursal,
-          manager.create(Sucursal, {
-            status: 'ACTIVE',
-            codigo: codSucursal,
-            nombre: nomSucursal || codSucursal,
-            created_by: userName,
-            updated_by: userName,
-          }),
-        );
-      } else if (nomSucursal && sucursal.nombre !== nomSucursal) {
-        sucursal.nombre = nomSucursal;
-        sucursal.updated_by = userName;
-        await manager.save(Sucursal, sucursal);
-      }
 
-      let bodega = await manager.findOne(Bodega, {
-        where: {
-          codigo: codBodega,
-          sucursal_id: sucursal.id,
-          is_deleted: false,
-        },
+      const bodega = await this.findOrCreateInventoryImportBodega(manager, {
+        sucursalId: sucursal.id,
+        codigo: codBodega,
+        nombre: nomBodega,
+        direccion: direccionBodega,
+        esPrincipal: bodegaPrincipal,
+        esDefaultCompra: bodegaDefaultCompra,
+        esChatarra: bodegaChatarra,
+        userName,
       });
-      if (!bodega) {
-        const bodegaEnOtraSucursal = await manager.findOne(Bodega, {
-          where: { codigo: codBodega, is_deleted: false },
-        });
-        if (bodegaEnOtraSucursal) {
-          throw new BadRequestException(
-            `La bodega ${codBodega} ya existe en otra sucursal. Verifica Codigo Sucursal y Codigo Bodega.`,
-          );
-        }
-        bodega = await manager.save(
-          Bodega,
-          manager.create(Bodega, {
-            status: 'ACTIVE',
-            sucursal_id: sucursal.id,
-            codigo: codBodega,
-            nombre: nomBodega || codBodega,
-            direccion: direccionBodega || null,
-            es_principal: bodegaPrincipal,
-            es_default_compra: bodegaDefaultCompra,
-            es_chatarra: bodegaChatarra,
-            created_by: userName,
-            updated_by: userName,
-          }),
-        );
-      } else {
-        bodega.nombre = nomBodega || bodega.nombre;
-        bodega.direccion = direccionBodega || bodega.direccion || null;
-        if (hasBodegaPrincipal) bodega.es_principal = bodegaPrincipal;
-        if (hasBodegaDefaultCompra) {
-          bodega.es_default_compra = bodegaDefaultCompra;
-        }
-        if (hasBodegaChatarra) bodega.es_chatarra = bodegaChatarra;
-        bodega.updated_by = userName;
-        await manager.save(Bodega, bodega);
-      }
 
       const lineaNombre = nomLinea || 'GENERAL';
-      const lineaCodigo = codLinea || this.buildCodeFromLabel(lineaNombre, 'LIN');
+      const lineaCodigo =
+        codLinea || this.buildCodeFromLabel(lineaNombre, 'LIN');
       let linea = await manager.findOne(Linea, {
         where: [
           { codigo: lineaCodigo, is_deleted: false },
@@ -2947,7 +2994,10 @@ export class KardexService extends CrudService<Kardex> {
         producto.requiere_serie = hasRequiereSerie
           ? requiereSerie
           : producto.requiere_serie;
-        producto.ultimo_costo = this.toFixedText(ultimoCosto || costoUnitario, 4);
+        producto.ultimo_costo = this.toFixedText(
+          ultimoCosto || costoUnitario,
+          4,
+        );
         producto.costo_promedio = this.toFixedText(costoUnitario, 4);
         producto.precio_venta = this.toFixedText(precio, 4);
         producto.porcentaje_utilidad = this.toFixedText(utilidad, 4);
@@ -3004,7 +3054,11 @@ export class KardexService extends CrudService<Kardex> {
         if (delta > 0) summary.ingresos += 1;
         else summary.salidas += 1;
       } else {
-        this.setStockBreakdown(stockRow, stockNuevoObjetivo, stockUsadoObjetivo);
+        this.setStockBreakdown(
+          stockRow,
+          stockNuevoObjetivo,
+          stockUsadoObjetivo,
+        );
         stockRow.stock_fisico = this.toFixedText(stockFisicoObjetivo, 6);
         await manager.save(StockBodega, stockRow);
         changedStockIds.add(stockRow.id);

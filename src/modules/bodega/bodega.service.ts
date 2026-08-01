@@ -46,7 +46,7 @@ export class BodegaService extends CrudService<Bodega> {
             .orWhere('bodega.nombre ILIKE :search', {
               search: `%${normalizedSearch}%`,
             })
-            .orWhere('COALESCE(bodega.direccion, \'\') ILIKE :search', {
+            .orWhere("COALESCE(bodega.direccion, '') ILIKE :search", {
               search: `%${normalizedSearch}%`,
             });
         }),
@@ -87,6 +87,11 @@ export class BodegaService extends CrudService<Bodega> {
         await this.ensureDefaultPurchaseWarehouseAvailabilityForRepository(
           repo,
           preparedPayload?.es_default_compra === true,
+        );
+        await this.ensureWarehouseCodeAvailabilityForRepository(
+          repo,
+          preparedPayload.sucursal_id,
+          preparedPayload.codigo,
         );
 
         const created = await repo.save(repo.create(preparedPayload));
@@ -135,6 +140,12 @@ export class BodegaService extends CrudService<Bodega> {
         await this.ensureDefaultPurchaseWarehouseAvailabilityForRepository(
           repo,
           preparedPayload?.es_default_compra === true,
+          id,
+        );
+        await this.ensureWarehouseCodeAvailabilityForRepository(
+          repo,
+          preparedPayload.sucursal_id ?? fresh.sucursal_id,
+          preparedPayload.codigo ?? fresh.codigo,
           id,
         );
 
@@ -232,8 +243,16 @@ export class BodegaService extends CrudService<Bodega> {
   ) {
     if (
       error instanceof QueryFailedError &&
-      String((error as any)?.driverError?.constraint || '') ===
-        'uq_tb_bodega_default_compra'
+      this.getConstraintName(error) === 'uq_tb_bodega_sucursal_codigo_active'
+    ) {
+      return new BadRequestException(
+        'Ya existe una bodega con ese código dentro de la sucursal seleccionada.',
+      );
+    }
+
+    if (
+      error instanceof QueryFailedError &&
+      this.getConstraintName(error) === 'uq_tb_bodega_default_compra'
     ) {
       const qb = this.repository
         .createQueryBuilder('bodega')
@@ -257,8 +276,7 @@ export class BodegaService extends CrudService<Bodega> {
 
     if (
       error instanceof QueryFailedError &&
-      String((error as any)?.driverError?.constraint || '') ===
-        'uq_tb_bodega_chatarra_parent'
+      this.getConstraintName(error) === 'uq_tb_bodega_chatarra_parent'
     ) {
       return new BadRequestException(
         'La bodega ya tiene una bodega chatarra asociada.',
@@ -268,10 +286,18 @@ export class BodegaService extends CrudService<Bodega> {
     return error;
   }
 
+  private getConstraintName(error: unknown): string {
+    const constraint = (error as { driverError?: { constraint?: unknown } })
+      .driverError?.constraint;
+
+    return typeof constraint === 'string' ? constraint : '';
+  }
+
   private buildDefaultWarehouseConflict(existingDefault: Bodega) {
-    const label = `${existingDefault.codigo || ''} - ${existingDefault.nombre || ''}`
-      .replace(/\s+-\s+$/, '')
-      .trim();
+    const label =
+      `${existingDefault.codigo || ''} - ${existingDefault.nombre || ''}`
+        .replace(/\s+-\s+$/, '')
+        .trim();
 
     return new BadRequestException({
       message: `Ya existe una bodega configurada como default para compras: ${label}.`,
@@ -311,9 +337,54 @@ export class BodegaService extends CrudService<Bodega> {
 
   private prepareRegularWarehousePayload(payload: DeepPartial<Bodega>) {
     const prepared: DeepPartial<Bodega> = { ...payload };
+    if (prepared.codigo !== undefined && prepared.codigo !== null) {
+      prepared.codigo = String(prepared.codigo).trim();
+    }
+    if (prepared.sucursal_id !== undefined && prepared.sucursal_id !== null) {
+      prepared.sucursal_id = String(prepared.sucursal_id).trim();
+    }
     prepared.es_chatarra = false;
     prepared.bodega_padre_id = null;
     return prepared;
+  }
+
+  private async ensureWarehouseCodeAvailabilityForRepository(
+    repository: Repository<Bodega>,
+    sucursalId?: string | null,
+    code?: string | null,
+    currentId?: string,
+  ) {
+    const normalizedSucursalId = String(sucursalId ?? '').trim();
+    const normalizedCode = String(code ?? '').trim();
+    if (!normalizedSucursalId || !normalizedCode) return;
+
+    const qb = repository
+      .createQueryBuilder('bodega')
+      .where('bodega.is_deleted = false')
+      .andWhere('bodega.sucursal_id = :sucursalId', {
+        sucursalId: normalizedSucursalId,
+      })
+      .andWhere(
+        "UPPER(TRIM(COALESCE(bodega.codigo, ''))) = UPPER(TRIM(:codigo))",
+        { codigo: normalizedCode },
+      );
+
+    if (currentId) {
+      qb.andWhere('bodega.id <> :currentId', { currentId });
+    }
+
+    const existing = await qb.getOne();
+    if (!existing) return;
+
+    throw new BadRequestException({
+      message: `Ya existe la bodega ${normalizedCode} dentro de la sucursal seleccionada.`,
+      existingWarehouse: {
+        id: existing.id,
+        sucursal_id: existing.sucursal_id,
+        codigo: existing.codigo,
+        nombre: existing.nombre,
+      },
+    });
   }
 
   private normalizeWarehouseAddress(value: unknown) {
@@ -354,6 +425,7 @@ export class BodegaService extends CrudService<Bodega> {
         repository,
         parent,
         scrapName,
+        scrapCode,
       );
     }
 
@@ -406,6 +478,7 @@ export class BodegaService extends CrudService<Bodega> {
     repository: Repository<Bodega>,
     parent: Bodega,
     scrapName: string,
+    scrapCode: string,
   ) {
     return repository
       .createQueryBuilder('bodega')
@@ -415,13 +488,21 @@ export class BodegaService extends CrudService<Bodega> {
         sucursalId: parent.sucursal_id,
       })
       .andWhere(
-        'UPPER(TRIM(COALESCE(bodega.nombre, \'\'))) = UPPER(TRIM(:scrapName))',
-        { scrapName },
+        new Brackets((qb) => {
+          qb.where(
+            "UPPER(TRIM(COALESCE(bodega.nombre, ''))) = UPPER(TRIM(:scrapName))",
+            { scrapName },
+          ).orWhere(
+            "UPPER(TRIM(COALESCE(bodega.codigo, ''))) = UPPER(TRIM(:scrapCode))",
+            { scrapCode },
+          );
+        }),
       )
       .andWhere(
         new Brackets((qb) => {
-          qb.where('bodega.bodega_padre_id = :parentId', { parentId: parent.id })
-            .orWhere('bodega.bodega_padre_id IS NULL');
+          qb.where('bodega.bodega_padre_id = :parentId', {
+            parentId: parent.id,
+          }).orWhere('bodega.bodega_padre_id IS NULL');
         }),
       )
       .orderBy('bodega.created_at', 'ASC')
