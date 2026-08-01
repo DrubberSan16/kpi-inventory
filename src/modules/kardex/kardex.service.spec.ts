@@ -30,6 +30,30 @@ type ImportLocationResolver = {
       userName: string;
     },
   ): Promise<Bodega>;
+  getOrCreateStockRow(
+    manager: EntityManager,
+    args: {
+      bodegaId: string;
+      productoId: string;
+      costoPromedio: number;
+      userName: string;
+    },
+  ): Promise<StockBodega>;
+  applyInventoryImportStockTarget(
+    stockRow: StockBodega,
+    target: {
+      stockActual: number;
+      stockNuevo: number;
+      stockUsado: number;
+      stockFisico: number;
+      stockMinBodega: number;
+      stockMaxBodega: number;
+      stockMinGlobal: number;
+      stockContenedores: number;
+      costoPromedio: number;
+      userName: string;
+    },
+  ): number;
 };
 
 const emptyRepository = <T extends ObjectLiteral>() =>
@@ -197,5 +221,80 @@ describe('KardexService inventory import locations', () => {
     expect(bodega).toBe(savedBodega);
     expect(saveSucursal).toHaveBeenCalledTimes(1);
     expect(saveBodega).toHaveBeenCalledTimes(1);
+  });
+
+  it('no persiste un registro de stock nuevo con saldos provisionales en cero', async () => {
+    const newStock = {
+      bodega_id: 'bodega-tpta',
+      producto_id: 'producto-1',
+      stock_actual: '0.000000',
+      stock_nuevo: '0.000000',
+      stock_usado: '0.000000',
+      stock_fisico: '0.000000',
+    } as StockBodega;
+    const create = jest.fn().mockReturnValue(newStock);
+    const save = jest.fn();
+    const manager = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create,
+      save,
+    } as unknown as EntityManager;
+
+    const result = await asImportLocationResolver(
+      buildService(),
+    ).getOrCreateStockRow(manager, {
+      bodegaId: 'bodega-tpta',
+      productoId: 'producto-1',
+      costoPromedio: 0,
+      userName: 'IMPORTADOR',
+    });
+
+    expect(result).toBe(newStock);
+    expect(create).toHaveBeenCalledWith(
+      StockBodega,
+      expect.objectContaining({
+        bodega_id: 'bodega-tpta',
+        producto_id: 'producto-1',
+      }),
+    );
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('aplica juntos los cuatro saldos leídos del Excel antes de guardar', () => {
+    const stock = {
+      stock_actual: '0.000000',
+      stock_nuevo: '0.000000',
+      stock_usado: '0.000000',
+      stock_fisico: '0.000000',
+    } as StockBodega;
+
+    const total = asImportLocationResolver(
+      buildService(),
+    ).applyInventoryImportStockTarget(stock, {
+      stockActual: 2,
+      stockNuevo: 0,
+      stockUsado: 2,
+      stockFisico: 2,
+      stockMinBodega: 6,
+      stockMaxBodega: 12,
+      stockMinGlobal: 12,
+      stockContenedores: 0,
+      costoPromedio: 0,
+      userName: 'IMPORTADOR',
+    });
+
+    expect(total).toBe(2);
+    expect(stock).toMatchObject({
+      stock_actual: '2.000000',
+      stock_nuevo: '0.000000',
+      stock_usado: '2.000000',
+      stock_fisico: '2.000000',
+      stock_min_bodega: '6.000000',
+      stock_max_bodega: '12.000000',
+      stock_min_global: '12.000000',
+      stock_contenedores: '0.000000',
+      es_usado: true,
+      updated_by: 'IMPORTADOR',
+    });
   });
 });
