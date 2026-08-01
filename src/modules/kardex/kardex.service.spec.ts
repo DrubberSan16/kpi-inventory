@@ -54,6 +54,26 @@ type ImportLocationResolver = {
       userName: string;
     },
   ): number;
+  shouldSkipInventoryValidationRow(row: Record<string, unknown>): boolean;
+  reconcileInventoryStockBreakdown(input: {
+    hasStockActual: boolean;
+    hasStockNuevo: boolean;
+    hasStockUsado: boolean;
+    stockActual: number;
+    stockNuevo: number;
+    stockUsado: number;
+  }): { stockActual: number; stockNuevo: number; stockUsado: number };
+  resolveUnidadMedidaForProduct(
+    manager: EntityManager,
+    options: {
+      codigoUnidad?: string | null;
+      nombreUnidad?: string | null;
+      abreviaturaUnidad?: string | null;
+      tipoUnidad?: string | null;
+      productName?: string | null;
+      userName: string;
+    },
+  ): Promise<UnidadMedida>;
 };
 
 const emptyRepository = <T extends ObjectLiteral>() =>
@@ -296,5 +316,152 @@ describe('KardexService inventory import locations', () => {
       es_usado: true,
       updated_by: 'IMPORTADOR',
     });
+  });
+
+  it('reconcilia el desglose inconsistente usando Stock Actual como total', () => {
+    const result = asImportLocationResolver(
+      buildService(),
+    ).reconcileInventoryStockBreakdown({
+      hasStockActual: true,
+      hasStockNuevo: true,
+      hasStockUsado: true,
+      stockActual: 1,
+      stockNuevo: 2,
+      stockUsado: 1,
+    });
+
+    expect(result).toEqual({
+      stockActual: 1,
+      stockNuevo: 0,
+      stockUsado: 1,
+    });
+  });
+
+  it('omite las filas marcadas como INCONGRUENTE', () => {
+    const resolver = asImportLocationResolver(buildService());
+
+    expect(
+      resolver.shouldSkipInventoryValidationRow({
+        'Estado Validacion Kardex': 'INCONGRUENTE',
+      }),
+    ).toBe(true);
+    expect(
+      resolver.shouldSkipInventoryValidationRow({
+        'Estado Validacion Kardex': 'OK',
+      }),
+    ).toBe(false);
+  });
+
+  it('prioriza la unidad existente por nombre sin renombrar la unidad del código', async () => {
+    const unidadGenerica = {
+      id: 'unidad-generica',
+      codigo: 'UND',
+      nombre: 'UNIDAD',
+      abreviatura: 'UND',
+    } as UnidadMedida;
+    const paquete = {
+      id: 'unidad-paquete',
+      codigo: 'PAQ',
+      nombre: 'PAQUETE',
+      abreviatura: 'PAQ',
+    } as UnidadMedida;
+    const find = jest.fn().mockResolvedValue([unidadGenerica, paquete]);
+    const save = jest.fn();
+    const manager = {
+      find,
+      save,
+      create: jest.fn(),
+    } as unknown as EntityManager;
+
+    const result = await asImportLocationResolver(
+      buildService(),
+    ).resolveUnidadMedidaForProduct(manager, {
+      codigoUnidad: 'UND',
+      nombreUnidad: 'PAQUETE',
+      abreviaturaUnidad: 'PAQ',
+      productName: 'FUNDA ZIPLOC',
+      userName: 'IMPORTADOR',
+    });
+
+    expect(result).toBe(paquete);
+    expect(unidadGenerica).toMatchObject({
+      codigo: 'UND',
+      nombre: 'UNIDAD',
+      abreviatura: 'UND',
+    });
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('resuelve GAL como galones aunque el nombre recibido sea UNIDAD', async () => {
+    const galones = {
+      id: 'unidad-galones',
+      codigo: 'GALONES',
+      nombre: 'GALONES',
+      abreviatura: 'GAL',
+    } as UnidadMedida;
+    const findOne = jest.fn().mockResolvedValue(galones);
+    const save = jest.fn();
+    const manager = {
+      findOne,
+      save,
+      create: jest.fn(),
+    } as unknown as EntityManager;
+
+    const result = await asImportLocationResolver(
+      buildService(),
+    ).resolveUnidadMedidaForProduct(manager, {
+      codigoUnidad: 'GAL',
+      nombreUnidad: 'UNIDAD',
+      abreviaturaUnidad: 'GAL',
+      productName: 'DESENGRASANTE PERFORMANCE',
+      userName: 'IMPORTADOR',
+    });
+
+    expect(result).toBe(galones);
+    expect(findOne).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('crea la unidad únicamente cuando no existe una coincidencia', async () => {
+    const createdUnit = {
+      codigo: 'CAJ',
+      nombre: 'CAJA',
+      abreviatura: 'CJ',
+    } as UnidadMedida;
+    const savedUnit = {
+      ...createdUnit,
+      id: 'unidad-caja',
+    } as UnidadMedida;
+    const find = jest.fn().mockResolvedValue([]);
+    const create = jest.fn().mockReturnValue(createdUnit);
+    const save = jest.fn().mockResolvedValue(savedUnit);
+    const manager = {
+      find,
+      create,
+      save,
+    } as unknown as EntityManager;
+
+    const result = await asImportLocationResolver(
+      buildService(),
+    ).resolveUnidadMedidaForProduct(manager, {
+      codigoUnidad: 'CAJ',
+      nombreUnidad: 'CAJA',
+      abreviaturaUnidad: 'CJ',
+      productName: 'REPUESTO EN CAJA',
+      userName: 'IMPORTADOR',
+    });
+
+    expect(result).toBe(savedUnit);
+    expect(create).toHaveBeenCalledWith(
+      UnidadMedida,
+      expect.objectContaining({
+        codigo: 'CAJ',
+        nombre: 'CAJA',
+        abreviatura: 'CJ',
+        created_by: 'IMPORTADOR',
+        updated_by: 'IMPORTADOR',
+      }),
+    );
+    expect(save).toHaveBeenCalledTimes(1);
   });
 });

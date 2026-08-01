@@ -1529,19 +1529,23 @@ export class KardexService extends CrudService<Kardex> {
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
 
-      try {
-        const processed = await this.importInventoryRowNormalized(
-          row,
-          userName,
-          summary,
-          changedStockIds,
-        );
-        if (processed) summary.procesados += 1;
-        else summary.omitidos += 1;
-      } catch (error: any) {
-        summary.errores.push(
-          `Fila ${index + 2}: ${error?.message ?? 'No se pudo importar.'}`,
-        );
+      if (this.shouldSkipInventoryValidationRow(row)) {
+        summary.omitidos += 1;
+      } else {
+        try {
+          const processed = await this.importInventoryRowNormalized(
+            row,
+            userName,
+            summary,
+            changedStockIds,
+          );
+          if (processed) summary.procesados += 1;
+          else summary.omitidos += 1;
+        } catch (error: any) {
+          summary.errores.push(
+            `Fila ${index + 2}: ${error?.message ?? 'No se pudo importar.'}`,
+          );
+        }
       }
 
       await options?.onProgress?.({
@@ -1907,6 +1911,74 @@ export class KardexService extends CrudService<Kardex> {
     return value !== null && value !== undefined && this.toText(value) !== '';
   }
 
+  private shouldSkipInventoryValidationRow(row: Record<string, unknown>) {
+    const status = this.normalizeHeader(
+      this.toText(
+        this.rowValue(row, [
+          'Estado Validacion Kardex',
+          'Estado validación Kardex',
+        ]),
+      ),
+    );
+    return status === 'incongruente';
+  }
+
+  private reconcileInventoryStockBreakdown(input: {
+    hasStockActual: boolean;
+    hasStockNuevo: boolean;
+    hasStockUsado: boolean;
+    stockActual: number;
+    stockNuevo: number;
+    stockUsado: number;
+  }) {
+    if (input.stockActual < 0 || input.stockNuevo < 0 || input.stockUsado < 0) {
+      throw new BadRequestException(
+        'Los valores de stock no pueden ser negativos.',
+      );
+    }
+
+    if (!input.hasStockActual) {
+      return {
+        stockActual: input.stockNuevo + input.stockUsado,
+        stockNuevo: input.stockNuevo,
+        stockUsado: input.stockUsado,
+      };
+    }
+
+    if (!input.hasStockNuevo && !input.hasStockUsado) {
+      return {
+        stockActual: input.stockActual,
+        stockNuevo: input.stockActual,
+        stockUsado: 0,
+      };
+    }
+
+    const breakdownTotal = input.stockNuevo + input.stockUsado;
+    if (Math.abs(breakdownTotal - input.stockActual) <= 0.000001) {
+      return {
+        stockActual: input.stockActual,
+        stockNuevo: input.stockNuevo,
+        stockUsado: input.stockUsado,
+      };
+    }
+
+    if (input.hasStockUsado) {
+      const stockUsado = Math.min(input.stockUsado, input.stockActual);
+      return {
+        stockActual: input.stockActual,
+        stockNuevo: input.stockActual - stockUsado,
+        stockUsado,
+      };
+    }
+
+    const stockNuevo = Math.min(input.stockNuevo, input.stockActual);
+    return {
+      stockActual: input.stockActual,
+      stockNuevo,
+      stockUsado: input.stockActual - stockNuevo,
+    };
+  }
+
   private toBoolean(value: unknown, fallback = false) {
     const normalized = this.toText(value)
       .normalize('NFD')
@@ -1958,24 +2030,29 @@ export class KardexService extends CrudService<Kardex> {
     const requestedAbbreviation = this.toText(options.abreviaturaUnidad);
     const requestedUnit =
       requestedName || requestedCode || requestedAbbreviation;
+    const requestedUnitTokens = [
+      requestedCode,
+      requestedName,
+      requestedAbbreviation,
+      this.toText(options.tipoUnidad),
+    ]
+      .map((value) => value.toUpperCase())
+      .filter(Boolean);
+    const explicitlyRequestsGallons = requestedUnitTokens.some((value) =>
+      ['GALON', 'GALONES', 'GAL', 'GL'].includes(value),
+    );
     const prefersGallons =
-      this.isOilLikeProductName(options.productName) ||
-      ['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase());
+      explicitlyRequestsGallons ||
+      (!requestedUnit && this.isOilLikeProductName(options.productName));
 
-    if (prefersGallons && !requestedUnit) {
-      return this.ensureGallonsUnit(manager, options.userName);
-    }
-
-    if (
-      ['GALON', 'GALONES', 'GAL', 'GL'].includes(requestedUnit.toUpperCase())
-    ) {
+    if (prefersGallons) {
       return this.ensureGallonsUnit(manager, options.userName);
     }
 
     const unidadNombre = requestedName || requestedCode || 'UNIDAD';
     const unidadCodigo =
       requestedCode || this.buildCodeFromLabel(unidadNombre, 'UM');
-    let unidad = await manager.findOne(UnidadMedida, {
+    const matchingUnits = await manager.find(UnidadMedida, {
       where: [
         { codigo: unidadCodigo, is_deleted: false },
         { nombre: unidadNombre, is_deleted: false },
@@ -1984,6 +2061,16 @@ export class KardexService extends CrudService<Kardex> {
           : []),
       ],
     });
+    const matchesValue = (current: unknown, requested: string) =>
+      Boolean(requested) &&
+      this.normalizeHeader(this.toText(current)) ===
+        this.normalizeHeader(requested);
+    let unidad =
+      matchingUnits.find((item) => matchesValue(item.nombre, unidadNombre)) ??
+      matchingUnits.find((item) =>
+        matchesValue(item.abreviatura, requestedAbbreviation),
+      ) ??
+      matchingUnits.find((item) => matchesValue(item.codigo, unidadCodigo));
     if (!unidad) {
       unidad = await manager.save(
         UnidadMedida,
@@ -1997,13 +2084,6 @@ export class KardexService extends CrudService<Kardex> {
           updated_by: options.userName,
         }),
       );
-    } else {
-      unidad.codigo = unidad.codigo || unidadCodigo;
-      if (requestedName) unidad.nombre = requestedName;
-      unidad.abreviatura =
-        requestedAbbreviation || unidad.abreviatura || unidadCodigo;
-      unidad.updated_by = options.userName;
-      await manager.save(UnidadMedida, unidad);
     }
     return unidad;
   }
@@ -2789,31 +2869,32 @@ export class KardexService extends CrudService<Kardex> {
       this.rowValue(row, ['Stock Actual', 'Stock']),
       0,
     );
-    const stockUsadoObjetivo = hasStockUsado
+    const stockUsadoInformado = hasStockUsado
       ? this.toNumber(this.rowValue(row, ['Stock Usado']), 0)
       : 0;
-    let stockNuevoObjetivo = hasStockNuevo
+    const stockNuevoInformado = hasStockNuevo
       ? this.toNumber(this.rowValue(row, ['Stock Nuevo']), 0)
-      : Math.max(stockActual - stockUsadoObjetivo, 0);
-    let stockObjetivo = hasStockActual
-      ? stockActual
-      : stockNuevoObjetivo + stockUsadoObjetivo;
-    if (hasStockNuevo || hasStockUsado) {
-      const breakdownTotal = stockNuevoObjetivo + stockUsadoObjetivo;
-      if (hasStockActual && Math.abs(breakdownTotal - stockActual) > 0.000001) {
-        throw new BadRequestException(
-          `Stock Actual (${stockActual}) no coincide con Stock Nuevo + Stock Usado (${breakdownTotal}).`,
-        );
-      }
-      stockObjetivo = breakdownTotal;
-      if (!hasStockNuevo) {
-        stockNuevoObjetivo = Math.max(stockObjetivo - stockUsadoObjetivo, 0);
-      }
-    }
+      : Math.max(stockActual - stockUsadoInformado, 0);
+    const stockTargets = this.reconcileInventoryStockBreakdown({
+      hasStockActual,
+      hasStockNuevo,
+      hasStockUsado,
+      stockActual,
+      stockNuevo: stockNuevoInformado,
+      stockUsado: stockUsadoInformado,
+    });
+    const stockObjetivo = stockTargets.stockActual;
+    const stockNuevoObjetivo = stockTargets.stockNuevo;
+    const stockUsadoObjetivo = stockTargets.stockUsado;
     const stockFisicoObjetivo = this.rowHasValue(row, ['Stock Fisico'])
       ? this.toNumber(this.rowValue(row, ['Stock Fisico']), stockObjetivo)
       : stockObjetivo;
-    if (stockObjetivo < 0 || stockNuevoObjetivo < 0 || stockUsadoObjetivo < 0) {
+    if (
+      stockObjetivo < 0 ||
+      stockNuevoObjetivo < 0 ||
+      stockUsadoObjetivo < 0 ||
+      stockFisicoObjetivo < 0
+    ) {
       throw new BadRequestException(
         'Los valores de stock no pueden ser negativos.',
       );
