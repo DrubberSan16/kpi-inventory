@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import {
   ApiBody,
   ApiOperation,
@@ -9,6 +9,7 @@ import {
 import { CrudController } from '../../common/crud/crud.controller';
 import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
 import { Producto } from '../entities/producto.entity';
+import { ProductoQueryDto } from './producto-query.dto';
 import { ProductoService } from './producto.service';
 
 const { CreateDto: CreateProductoDto, UpdateDto: UpdateProductoDto } =
@@ -19,6 +20,13 @@ const { CreateDto: CreateProductoDto, UpdateDto: UpdateProductoDto } =
 export class ProductoController extends CrudController<Producto> {
   constructor(protected readonly service: ProductoService) {
     super(service);
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'Listar materiales con paginacion y filtros por campo' })
+  @ApiResponse({ status: 200, description: 'Listado paginado de materiales' })
+  findAll(@Query() query: ProductoQueryDto) {
+    return this.service.findAllPaginated(query);
   }
 
   @Post()

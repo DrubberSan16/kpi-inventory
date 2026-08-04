@@ -159,6 +159,33 @@ export class TransferenciaBodegaService {
       );
     }
 
+    if (query.bodega_origen_id) {
+      qb.andWhere('transferencia.bodega_origen_id = :bodegaOrigenId', {
+        bodegaOrigenId: query.bodega_origen_id,
+      });
+    }
+    if (query.bodega_destino_id) {
+      qb.andWhere('transferencia.bodega_destino_id = :bodegaDestinoId', {
+        bodegaDestinoId: query.bodega_destino_id,
+      });
+    }
+    if (query.estado) {
+      qb.andWhere(
+        "UPPER(TRIM(COALESCE(transferencia.estado, ''))) = :estado",
+        { estado: this.toText(query.estado).toUpperCase() },
+      );
+    }
+    if (query.desde) {
+      qb.andWhere('DATE(transferencia.fecha_transferencia) >= :desde', {
+        desde: query.desde,
+      });
+    }
+    if (query.hasta) {
+      qb.andWhere('DATE(transferencia.fecha_transferencia) <= :hasta', {
+        hasta: query.hasta,
+      });
+    }
+
     if (search) {
       qb.andWhere(
         new Brackets((searchQb) => {

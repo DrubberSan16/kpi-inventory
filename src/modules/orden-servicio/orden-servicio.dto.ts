@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -155,4 +155,30 @@ export class OrdenServicioQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID()
   proveedor_id?: string;
+
+  @ApiPropertyOptional({ description: 'usuario emisor id' })
+  @IsOptional()
+  @IsString()
+  emitido_por_user_id?: string;
+
+  @ApiPropertyOptional({ description: 'servicio realizado', type: Boolean })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    return ['true', '1', 'yes', 'si', 'sí'].includes(
+      String(value).trim().toLowerCase(),
+    );
+  })
+  @IsBoolean()
+  servicio_realizado?: boolean;
+
+  @ApiPropertyOptional({ description: 'fecha de emision desde' })
+  @IsOptional()
+  @IsDateString()
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'fecha de emision hasta' })
+  @IsOptional()
+  @IsDateString()
+  hasta?: string;
 }

@@ -1,9 +1,16 @@
 import { Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DeepPartial, EntityManager, Repository, DataSource } from 'typeorm';
+import {
+  Brackets,
+  DataSource,
+  DeepPartial,
+  EntityManager,
+  Repository,
+} from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { Producto } from '../entities/producto.entity';
 import { UnidadMedida } from '../entities/unidad-medida.entity';
+import { ProductoQueryDto } from './producto-query.dto';
 
 @Injectable()
 export class ProductoService
@@ -21,6 +28,84 @@ export class ProductoService
 
   async onModuleInit() {
     await this.ensureOilSchemaAndDefaults();
+  }
+
+  async findAllPaginated(query: ProductoQueryDto) {
+    const page =
+      Number.isFinite(Number(query.page)) && Number(query.page) > 0
+        ? Number(query.page)
+        : 1;
+    const limit =
+      Number.isFinite(Number(query.limit)) && Number(query.limit) > 0
+        ? Math.min(Number(query.limit), 100)
+        : 20;
+    const search = String(query.search || '').trim();
+    const qb = this.repository
+      .createQueryBuilder('producto')
+      .where('producto.is_deleted = false');
+
+    const exactFilters: Array<[keyof ProductoQueryDto, string]> = [
+      ['linea_id', 'producto.linea_id'],
+      ['categoria_id', 'producto.categoria_id'],
+      ['marca_id', 'producto.marca_id'],
+      ['unidad_medida_id', 'producto.unidad_medida_id'],
+    ];
+    for (const [key, column] of exactFilters) {
+      const value = String(query[key] || '').trim();
+      if (value) qb.andWhere(`${column} = :${key}`, { [key]: value });
+    }
+
+    const status = String(query.status || '').trim().toUpperCase();
+    if (status) {
+      qb.andWhere("UPPER(TRIM(COALESCE(producto.status, ''))) = :status", {
+        status,
+      });
+    }
+    if (typeof query.es_aceite === 'boolean') {
+      qb.andWhere('COALESCE(producto.es_aceite, false) = :esAceite', {
+        esAceite: query.es_aceite,
+      });
+    }
+    if (typeof query.es_servicio === 'boolean') {
+      qb.andWhere('COALESCE(producto.es_servicio, false) = :esServicio', {
+        esServicio: query.es_servicio,
+      });
+    }
+    if (search) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('producto.codigo ILIKE :search', { search: `%${search}%` })
+            .orWhere('producto.nombre ILIKE :search', { search: `%${search}%` })
+            .orWhere("COALESCE(producto.descripcion, '') ILIKE :search", {
+              search: `%${search}%`,
+            })
+            .orWhere("COALESCE(producto.sku, '') ILIKE :search", {
+              search: `%${search}%`,
+            })
+            .orWhere("COALESCE(producto.codigo_barras, '') ILIKE :search", {
+              search: `%${search}%`,
+            });
+        }),
+      );
+    }
+
+    const [data, total] = await qb
+      .orderBy('producto.nombre', 'ASC')
+      .addOrderBy('producto.codigo', 'ASC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
+
+    return {
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    };
   }
 
   async create(payload: DeepPartial<Producto>) {

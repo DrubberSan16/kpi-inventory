@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { DataSource, EntityManager, ILike, In, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, In, Repository } from 'typeorm';
 import {
   Bodega,
   OrdenCompra,
@@ -111,7 +111,6 @@ export class OrdenCompraService {
   async findAll(query: OrdenCompraQueryDto, sucursalId?: string | null) {
     const page = Number(query.page || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
-    const where: any = { is_deleted: false };
     const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
     if (warehouseIds && !warehouseIds.length) {
       return {
@@ -119,54 +118,58 @@ export class OrdenCompraService {
         pagination: { page, limit, total: 0, totalPages: 1 },
       };
     }
-    if (warehouseIds) where.bodega_destino_id = In(warehouseIds);
-    if (query.estado) where.estado = this.toText(query.estado).toUpperCase();
-    if (query.proveedor_id) where.proveedor_id = query.proveedor_id;
-    if (query.search) {
-      const search = this.toText(query.search);
-      const [byCode, byProvider, byRef] = await Promise.all([
-        this.ordenRepo.find({
-          where: { ...where, codigo: ILike(`%${search}%`) },
-          skip: (page - 1) * limit,
-          take: limit,
-          order: { fecha_emision: 'DESC', created_at: 'DESC' },
-        }),
-        this.ordenRepo.find({
-          where: { ...where, proveedor_nombre: ILike(`%${search}%`) },
-          skip: (page - 1) * limit,
-          take: limit,
-          order: { fecha_emision: 'DESC', created_at: 'DESC' },
-        }),
-        this.ordenRepo.find({
-          where: { ...where, referencia: ILike(`%${search}%`) },
-          skip: (page - 1) * limit,
-          take: limit,
-          order: { fecha_emision: 'DESC', created_at: 'DESC' },
-        }),
-      ]);
+    const qb = this.ordenRepo
+      .createQueryBuilder('orden')
+      .where('orden.is_deleted = false');
 
-      const deduped = new Map<string, OrdenCompra>();
-      [...byCode, ...byProvider, ...byRef].forEach((item) =>
-        deduped.set(item.id, item),
+    if (warehouseIds) {
+      qb.andWhere('orden.bodega_destino_id IN (:...warehouseIds)', {
+        warehouseIds,
+      });
+    }
+    if (query.bodega_destino_id) {
+      qb.andWhere('orden.bodega_destino_id = :bodegaDestinoId', {
+        bodegaDestinoId: query.bodega_destino_id,
+      });
+    }
+    if (query.estado) {
+      qb.andWhere("UPPER(TRIM(COALESCE(orden.estado, ''))) = :estado", {
+        estado: this.toText(query.estado).toUpperCase(),
+      });
+    }
+    if (query.proveedor_id) {
+      qb.andWhere('orden.proveedor_id = :proveedorId', {
+        proveedorId: query.proveedor_id,
+      });
+    }
+    if (query.desde) {
+      qb.andWhere('DATE(orden.fecha_emision) >= :desde', { desde: query.desde });
+    }
+    if (query.hasta) {
+      qb.andWhere('DATE(orden.fecha_emision) <= :hasta', { hasta: query.hasta });
+    }
+    const search = this.toText(query.search);
+    if (search) {
+      qb.andWhere(
+        new Brackets((searchQb) => {
+          searchQb
+            .where('orden.codigo ILIKE :search', { search: `%${search}%` })
+            .orWhere("COALESCE(orden.proveedor_nombre, '') ILIKE :search", {
+              search: `%${search}%`,
+            })
+            .orWhere("COALESCE(orden.referencia, '') ILIKE :search", {
+              search: `%${search}%`,
+            });
+        }),
       );
-      const data = await this.hydrateOrders([...deduped.values()]);
-      return {
-        data,
-        pagination: {
-          page,
-          limit,
-          total: data.length,
-          totalPages: Math.max(1, Math.ceil(data.length / limit)),
-        },
-      };
     }
 
-    const [rows, total] = await this.ordenRepo.findAndCount({
-      where,
-      skip: (page - 1) * limit,
-      take: limit,
-      order: { fecha_emision: 'DESC', created_at: 'DESC' },
-    });
+    const [rows, total] = await qb
+      .orderBy('orden.fecha_emision', 'DESC')
+      .addOrderBy('orden.created_at', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
     return {
       data: await this.hydrateOrders(rows),
       pagination: {

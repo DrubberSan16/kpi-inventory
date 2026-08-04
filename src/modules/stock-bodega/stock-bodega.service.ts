@@ -139,6 +139,7 @@ export class StockBodegaService
       : 20;
     const search = String(query.search || '').trim();
     const warehouseId = String(query.bodega_id || '').trim();
+    const productId = String(query.producto_id || '').trim();
     const closedStatusSql = this.closedWorkOrderStatuses
       .map((status) => `'${status.replace(/'/g, "''")}'`)
       .join(', ');
@@ -177,10 +178,41 @@ export class StockBodegaService
       baseQuery.andWhere('stock.bodega_id = :warehouseId', { warehouseId });
     }
 
+    if (productId) {
+      baseQuery.andWhere('stock.producto_id = :productId', { productId });
+    }
+
     if (typeof query.es_aceite === 'boolean') {
       baseQuery.andWhere('COALESCE(producto.es_aceite, false) = :oilOnly', {
         oilOnly: query.es_aceite,
       });
+    }
+
+    if (typeof query.es_usado === 'boolean') {
+      baseQuery.andWhere('COALESCE(stock.es_usado, false) = :usesUsedStock', {
+        usesUsedStock: query.es_usado,
+      });
+    }
+
+    const status = String(query.status || '').trim().toUpperCase();
+    if (status) {
+      baseQuery.andWhere("UPPER(TRIM(COALESCE(stock.status, ''))) = :status", {
+        status,
+      });
+    }
+
+    if (query.stock_estado === 'CON_STOCK') {
+      baseQuery.andWhere('COALESCE(stock.stock_actual, 0) > 0');
+    } else if (query.stock_estado === 'SIN_STOCK') {
+      baseQuery.andWhere('COALESCE(stock.stock_actual, 0) <= 0');
+    } else if (query.stock_estado === 'BAJO_MINIMO') {
+      baseQuery.andWhere(
+        'COALESCE(stock.stock_actual, 0) < COALESCE(stock.stock_min_bodega, 0)',
+      );
+    } else if (query.stock_estado === 'SOBRE_MAXIMO') {
+      baseQuery.andWhere(
+        'COALESCE(stock.stock_actual, 0) > COALESCE(stock.stock_max_bodega, 0)',
+      );
     }
 
     if (search) {

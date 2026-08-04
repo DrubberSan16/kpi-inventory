@@ -326,6 +326,10 @@ export class KardexService extends CrudService<Kardex> {
       desde?: string | null;
       hasta?: string | null;
       search?: string | null;
+      bodega_id?: string | null;
+      producto_id?: string | null;
+      linea_id?: string | null;
+      categoria_id?: string | null;
       page?: number | null;
       limit?: number | null;
     },
@@ -333,6 +337,10 @@ export class KardexService extends CrudService<Kardex> {
   ) {
     const range = this.resolveSummaryRange(params?.desde, params?.hasta);
     const search = this.toText(params?.search);
+    const warehouseId = this.toText(params?.bodega_id);
+    const productId = this.toText(params?.producto_id);
+    const lineId = this.toText(params?.linea_id);
+    const categoryId = this.toText(params?.categoria_id);
     const safePage =
       Number.isFinite(Number(params?.page)) && Number(params?.page) > 0
         ? Number(params?.page)
@@ -377,6 +385,19 @@ export class KardexService extends CrudService<Kardex> {
 
     if (sucursalId) {
       baseQb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    if (warehouseId) {
+      baseQb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
+    }
+    if (productId) {
+      baseQb.andWhere('kardex.producto_id = :productId', { productId });
+    }
+    if (lineId) {
+      baseQb.andWhere('producto.linea_id = :lineId', { lineId });
+    }
+    if (categoryId) {
+      baseQb.andWhere('producto.categoria_id = :categoryId', { categoryId });
     }
 
     if (search) {
@@ -478,6 +499,7 @@ export class KardexService extends CrudService<Kardex> {
       productIds,
       range.from,
       sucursalId,
+      warehouseId,
     );
 
     const groups = rows
@@ -540,6 +562,7 @@ export class KardexService extends CrudService<Kardex> {
       desde?: string | null;
       hasta?: string | null;
       search?: string | null;
+      bodega_id?: string | null;
     },
     sucursalId?: string | null,
   ) {
@@ -550,6 +573,7 @@ export class KardexService extends CrudService<Kardex> {
 
     const range = this.resolveSummaryRange(params?.desde, params?.hasta);
     const search = this.toText(params?.search);
+    const warehouseId = this.toText(params?.bodega_id);
 
     const qb = this.repository
       .createQueryBuilder('kardex')
@@ -604,6 +628,10 @@ export class KardexService extends CrudService<Kardex> {
 
     if (sucursalId) {
       qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    if (warehouseId) {
+      qb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
     }
 
     if (search) {
@@ -682,6 +710,7 @@ export class KardexService extends CrudService<Kardex> {
       [normalizedProductId],
       range.from,
       sucursalId,
+      warehouseId,
     );
     let totalEntradas = 0;
     let totalSalidas = 0;
@@ -1190,6 +1219,7 @@ export class KardexService extends CrudService<Kardex> {
     productIds: string[],
     fromDate: Date,
     sucursalId?: string | null,
+    warehouseId?: string | null,
   ) {
     const out = new Map<string, number>();
     if (!productIds.length) return out;
@@ -1208,6 +1238,10 @@ export class KardexService extends CrudService<Kardex> {
 
     if (sucursalId) {
       qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+
+    if (warehouseId) {
+      qb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
     }
 
     const rows = await qb

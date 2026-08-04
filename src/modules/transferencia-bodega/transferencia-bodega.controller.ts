@@ -24,6 +24,11 @@ export class TransferenciaBodegaController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 10 })
   @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'bodega_origen_id', required: false, type: String })
+  @ApiQuery({ name: 'bodega_destino_id', required: false, type: String })
+  @ApiQuery({ name: 'estado', required: false, type: String })
+  @ApiQuery({ name: 'desde', required: false, type: String })
+  @ApiQuery({ name: 'hasta', required: false, type: String })
   findAll(@Query() query: TransferenciaBodegaQueryDto, @Req() req?: any) {
     return this.service.findAll(query, getSucursalScopeId(req));
   }

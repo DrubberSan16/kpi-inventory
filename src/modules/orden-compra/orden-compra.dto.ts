@@ -144,4 +144,19 @@ export class OrdenCompraQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID()
   proveedor_id?: string;
+
+  @ApiPropertyOptional({ description: 'bodega destino id', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  bodega_destino_id?: string;
+
+  @ApiPropertyOptional({ description: 'fecha de emision desde' })
+  @IsOptional()
+  @IsDateString()
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'fecha de emision hasta' })
+  @IsOptional()
+  @IsDateString()
+  hasta?: string;
 }

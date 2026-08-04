@@ -77,4 +77,29 @@ export class CreateTransferenciaBodegaDto {
   detalles?: TransferenciaBodegaDetalleDto[];
 }
 
-export class TransferenciaBodegaQueryDto extends PaginationQueryDto {}
+export class TransferenciaBodegaQueryDto extends PaginationQueryDto {
+  @ApiPropertyOptional({ description: 'bodega origen id', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  bodega_origen_id?: string;
+
+  @ApiPropertyOptional({ description: 'bodega destino id', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  bodega_destino_id?: string;
+
+  @ApiPropertyOptional({ description: 'estado de la transferencia' })
+  @IsOptional()
+  @IsString()
+  estado?: string;
+
+  @ApiPropertyOptional({ description: 'fecha de transferencia desde' })
+  @IsOptional()
+  @IsDateString()
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'fecha de transferencia hasta' })
+  @IsOptional()
+  @IsDateString()
+  hasta?: string;
+}

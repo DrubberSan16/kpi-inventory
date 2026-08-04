@@ -63,11 +63,19 @@ export class KardexController extends CrudController<Kardex> {
   @ApiQuery({ name: 'desde', required: false, type: String, example: '2026-04-01' })
   @ApiQuery({ name: 'hasta', required: false, type: String, example: '2026-04-15' })
   @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'bodega_id', required: false, type: String })
+  @ApiQuery({ name: 'producto_id', required: false, type: String })
+  @ApiQuery({ name: 'linea_id', required: false, type: String })
+  @ApiQuery({ name: 'categoria_id', required: false, type: String })
   async getMaterialSummary(
     @Query() query: PaginationQueryDto,
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
     @Query('search') search?: string,
+    @Query('bodega_id') bodegaId?: string,
+    @Query('producto_id') productoId?: string,
+    @Query('linea_id') lineaId?: string,
+    @Query('categoria_id') categoriaId?: string,
     @Req() req?: any,
   ) {
     return {
@@ -77,6 +85,10 @@ export class KardexController extends CrudController<Kardex> {
           desde,
           hasta,
           search,
+          bodega_id: bodegaId,
+          producto_id: productoId,
+          linea_id: lineaId,
+          categoria_id: categoriaId,
           page: query.page,
           limit: query.limit,
         },
@@ -97,18 +109,20 @@ export class KardexController extends CrudController<Kardex> {
   @ApiQuery({ name: 'desde', required: false, type: String, example: '2026-04-01' })
   @ApiQuery({ name: 'hasta', required: false, type: String, example: '2026-04-15' })
   @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'bodega_id', required: false, type: String })
   async getMaterialMovements(
     @Param('productoId') productoId: string,
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
     @Query('search') search?: string,
+    @Query('bodega_id') bodegaId?: string,
     @Req() req?: any,
   ) {
     return {
       message: 'Detalle de kardex por material obtenido correctamente.',
       data: await this.service.getMaterialMovements(
         productoId,
-        { desde, hasta, search },
+        { desde, hasta, search, bodega_id: bodegaId },
         getSucursalScopeId(req),
       ),
     };
