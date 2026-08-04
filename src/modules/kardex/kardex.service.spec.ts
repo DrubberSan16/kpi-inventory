@@ -1,5 +1,11 @@
 import { ConfigService } from '@nestjs/config';
-import { DataSource, EntityManager, ObjectLiteral, Repository } from 'typeorm';
+import {
+  Brackets,
+  DataSource,
+  EntityManager,
+  ObjectLiteral,
+  Repository,
+} from 'typeorm';
 import { Bodega } from '../entities/bodega.entity';
 import { Categoria } from '../entities/categoria.entity';
 import { Kardex } from '../entities/kardex.entity';
@@ -76,6 +82,10 @@ type ImportLocationResolver = {
   ): Promise<UnidadMedida>;
 };
 
+type MaterialSearchFilterResolver = {
+  applyMaterialSearchFilter(qb: any, search?: string | null): void;
+};
+
 const emptyRepository = <T extends ObjectLiteral>() =>
   ({}) as unknown as Repository<T>;
 
@@ -97,6 +107,37 @@ const buildService = () =>
 
 const asImportLocationResolver = (service: KardexService) =>
   service as unknown as ImportLocationResolver;
+
+const asMaterialSearchFilterResolver = (service: KardexService) =>
+  service as unknown as MaterialSearchFilterResolver;
+
+describe('KardexService material search filters', () => {
+  it('aplica los mismos criterios de material y documento al resumen y al detalle', () => {
+    const andWhere = jest.fn();
+    asMaterialSearchFilterResolver(buildService()).applyMaterialSearchFilter(
+      { andWhere },
+      '  EMPAQUE TAPA VALVULA  ',
+    );
+
+    expect(andWhere).toHaveBeenCalledTimes(1);
+    const brackets = andWhere.mock.calls[0][0] as Brackets;
+    const where = jest.fn().mockReturnThis();
+    const orWhere = jest.fn().mockReturnThis();
+    brackets.whereFactory({ where, orWhere } as any);
+
+    const params = { search: '%EMPAQUE TAPA VALVULA%' };
+    expect(where).toHaveBeenCalledWith('producto.nombre ILIKE :search', params);
+    expect(orWhere).toHaveBeenCalledWith('producto.codigo ILIKE :search', params);
+    expect(orWhere).toHaveBeenCalledWith(
+      "COALESCE(movimiento.numero_documento, '') ILIKE :search",
+      params,
+    );
+    expect(orWhere).toHaveBeenCalledWith(
+      "COALESCE(kardex.observacion, '') ILIKE :search",
+      params,
+    );
+  });
+});
 
 describe('KardexService inventory import locations', () => {
   it('reutiliza una sucursal existente sin editarla ni guardarla', async () => {

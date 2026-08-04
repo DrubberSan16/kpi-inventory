@@ -11,7 +11,13 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
+import {
+  Brackets,
+  DataSource,
+  EntityManager,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
 import * as XLSX from 'xlsx';
 import { Kardex } from '../entities/kardex.entity';
 import { StockBodega } from '../entities/stock-bodega.entity';
@@ -377,6 +383,21 @@ export class KardexService extends CrudService<Kardex> {
         'unidad',
         'unidad.id = producto.unidad_medida_id AND unidad.is_deleted = false',
       )
+      .leftJoin(
+        MovimientoInventario,
+        'movimiento',
+        'movimiento.id = kardex.movimiento_id AND movimiento.is_deleted = false',
+      )
+      .leftJoin(
+        TransferenciaBodegaDet,
+        'transfer_det',
+        '(transfer_det.kardex_ingreso_id = kardex.id OR transfer_det.kardex_salida_id = kardex.id) AND transfer_det.is_deleted = false',
+      )
+      .leftJoin(
+        TransferenciaBodega,
+        'transferencia',
+        'transferencia.id = transfer_det.transferencia_bodega_id AND transferencia.is_deleted = false',
+      )
       .where('kardex.is_deleted = false')
       .andWhere('kardex.fecha BETWEEN :fromDate AND :toDate', {
         fromDate: range.from,
@@ -400,21 +421,7 @@ export class KardexService extends CrudService<Kardex> {
       baseQb.andWhere('producto.categoria_id = :categoryId', { categoryId });
     }
 
-    if (search) {
-      baseQb.andWhere(
-        new Brackets((searchQb) => {
-          searchQb
-            .where('producto.nombre ILIKE :search', { search: `%${search}%` })
-            .orWhere('producto.codigo ILIKE :search', { search: `%${search}%` })
-            .orWhere("COALESCE(bodega.nombre, '') ILIKE :search", {
-              search: `%${search}%`,
-            })
-            .orWhere("COALESCE(bodega.codigo, '') ILIKE :search", {
-              search: `%${search}%`,
-            });
-        }),
-      );
-    }
+    this.applyMaterialSearchFilter(baseQb, search);
 
     const totalsRow = await baseQb
       .clone()
@@ -634,31 +641,7 @@ export class KardexService extends CrudService<Kardex> {
       qb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
     }
 
-    if (search) {
-      qb.andWhere(
-        new Brackets((searchQb) => {
-          searchQb
-            .where("COALESCE(movimiento.numero_documento, '') ILIKE :search", {
-              search: `%${search}%`,
-            })
-            .orWhere("COALESCE(movimiento.referencia, '') ILIKE :search", {
-              search: `%${search}%`,
-            })
-            .orWhere("COALESCE(transferencia.codigo, '') ILIKE :search", {
-              search: `%${search}%`,
-            })
-            .orWhere("COALESCE(bodega.nombre, '') ILIKE :search", {
-              search: `%${search}%`,
-            })
-            .orWhere("COALESCE(bodega.codigo, '') ILIKE :search", {
-              search: `%${search}%`,
-            })
-            .orWhere("COALESCE(kardex.observacion, '') ILIKE :search", {
-              search: `%${search}%`,
-            });
-        }),
-      );
-    }
+    this.applyMaterialSearchFilter(qb, search);
 
     const rows = await qb
       .select([
@@ -669,7 +652,11 @@ export class KardexService extends CrudService<Kardex> {
         'kardex.entrada_cantidad AS entrada_cantidad',
         'kardex.salida_cantidad AS salida_cantidad',
         'kardex.saldo_cantidad AS saldo_cantidad',
+        'kardex.tipo_movimiento AS tipo_movimiento',
         'kardex.observacion AS kardex_observacion',
+        'kardex.created_by AS kardex_created_by',
+        'kardex.updated_by AS kardex_updated_by',
+        'kardex.updated_at AS kardex_updated_at',
         'producto.codigo AS producto_codigo',
         'producto.nombre AS producto_nombre',
         'linea.codigo AS linea_codigo',
@@ -683,6 +670,9 @@ export class KardexService extends CrudService<Kardex> {
         'movimiento.tipo_documento AS movimiento_tipo_documento',
         'movimiento.work_order_id AS movimiento_work_order_id',
         'movimiento.observacion AS movimiento_observacion',
+        'movimiento.created_by AS movimiento_created_by',
+        'movimiento.updated_by AS movimiento_updated_by',
+        'movimiento.updated_at AS movimiento_updated_at',
         'transferencia.codigo AS transferencia_codigo',
       ])
       .orderBy('kardex.fecha', 'ASC')
@@ -722,6 +712,24 @@ export class KardexService extends CrudService<Kardex> {
       totalEntradas += entrada;
       totalSalidas += salida;
 
+      const movementUpdatedAt = new Date(
+        this.toText(row.movimiento_updated_at),
+      ).getTime();
+      const kardexUpdatedAt = new Date(
+        this.toText(row.kardex_updated_at),
+      ).getTime();
+      const movementHasLatestUpdate =
+        Number.isFinite(movementUpdatedAt) &&
+        (!Number.isFinite(kardexUpdatedAt) || movementUpdatedAt >= kardexUpdatedAt);
+      const latestUpdateValue = movementHasLatestUpdate
+        ? row.movimiento_updated_at
+        : row.kardex_updated_at || row.created_at;
+      const latestUpdateUser = movementHasLatestUpdate
+        ? this.toText(row.movimiento_updated_by) ||
+          this.toText(row.movimiento_created_by)
+        : this.toText(row.kardex_updated_by) ||
+          this.toText(row.kardex_created_by);
+
       const bodegaLabel = [
         this.toText(row.bodega_codigo),
         this.toText(row.bodega_nombre),
@@ -733,6 +741,7 @@ export class KardexService extends CrudService<Kardex> {
         id: this.toText(row.kardex_id),
         fecha_emision: this.formatDateTimeForClient(row.fecha),
         fecha_creacion: this.formatDateTimeForClient(row.created_at),
+        fecha_actualizacion: this.formatDateTimeForClient(latestUpdateValue),
         documento: this.resolveDocumentCode(row),
         referencia:
           this.toText(row.movimiento_referencia) ||
@@ -744,6 +753,18 @@ export class KardexService extends CrudService<Kardex> {
           bodegaLabel ||
           'Movimiento de inventario',
         bodega: bodegaLabel || 'Sin bodega',
+        tipo_movimiento:
+          this.normalizeMovementType(row.tipo_movimiento) ||
+          (entrada > 0 ? 'INGRESO' : 'SALIDA'),
+        usuario_responsable:
+          this.toText(row.movimiento_created_by) ||
+          this.toText(row.kardex_created_by) ||
+          'SYSTEM',
+        usuario_actualizacion:
+          latestUpdateUser ||
+          this.toText(row.movimiento_created_by) ||
+          this.toText(row.kardex_created_by) ||
+          'SYSTEM',
         entrada,
         salida,
         stock: this.toNumber(row.saldo_cantidad, 0),
@@ -1112,6 +1133,43 @@ export class KardexService extends CrudService<Kardex> {
       const [hydrated] = await this.hydrateMovementDocuments([movimiento]);
       return hydrated ?? null;
     });
+  }
+
+  private applyMaterialSearchFilter(
+    qb: SelectQueryBuilder<Kardex>,
+    search?: string | null,
+  ) {
+    const normalizedSearch = this.toText(search);
+    if (!normalizedSearch) return;
+    qb.andWhere(
+      new Brackets((searchQb) => {
+        searchQb
+          .where('producto.nombre ILIKE :search', {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere('producto.codigo ILIKE :search', {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere("COALESCE(bodega.nombre, '') ILIKE :search", {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere("COALESCE(bodega.codigo, '') ILIKE :search", {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere("COALESCE(movimiento.numero_documento, '') ILIKE :search", {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere("COALESCE(movimiento.referencia, '') ILIKE :search", {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere("COALESCE(transferencia.codigo, '') ILIKE :search", {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere("COALESCE(kardex.observacion, '') ILIKE :search", {
+            search: `%${normalizedSearch}%`,
+          });
+      }),
+    );
   }
 
   private resolveSummaryRange(desde?: string | null, hasta?: string | null) {
