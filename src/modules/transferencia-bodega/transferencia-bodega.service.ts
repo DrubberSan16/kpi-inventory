@@ -842,10 +842,22 @@ export class TransferenciaBodegaService {
           })
         : Promise.resolve([] as GuiaRemisionElectronica[]),
     ]);
+    const detailProductIds = includeDetails
+      ? [...new Set(details.map((item) => item.producto_id).filter(Boolean))]
+      : [];
+    const detailProducts = detailProductIds.length
+      ? await this.productoRepo.find({
+          where: detailProductIds.map((id) => ({ id })),
+          select: { id: true, descripcion: true },
+        })
+      : [];
     const detailMap = details.reduce((acc, item) => {
       (acc[item.transferencia_bodega_id] ??= []).push(item);
       return acc;
     }, {} as Record<string, TransferenciaBodegaDet[]>);
+    const productDescriptionMap = new Map(
+      detailProducts.map((item) => [item.id, item.descripcion ?? null]),
+    );
     const orderMap = new Map(orders.map((item) => [item.id, item]));
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const movementMap = new Map(movements.map((item) => [item.id, item]));
@@ -880,7 +892,13 @@ export class TransferenciaBodegaService {
         guia_remision_clave_acceso: guide?.clave_acceso ?? null,
         guia_remision_numero: guide?.numero_guia ?? null,
         guia_remision_numero_autorizacion: guide?.numero_autorizacion ?? null,
-        detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
+        detalles: includeDetails
+          ? (detailMap[item.id] ?? []).map((detail) => ({
+              ...detail,
+              descripcion_producto:
+                productDescriptionMap.get(detail.producto_id) ?? null,
+            }))
+          : undefined,
       };
     });
   }
@@ -933,11 +951,23 @@ export class TransferenciaBodegaService {
           })
         : Promise.resolve([] as GuiaRemisionElectronica[]),
     ]);
+    const detailProductIds = includeDetails
+      ? [...new Set(details.map((item) => item.producto_id).filter(Boolean))]
+      : [];
+    const detailProducts = detailProductIds.length
+      ? await manager.find(Producto, {
+          where: detailProductIds.map((id) => ({ id })),
+          select: { id: true, descripcion: true },
+        })
+      : [];
 
     const detailMap = details.reduce((acc, item) => {
       (acc[item.transferencia_bodega_id] ??= []).push(item);
       return acc;
     }, {} as Record<string, TransferenciaBodegaDet[]>);
+    const productDescriptionMap = new Map(
+      detailProducts.map((item) => [item.id, item.descripcion ?? null]),
+    );
     const orderMap = new Map(orders.map((item) => [item.id, item]));
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const movementMap = new Map(movements.map((item) => [item.id, item]));
@@ -972,7 +1002,13 @@ export class TransferenciaBodegaService {
         guia_remision_clave_acceso: guide?.clave_acceso ?? null,
         guia_remision_numero: guide?.numero_guia ?? null,
         guia_remision_numero_autorizacion: guide?.numero_autorizacion ?? null,
-        detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
+        detalles: includeDetails
+          ? (detailMap[item.id] ?? []).map((detail) => ({
+              ...detail,
+              descripcion_producto:
+                productDescriptionMap.get(detail.producto_id) ?? null,
+            }))
+          : undefined,
       };
     });
   }
