@@ -19,6 +19,34 @@ import {
 } from './orden-compra.dto';
 import { OrdenCompraService } from './orden-compra.service';
 
+function getRequestActor(req?: any) {
+  return {
+    username:
+      String(
+        req?.headers?.['x-user-name'] ||
+          req?.user?.nameUser ||
+          req?.user?.username ||
+          '',
+      ).trim() ||
+      null,
+    displayName:
+      String(
+          req?.headers?.['x-user-display-name'] ||
+          req?.user?.nameSurname ||
+          req?.user?.nameUser ||
+          req?.user?.username ||
+          '',
+      ).trim() || null,
+    roleName:
+      String(
+        req?.headers?.['x-role-name'] ||
+          req?.user?.role?.nombre ||
+          req?.user?.roleName ||
+          '',
+      ).trim() || null,
+  };
+}
+
 @ApiTags('ordenes-compra')
 @Controller('ordenes-compra')
 export class OrdenCompraController {
@@ -54,6 +82,12 @@ export class OrdenCompraController {
     return this.service.update(id, payload);
   }
 
+  @Patch(':id/anular')
+  @ApiOperation({ summary: 'Anular orden de compra conservando su auditoria' })
+  annul(@Param('id') id: string, @Req() req?: any) {
+    return this.service.annul(id, getRequestActor(req));
+  }
+
   @Delete('purge-all')
   @ApiOperation({ summary: 'Eliminar fisicamente todas las ordenes de compra' })
   purgeAll(@Headers('x-role-name') roleName?: string) {
@@ -61,8 +95,8 @@ export class OrdenCompraController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Eliminar orden de compra' })
-  remove(@Param('id') id: string) {
-    return this.service.remove(id);
+  @ApiOperation({ summary: 'Anular orden de compra' })
+  remove(@Param('id') id: string, @Req() req?: any) {
+    return this.service.annul(id, getRequestActor(req));
   }
 }

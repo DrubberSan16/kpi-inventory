@@ -25,6 +25,7 @@ import {
   OrdenServicioQueryDto,
   UpdateOrdenServicioDto,
 } from './orden-servicio.dto';
+import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
 
 type Totals = {
   subtotal: number;
@@ -39,6 +40,7 @@ type RequestActorContext = {
   username?: string | null;
   displayName?: string | null;
   email?: string | null;
+  roleName?: string | null;
 };
 
 @Injectable()
@@ -61,6 +63,13 @@ export class OrdenServicioService implements OnModuleInit {
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  private assertCanAnnul(actor?: RequestActorContext | null) {
+    if (isAdministrativeManagementRoleName(actor?.roleName)) return;
+    throw new ForbiddenException(
+      'Solo Administrador, Super Administrador o Gerente General pueden anular documentos.',
+    );
+  }
 
   private get securityServiceUrl() {
     return String(
@@ -241,6 +250,9 @@ export class OrdenServicioService implements OnModuleInit {
         if (!current) {
           throw new NotFoundException('La orden de servicio no existe.');
         }
+        if (String(current.estado || '').trim().toUpperCase() === 'ANULADA') {
+          throw new BadRequestException('La orden de servicio esta anulada y no se puede modificar.');
+        }
 
         const details = await manager.find(OrdenServicioDet, {
           where: { orden_servicio_id: id, is_deleted: false },
@@ -302,6 +314,9 @@ export class OrdenServicioService implements OnModuleInit {
       });
       if (!current) {
         throw new NotFoundException('La orden de servicio no existe.');
+      }
+      if (String(current.estado || '').trim().toUpperCase() === 'ANULADA') {
+        throw new BadRequestException('La orden de servicio esta anulada.');
       }
 
       if (current.servicio_realizado) {
@@ -382,7 +397,16 @@ export class OrdenServicioService implements OnModuleInit {
     });
   }
 
-  async remove(id: string, deletedBy?: string) {
+  async annul(id: string, actor?: RequestActorContext | null) {
+    this.assertCanAnnul(actor);
+    const annulledBy =
+      this.resolveActorLabel(actor) ?? this.resolveUserName({}, actor);
+    const traceId = randomUUID();
+    this.queueTransactionLog({
+      traceId,
+      createdBy: annulledBy,
+      description: `Inicio de anulacion de orden de servicio ${id}.`,
+    });
     return this.dataSource.transaction(async (manager) => {
       const current = await manager.findOne(OrdenServicio, {
         where: { id, is_deleted: false },
@@ -390,41 +414,33 @@ export class OrdenServicioService implements OnModuleInit {
       if (!current) {
         throw new NotFoundException('La orden de servicio no existe.');
       }
-
-      current.is_deleted = true;
-      current.deleted_at = new Date();
-      current.deleted_by = deletedBy ?? null;
+      if (String(current.estado || '').trim().toUpperCase() === 'ANULADA') {
+        const [hydrated] = await this.hydrateOrdersWithManager(
+          manager,
+          [current],
+          true,
+        );
+        return hydrated;
+      }
       current.estado = 'ANULADA';
+      current.updated_by = annulledBy;
       await manager.save(OrdenServicio, current);
-
-      const details = await manager.find(OrdenServicioDet, {
-        where: { orden_servicio_id: id, is_deleted: false },
+      const [hydrated] = await this.hydrateOrdersWithManager(
+        manager,
+        [current],
+        true,
+      );
+      this.queueTransactionLog({
+        traceId,
+        createdBy: annulledBy,
+        description: `Orden de servicio ${current.codigo} anulada correctamente.`,
       });
-      if (details.length) {
-        details.forEach((item) => {
-          item.is_deleted = true;
-          item.deleted_at = new Date();
-          item.deleted_by = deletedBy ?? null;
-        });
-        await manager.save(OrdenServicioDet, details);
-      }
-
-      const linkedEquipments = await manager.find(OrdenServicioEquipo, {
-        where: { orden_servicio_id: id, is_deleted: false },
-      });
-      if (linkedEquipments.length) {
-        linkedEquipments.forEach((item) => {
-          item.is_deleted = true;
-          item.deleted_at = new Date();
-          item.deleted_by = deletedBy ?? null;
-        });
-        await manager.save(OrdenServicioEquipo, linkedEquipments);
-      }
-
-      return {
-        message: `Orden de servicio ${current.codigo} eliminada correctamente`,
-      };
+      return hydrated;
     });
+  }
+
+  async remove(id: string, actor?: RequestActorContext | null) {
+    return this.annul(id, actor);
   }
 
   private isSuperAdministratorRoleName(roleName?: string): boolean {

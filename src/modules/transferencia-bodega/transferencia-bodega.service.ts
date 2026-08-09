@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, Not, Repository } from 'typeorm';
 import {
   Bodega,
   GuiaRemisionElectronica,
@@ -27,6 +27,7 @@ import {
   TransferenciaBodegaDetalleDto,
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
+import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
 
 type PreparedTransferDetail = {
   orderDetail: OrdenCompraDet | null;
@@ -36,6 +37,12 @@ type PreparedTransferDetail = {
   codigoProducto: string | null;
   nombreProducto: string;
   orderUnitCost: number;
+};
+
+type DocumentAnnulmentActor = {
+  username?: string | null;
+  displayName?: string | null;
+  roleName?: string | null;
 };
 
 @Injectable()
@@ -68,6 +75,17 @@ export class TransferenciaBodegaService {
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  private assertCanAnnul(actor?: DocumentAnnulmentActor | null) {
+    if (isAdministrativeManagementRoleName(actor?.roleName)) return;
+    throw new ForbiddenException(
+      'Solo Administrador, Super Administrador o Gerente General pueden anular documentos.',
+    );
+  }
+
+  private resolveAnnulmentActorName(actor?: DocumentAnnulmentActor | null) {
+    return this.toText(actor?.displayName) || this.toText(actor?.username) || 'SYSTEM';
+  }
 
   private get securityServiceUrl() {
     return String(
@@ -264,7 +282,11 @@ export class TransferenciaBodegaService {
       }
       if (order) {
         const existingTransfer = await manager.findOne(TransferenciaBodega, {
-          where: { orden_compra_id: order.id, is_deleted: false },
+          where: {
+            orden_compra_id: order.id,
+            is_deleted: false,
+            estado: Not('ANULADA'),
+          },
         });
         if (existingTransfer) {
           throw new BadRequestException(
@@ -744,6 +766,299 @@ export class TransferenciaBodegaService {
     }
   }
 
+  async annul(id: string, actor?: DocumentAnnulmentActor | null) {
+    this.assertCanAnnul(actor);
+    const annulledBy = this.resolveAnnulmentActorName(actor);
+    const traceId = randomUUID();
+    this.queueTransactionLog({
+      traceId,
+      createdBy: annulledBy,
+      description: `Inicio de anulacion de transferencia ${id}.`,
+    });
+
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
+        const transfer = await manager.findOne(TransferenciaBodega, {
+          where: { id, is_deleted: false },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!transfer) {
+          throw new NotFoundException('La transferencia no existe.');
+        }
+        if (String(transfer.estado || '').trim().toUpperCase() === 'ANULADA') {
+          const [hydrated] = await this.hydrateTransfersWithManager(
+            manager,
+            [transfer],
+            true,
+          );
+          return hydrated;
+        }
+
+        const guide = await manager.findOne(GuiaRemisionElectronica, {
+          where: { transferencia_bodega_id: transfer.id, is_deleted: false },
+          order: { created_at: 'DESC' },
+        });
+        const guideEmissionState = String(guide?.estado_emision || '')
+          .trim()
+          .toUpperCase();
+        const guideSriState = String(guide?.sri_estado || '')
+          .trim()
+          .toUpperCase();
+        if (
+          ['AUTORIZADA', 'AUTORIZADO'].includes(guideEmissionState) ||
+          ['AUTORIZADA', 'AUTORIZADO'].includes(guideSriState)
+        ) {
+          throw new BadRequestException(
+            'La transferencia tiene una guia autorizada por el SRI y no se puede anular.',
+          );
+        }
+
+        const details = await manager.find(TransferenciaBodegaDet, {
+          where: { transferencia_bodega_id: transfer.id, is_deleted: false },
+          order: { created_at: 'ASC' },
+        });
+        if (!details.length) {
+          throw new BadRequestException(
+            'La transferencia no tiene detalles para revertir.',
+          );
+        }
+
+        const reversalDate = new Date();
+        const reversalObservation = `Anulacion administrativa de transferencia ${transfer.codigo}`;
+        const destinationOut = await manager.save(
+          MovimientoInventario,
+          manager.create(MovimientoInventario, {
+            tipo_movimiento: 'SALIDA',
+            fecha_movimiento: reversalDate,
+            tipo_documento: 'ANULACION_TRANSFERENCIA',
+            numero_documento: await this.generateMovementDocumentCode(
+              manager,
+              'EB',
+            ),
+            referencia: transfer.codigo,
+            observacion: reversalObservation,
+            bodega_origen_id: transfer.bodega_destino_id,
+            tipo_cambio: '1',
+            total_costos: '0.0000',
+            estado: 'CONFIRMADO',
+            created_by: annulledBy,
+            updated_by: annulledBy,
+          }),
+        );
+        const sourceIn = transfer.orden_compra_id
+          ? null
+          : await manager.save(
+              MovimientoInventario,
+              manager.create(MovimientoInventario, {
+                tipo_movimiento: 'INGRESO',
+                fecha_movimiento: reversalDate,
+                tipo_documento: 'ANULACION_TRANSFERENCIA',
+                numero_documento: await this.generateMovementDocumentCode(
+                  manager,
+                  'IB',
+                ),
+                referencia: transfer.codigo,
+                observacion: reversalObservation,
+                bodega_destino_id: transfer.bodega_origen_id,
+                tipo_cambio: '1',
+                total_costos: '0.0000',
+                estado: 'CONFIRMADO',
+                created_by: annulledBy,
+                updated_by: annulledBy,
+              }),
+            );
+
+        const changedStockIds = new Set<string>();
+        let totalCost = 0;
+        for (const detail of details) {
+          const quantity = this.toNumber(detail.cantidad, 0);
+          const unitCost = this.toNumber(detail.costo_unitario, 0);
+          const subtotal = quantity * unitCost;
+          totalCost += subtotal;
+
+          const destinationStock = await this.getOrCreateStockRow(manager, {
+            bodegaId: transfer.bodega_destino_id,
+            productoId: detail.producto_id,
+            costoPromedio: unitCost,
+            userName: annulledBy,
+          });
+          const destinationAfter = this.applyNewStockDelta(
+            destinationStock,
+            -quantity,
+          );
+          destinationStock.stock_fisico = this.toFixedText(
+            destinationAfter,
+            6,
+          );
+          destinationStock.updated_by = annulledBy;
+          await manager.save(StockBodega, destinationStock);
+          changedStockIds.add(destinationStock.id);
+
+          const destinationOutDetail = await manager.save(
+            MovimientoInventarioDet,
+            manager.create(MovimientoInventarioDet, {
+              movimiento_id: destinationOut.id,
+              producto_id: detail.producto_id,
+              cantidad: this.toFixedText(quantity, 6),
+              costo_unitario: this.toFixedText(unitCost, 4),
+              subtotal_costo: this.toFixedText(subtotal, 4),
+              observacion: reversalObservation,
+              created_by: annulledBy,
+              updated_by: annulledBy,
+            }),
+          );
+          await manager.save(
+            Kardex,
+            manager.create(Kardex, {
+              fecha: reversalDate,
+              bodega_id: transfer.bodega_destino_id,
+              producto_id: detail.producto_id,
+              movimiento_id: destinationOut.id,
+              movimiento_det_id: destinationOutDetail.id,
+              tipo_movimiento: 'SALIDA',
+              entrada_cantidad: '0.000000',
+              salida_cantidad: this.toFixedText(quantity, 6),
+              costo_unitario: this.toFixedText(unitCost, 4),
+              costo_total: this.toFixedText(subtotal, 4),
+              saldo_cantidad: this.toFixedText(destinationAfter, 6),
+              condicion_material: 'NUEVO',
+              saldo_costo_promedio: this.toFixedText(unitCost, 4),
+              saldo_valorizado: this.toFixedText(
+                destinationAfter * unitCost,
+                4,
+              ),
+              observacion: reversalObservation,
+              created_by: annulledBy,
+              updated_by: annulledBy,
+            }),
+          );
+
+          if (sourceIn) {
+            const sourceStock = await this.getOrCreateStockRow(manager, {
+              bodegaId: transfer.bodega_origen_id,
+              productoId: detail.producto_id,
+              costoPromedio: unitCost,
+              userName: annulledBy,
+            });
+            const sourceAfter = this.applyNewStockDelta(sourceStock, quantity);
+            sourceStock.stock_fisico = this.toFixedText(sourceAfter, 6);
+            sourceStock.updated_by = annulledBy;
+            await manager.save(StockBodega, sourceStock);
+            changedStockIds.add(sourceStock.id);
+
+            const sourceInDetail = await manager.save(
+              MovimientoInventarioDet,
+              manager.create(MovimientoInventarioDet, {
+                movimiento_id: sourceIn.id,
+                producto_id: detail.producto_id,
+                cantidad: this.toFixedText(quantity, 6),
+                costo_unitario: this.toFixedText(unitCost, 4),
+                subtotal_costo: this.toFixedText(subtotal, 4),
+                observacion: reversalObservation,
+                created_by: annulledBy,
+                updated_by: annulledBy,
+              }),
+            );
+            await manager.save(
+              Kardex,
+              manager.create(Kardex, {
+                fecha: reversalDate,
+                bodega_id: transfer.bodega_origen_id,
+                producto_id: detail.producto_id,
+                movimiento_id: sourceIn.id,
+                movimiento_det_id: sourceInDetail.id,
+                tipo_movimiento: 'INGRESO',
+                entrada_cantidad: this.toFixedText(quantity, 6),
+                salida_cantidad: '0.000000',
+                costo_unitario: this.toFixedText(unitCost, 4),
+                costo_total: this.toFixedText(subtotal, 4),
+                saldo_cantidad: this.toFixedText(sourceAfter, 6),
+                condicion_material: 'NUEVO',
+                saldo_costo_promedio: this.toFixedText(unitCost, 4),
+                saldo_valorizado: this.toFixedText(sourceAfter * unitCost, 4),
+                observacion: reversalObservation,
+                created_by: annulledBy,
+                updated_by: annulledBy,
+              }),
+            );
+          }
+
+          if (detail.orden_compra_det_id) {
+            const orderDetail = await manager.findOne(OrdenCompraDet, {
+              where: { id: detail.orden_compra_det_id, is_deleted: false },
+            });
+            if (orderDetail) {
+              orderDetail.cantidad_transferida = this.toFixedText(
+                Math.max(
+                  0,
+                  this.toNumber(orderDetail.cantidad_transferida, 0) - quantity,
+                ),
+                6,
+              );
+              orderDetail.updated_by = annulledBy;
+              await manager.save(OrdenCompraDet, orderDetail);
+            }
+          }
+        }
+
+        destinationOut.total_costos = this.toFixedText(totalCost, 4);
+        destinationOut.updated_by = annulledBy;
+        await manager.save(MovimientoInventario, destinationOut);
+        if (sourceIn) {
+          sourceIn.total_costos = this.toFixedText(totalCost, 4);
+          sourceIn.updated_by = annulledBy;
+          await manager.save(MovimientoInventario, sourceIn);
+        }
+
+        transfer.estado = 'ANULADA';
+        transfer.updated_by = annulledBy;
+        await manager.save(TransferenciaBodega, transfer);
+
+        if (transfer.orden_compra_id) {
+          const order = await manager.findOne(OrdenCompra, {
+            where: { id: transfer.orden_compra_id, is_deleted: false },
+          });
+          if (order) {
+            order.estado = 'EMITIDA';
+            order.updated_by = annulledBy;
+            await manager.save(OrdenCompra, order);
+          }
+        }
+        if (guide) {
+          guide.estado_emision = 'ANULADA';
+          guide.sri_estado = 'ANULADA';
+          guide.updated_by = annulledBy;
+          await manager.save(GuiaRemisionElectronica, guide);
+        }
+
+        await this.notifyMaintenanceRecalculationForStocks(
+          changedStockIds,
+          'transfer-annulment',
+        );
+        const [hydrated] = await this.hydrateTransfersWithManager(
+          manager,
+          [transfer],
+          true,
+        );
+        return hydrated;
+      });
+      this.queueTransactionLog({
+        traceId,
+        createdBy: annulledBy,
+        description: `Transferencia ${id} anulada correctamente con reverso de stock.`,
+      });
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy: annulledBy,
+        status: 'ERROR',
+        description: `Fallo al anular transferencia ${id}: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
+  }
+
   private isSuperAdministratorRoleName(roleName?: string): boolean {
     const normalized = String(roleName || '')
       .normalize('NFD')
@@ -1147,6 +1462,7 @@ export class TransferenciaBodegaService {
         producto_id: args.productoId,
         is_deleted: false,
       },
+      lock: { mode: 'pessimistic_write' },
     });
     if (existing) return existing;
 

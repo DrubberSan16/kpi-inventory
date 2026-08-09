@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, Param, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import {
   ApiBody,
   ApiOperation,
@@ -13,6 +13,34 @@ import {
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
 import { TransferenciaBodegaService } from './transferencia-bodega.service';
+
+function getRequestActor(req?: any) {
+  return {
+    username:
+      String(
+        req?.headers?.['x-user-name'] ||
+          req?.user?.nameUser ||
+          req?.user?.username ||
+          '',
+      ).trim() ||
+      null,
+    displayName:
+      String(
+          req?.headers?.['x-user-display-name'] ||
+          req?.user?.nameSurname ||
+          req?.user?.nameUser ||
+          req?.user?.username ||
+          '',
+      ).trim() || null,
+    roleName:
+      String(
+        req?.headers?.['x-role-name'] ||
+          req?.user?.role?.nombre ||
+          req?.user?.roleName ||
+          '',
+      ).trim() || null,
+  };
+}
 
 @ApiTags('transferencias-bodega')
 @Controller('transferencias-bodega')
@@ -51,6 +79,12 @@ export class TransferenciaBodegaController {
   @ApiResponse({ status: 201, description: 'Transferencia registrada correctamente' })
   create(@Body() payload: CreateTransferenciaBodegaDto) {
     return this.service.create(payload);
+  }
+
+  @Patch(':id/anular')
+  @ApiOperation({ summary: 'Anular transferencia y revertir sus movimientos de stock' })
+  annul(@Param('id') id: string, @Req() req?: any) {
+    return this.service.annul(id, getRequestActor(req));
   }
 
   @Delete('purge-all')

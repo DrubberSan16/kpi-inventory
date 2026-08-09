@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { Brackets, DataSource, EntityManager, In, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import {
   Bodega,
   OrdenCompra,
@@ -23,12 +23,19 @@ import {
   UpdateOrdenCompraDto,
 } from './orden-compra.dto';
 import { TransferenciaBodega } from '../entities/transferencia-bodega.entity';
+import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
 
 type Totals = {
   subtotal: number;
   descuentoTotal: number;
   ivaTotal: number;
   total: number;
+};
+
+type DocumentAnnulmentActor = {
+  username?: string | null;
+  displayName?: string | null;
+  roleName?: string | null;
 };
 
 @Injectable()
@@ -51,6 +58,17 @@ export class OrdenCompraService {
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  private assertCanAnnul(actor?: DocumentAnnulmentActor | null) {
+    if (isAdministrativeManagementRoleName(actor?.roleName)) return;
+    throw new ForbiddenException(
+      'Solo Administrador, Super Administrador o Gerente General pueden anular documentos.',
+    );
+  }
+
+  private resolveAnnulmentActorName(actor?: DocumentAnnulmentActor | null) {
+    return this.toText(actor?.displayName) || this.toText(actor?.username) || 'SYSTEM';
+  }
 
   private get securityServiceUrl() {
     return String(
@@ -192,7 +210,7 @@ export class OrdenCompraService {
       order: { fecha_emision: 'DESC', created_at: 'DESC' },
     });
     const activeTransfers = await this.transferenciaRepo.find({
-      where: { is_deleted: false },
+      where: { is_deleted: false, estado: Not('ANULADA') },
       select: { orden_compra_id: true } as any,
     });
     const transferredIds = new Set(
@@ -266,11 +284,14 @@ export class OrdenCompraService {
         if (!current) {
           throw new NotFoundException('La orden de compra no existe.');
         }
+        if (String(current.estado || '').trim().toUpperCase() === 'ANULADA') {
+          throw new BadRequestException('La orden de compra esta anulada y no se puede modificar.');
+        }
 
         const transfer = await manager.findOne(TransferenciaBodega, {
           where: { orden_compra_id: id, is_deleted: false },
         });
-        if (transfer) {
+        if (transfer && String(transfer.estado || '').trim().toUpperCase() !== 'ANULADA') {
           throw new BadRequestException(
             'La orden ya tiene una transferencia registrada y no se puede modificar.',
           );
@@ -309,12 +330,14 @@ export class OrdenCompraService {
     }
   }
 
-  async remove(id: string, deletedBy?: string) {
+  async annul(id: string, actor?: DocumentAnnulmentActor | null) {
+    this.assertCanAnnul(actor);
+    const annulledBy = this.resolveAnnulmentActorName(actor);
     const traceId = randomUUID();
     this.queueTransactionLog({
       traceId,
       typeLog: 'PURCHASE_ORDER_FLOW',
-      createdBy: deletedBy ?? null,
+      createdBy: annulledBy,
       description: `Inicio de anulacion de orden de compra ${id}.`,
     });
     try {
@@ -325,41 +348,37 @@ export class OrdenCompraService {
         if (!current) {
           throw new NotFoundException('La orden de compra no existe.');
         }
+        if (String(current.estado || '').trim().toUpperCase() === 'ANULADA') {
+          const [hydrated] = await this.hydrateOrdersWithManager(
+            manager,
+            [current],
+            true,
+          );
+          return hydrated;
+        }
         const transfer = await manager.findOne(TransferenciaBodega, {
           where: { orden_compra_id: id, is_deleted: false },
         });
-        if (transfer) {
+        if (transfer && String(transfer.estado || '').trim().toUpperCase() !== 'ANULADA') {
           throw new BadRequestException(
-            'La orden ya tiene una transferencia registrada y no se puede eliminar.',
+            'La orden ya tiene una transferencia activa y no se puede anular.',
           );
         }
 
-        current.is_deleted = true;
-        current.deleted_at = new Date();
-        current.deleted_by = deletedBy ?? null;
         current.estado = 'ANULADA';
+        current.updated_by = annulledBy;
         await manager.save(OrdenCompra, current);
-
-        const details = await manager.find(OrdenCompraDet, {
-          where: { orden_compra_id: id, is_deleted: false },
-        });
-        if (details.length) {
-          details.forEach((item) => {
-            item.is_deleted = true;
-            item.deleted_at = new Date();
-            item.deleted_by = deletedBy ?? null;
-          });
-          await manager.save(OrdenCompraDet, details);
-        }
-
-        return {
-          message: `Orden de compra ${current.codigo} eliminada correctamente`,
-        };
+        const [hydrated] = await this.hydrateOrdersWithManager(
+          manager,
+          [current],
+          true,
+        );
+        return hydrated;
       });
       this.queueTransactionLog({
         traceId,
         typeLog: 'PURCHASE_ORDER_FLOW',
-        createdBy: deletedBy ?? null,
+        createdBy: annulledBy,
         description: `Orden de compra ${id} anulada correctamente.`,
       });
       return result;
@@ -367,12 +386,16 @@ export class OrdenCompraService {
       this.queueTransactionLog({
         traceId,
         typeLog: 'PURCHASE_ORDER_FLOW',
-        createdBy: deletedBy ?? null,
+        createdBy: annulledBy,
         status: 'ERROR',
         description: `Fallo al anular orden de compra ${id}: ${error?.message ?? 'desconocido'}`,
       });
       throw error;
     }
+  }
+
+  async remove(id: string, actor?: DocumentAnnulmentActor | null) {
+    return this.annul(id, actor);
   }
 
   private isSuperAdministratorRoleName(roleName?: string): boolean {
@@ -582,7 +605,11 @@ export class OrdenCompraService {
           .map((bodegaId) => ({ id: bodegaId, is_deleted: false })),
       }),
       this.transferenciaRepo.find({
-        where: ids.map((ordenId) => ({ orden_compra_id: ordenId, is_deleted: false })),
+        where: ids.map((ordenId) => ({
+          orden_compra_id: ordenId,
+          is_deleted: false,
+          estado: Not('ANULADA'),
+        })),
       }),
     ]);
 
@@ -648,7 +675,11 @@ export class OrdenCompraService {
           .map((bodegaId) => ({ id: bodegaId, is_deleted: false })),
       }),
       manager.find(TransferenciaBodega, {
-        where: ids.map((ordenId) => ({ orden_compra_id: ordenId, is_deleted: false })),
+        where: ids.map((ordenId) => ({
+          orden_compra_id: ordenId,
+          is_deleted: false,
+          estado: Not('ANULADA'),
+        })),
       }),
     ]);
 

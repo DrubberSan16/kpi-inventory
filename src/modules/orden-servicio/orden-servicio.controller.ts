@@ -25,6 +25,7 @@ function getRequestActor(req?: any) {
     username: String(req?.headers?.['x-user-name'] || req?.user?.nameUser || req?.user?.username || '').trim() || null,
     displayName: String(req?.headers?.['x-user-display-name'] || req?.user?.nameSurname || req?.user?.nameUser || req?.user?.username || '').trim() || null,
     email: String(req?.headers?.['x-user-email'] || req?.user?.email || '').trim() || null,
+    roleName: String(req?.headers?.['x-role-name'] || req?.user?.role?.nombre || req?.user?.roleName || '').trim() || null,
   };
 }
 
@@ -71,6 +72,12 @@ export class OrdenServicioController {
     return this.service.markServicePerformed(id, payload, getRequestActor(req));
   }
 
+  @Patch(':id/anular')
+  @ApiOperation({ summary: 'Anular orden de servicio conservando su auditoria' })
+  annul(@Param('id') id: string, @Req() req: any) {
+    return this.service.annul(id, getRequestActor(req));
+  }
+
   @Delete('purge-all')
   @ApiOperation({ summary: 'Eliminar fisicamente todas las ordenes de servicio' })
   purgeAll(@Headers('x-role-name') roleName?: string) {
@@ -78,8 +85,8 @@ export class OrdenServicioController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Eliminar orden de servicio' })
-  remove(@Param('id') id: string) {
-    return this.service.remove(id);
+  @ApiOperation({ summary: 'Anular orden de servicio' })
+  remove(@Param('id') id: string, @Req() req: any) {
+    return this.service.annul(id, getRequestActor(req));
   }
 }
