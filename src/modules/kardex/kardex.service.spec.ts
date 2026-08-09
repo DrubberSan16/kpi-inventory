@@ -51,6 +51,7 @@ type ImportLocationResolver = {
       stockActual: number;
       stockNuevo: number;
       stockUsado: number;
+      stockCritico: number;
       stockFisico: number;
       stockMinBodega: number;
       stockMaxBodega: number;
@@ -65,10 +66,17 @@ type ImportLocationResolver = {
     hasStockActual: boolean;
     hasStockNuevo: boolean;
     hasStockUsado: boolean;
+    hasStockCritico: boolean;
     stockActual: number;
     stockNuevo: number;
     stockUsado: number;
-  }): { stockActual: number; stockNuevo: number; stockUsado: number };
+    stockCritico: number;
+  }): {
+    stockActual: number;
+    stockNuevo: number;
+    stockUsado: number;
+    stockCritico: number;
+  };
   resolveUnidadMedidaForProduct(
     manager: EntityManager,
     options: {
@@ -84,6 +92,13 @@ type ImportLocationResolver = {
 
 type MaterialSearchFilterResolver = {
   applyMaterialSearchFilter(qb: any, search?: string | null): void;
+};
+
+type CriticalStockResolver = {
+  applyOutgoingStockWithCriticalFallback(
+    stock: StockBodega,
+    quantity: number,
+  ): { total: number; condition: 'NUEVO' | 'CRITICO' };
 };
 
 const emptyRepository = <T extends ObjectLiteral>() =>
@@ -111,6 +126,9 @@ const asImportLocationResolver = (service: KardexService) =>
 const asMaterialSearchFilterResolver = (service: KardexService) =>
   service as unknown as MaterialSearchFilterResolver;
 
+const asCriticalStockResolver = (service: KardexService) =>
+  service as unknown as CriticalStockResolver;
+
 describe('KardexService material search filters', () => {
   it('aplica los mismos criterios de material y documento al resumen y al detalle', () => {
     const andWhere = jest.fn();
@@ -136,6 +154,29 @@ describe('KardexService material search filters', () => {
       "COALESCE(kardex.observacion, '') ILIKE :search",
       params,
     );
+  });
+});
+
+describe('KardexService critical stock', () => {
+  it('consume stock crítico únicamente cuando nuevo y usado están en cero', () => {
+    const stock = {
+      stock_actual: '5.000000',
+      stock_nuevo: '0.000000',
+      stock_usado: '0.000000',
+      stock_critico: '5.000000',
+    } as StockBodega;
+
+    const result = asCriticalStockResolver(
+      buildService(),
+    ).applyOutgoingStockWithCriticalFallback(stock, 2);
+
+    expect(result).toEqual({ total: 3, condition: 'CRITICO' });
+    expect(stock).toMatchObject({
+      stock_actual: '3.000000',
+      stock_nuevo: '0.000000',
+      stock_usado: '0.000000',
+      stock_critico: '3.000000',
+    });
   });
 });
 
@@ -326,6 +367,7 @@ describe('KardexService inventory import locations', () => {
       stock_actual: '0.000000',
       stock_nuevo: '0.000000',
       stock_usado: '0.000000',
+      stock_critico: '0.000000',
       stock_fisico: '0.000000',
     } as StockBodega;
 
@@ -335,6 +377,7 @@ describe('KardexService inventory import locations', () => {
       stockActual: 2,
       stockNuevo: 0,
       stockUsado: 2,
+      stockCritico: 0,
       stockFisico: 2,
       stockMinBodega: 6,
       stockMaxBodega: 12,
@@ -349,6 +392,7 @@ describe('KardexService inventory import locations', () => {
       stock_actual: '2.000000',
       stock_nuevo: '0.000000',
       stock_usado: '2.000000',
+      stock_critico: '0.000000',
       stock_fisico: '2.000000',
       stock_min_bodega: '6.000000',
       stock_max_bodega: '12.000000',
@@ -359,23 +403,23 @@ describe('KardexService inventory import locations', () => {
     });
   });
 
-  it('reconcilia el desglose inconsistente usando Stock Actual como total', () => {
-    const result = asImportLocationResolver(
-      buildService(),
-    ).reconcileInventoryStockBreakdown({
-      hasStockActual: true,
-      hasStockNuevo: true,
-      hasStockUsado: true,
-      stockActual: 1,
-      stockNuevo: 2,
-      stockUsado: 1,
-    });
-
-    expect(result).toEqual({
-      stockActual: 1,
-      stockNuevo: 0,
-      stockUsado: 1,
-    });
+  it('rechaza un desglose que no coincide con el stock total', () => {
+    expect(() =>
+      asImportLocationResolver(
+        buildService(),
+      ).reconcileInventoryStockBreakdown({
+        hasStockActual: true,
+        hasStockNuevo: true,
+        hasStockUsado: true,
+        hasStockCritico: true,
+        stockActual: 1,
+        stockNuevo: 2,
+        stockUsado: 1,
+        stockCritico: 0,
+      }),
+    ).toThrow(
+      'Stock Actual (1) debe coincidir con Stock Nuevo + Stock Usado + Stock Critico (3).',
+    );
   });
 
   it('omite las filas marcadas como INCONGRUENTE', () => {

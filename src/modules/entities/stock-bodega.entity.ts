@@ -25,6 +25,13 @@ export class StockBodega extends BaseAuditEntity {
   stock_usado: string;
 
   @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
+  @ApiProperty({
+    description:
+      'stock critico utilizable cuando el stock nuevo y usado estan agotados',
+  })
+  stock_critico: string;
+
+  @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
   @ApiProperty({ description: 'stock fisico' })
   stock_fisico: string;
 

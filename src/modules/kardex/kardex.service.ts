@@ -222,11 +222,12 @@ export class KardexService extends CrudService<Kardex> {
           stock_actual: '0.000000',
           stock_nuevo: '0.000000',
           stock_usado: '0.000000',
+          stock_critico: '0.000000',
           stock_fisico: '0.000000',
           costo_promedio_bodega: '0.0000',
         })
         .where(
-          'COALESCE(stock_actual, 0) <> 0 OR COALESCE(stock_nuevo, 0) <> 0 OR COALESCE(stock_usado, 0) <> 0 OR COALESCE(stock_fisico, 0) <> 0 OR COALESCE(costo_promedio_bodega, 0) <> 0',
+          'COALESCE(stock_actual, 0) <> 0 OR COALESCE(stock_nuevo, 0) <> 0 OR COALESCE(stock_usado, 0) <> 0 OR COALESCE(stock_critico, 0) <> 0 OR COALESCE(stock_fisico, 0) <> 0 OR COALESCE(costo_promedio_bodega, 0) <> 0',
         )
         .execute();
 
@@ -1052,10 +1053,13 @@ export class KardexService extends CrudService<Kardex> {
 
         const costoUnitario = this.resolveProductoUnitCost(producto, stockRow);
         const subtotal = cantidad * costoUnitario;
-        const stockNuevo =
+        const stockAdjustment =
           tipo === 'INGRESO'
-            ? this.applyNewStockDelta(stockRow, cantidad)
-            : this.applyNewStockDelta(stockRow, -cantidad);
+            ? {
+                total: this.applyNewStockDelta(stockRow, cantidad),
+                condition: 'NUEVO' as const,
+              }
+            : this.applyOutgoingStockWithCriticalFallback(stockRow, cantidad);
         const stockFisicoAnterior = this.toNumber(
           stockRow.stock_fisico,
           stockAnterior,
@@ -1081,6 +1085,7 @@ export class KardexService extends CrudService<Kardex> {
             cantidad: this.toFixedText(cantidad, 6),
             costo_unitario: this.toFixedText(costoUnitario, 4),
             subtotal_costo: this.toFixedText(subtotal, 4),
+            condicion_material: stockAdjustment.condition,
             observacion: this.toText(detail?.observacion) || null,
             created_by: userName,
             updated_by: userName,
@@ -1107,9 +1112,13 @@ export class KardexService extends CrudService<Kardex> {
             ),
             costo_unitario: this.toFixedText(costoUnitario, 4),
             costo_total: this.toFixedText(subtotal, 4),
-            saldo_cantidad: this.toFixedText(stockNuevo, 6),
+            saldo_cantidad: this.toFixedText(stockAdjustment.total, 6),
+            condicion_material: stockAdjustment.condition,
             saldo_costo_promedio: this.toFixedText(costoUnitario, 4),
-            saldo_valorizado: this.toFixedText(stockNuevo * costoUnitario, 4),
+            saldo_valorizado: this.toFixedText(
+              stockAdjustment.total * costoUnitario,
+              4,
+            ),
             observacion:
               this.toText(detail?.observacion) ||
               this.toText(payload.observacion) ||
@@ -1790,6 +1799,7 @@ export class KardexService extends CrudService<Kardex> {
       'Stock Actual',
       'Stock Nuevo',
       'Stock Usado',
+      'Stock Critico',
       'Stock Fisico',
       'Stock Minimo Bodega',
       'Stock Maximo Bodega',
@@ -1836,6 +1846,7 @@ export class KardexService extends CrudService<Kardex> {
       'Stock Actual': 80,
       'Stock Nuevo': 80,
       'Stock Usado': 0,
+      'Stock Critico': 0,
       'Stock Fisico': 80,
       'Stock Minimo Bodega': 2,
       'Stock Maximo Bodega': 10000,
@@ -1894,8 +1905,8 @@ export class KardexService extends CrudService<Kardex> {
         'Stock objetivo total. Se compara contra el stock vigente y genera ingreso o egreso en Kardex.',
       ],
       [
-        'Stock Nuevo / Stock Usado',
-        'Opcional. Si se informan, definen el desglose del stock por condicion.',
+        'Stock Nuevo / Stock Usado / Stock Critico',
+        'Opcional. Definen el desglose del stock. El total debe ser la suma de los tres; el critico se utiliza cuando nuevo y usado estan en cero.',
       ],
       ['Stock Fisico', 'Opcional. Si se omite, toma el Stock Actual.'],
     ]);
@@ -2019,11 +2030,24 @@ export class KardexService extends CrudService<Kardex> {
     hasStockActual: boolean;
     hasStockNuevo: boolean;
     hasStockUsado: boolean;
+    hasStockCritico: boolean;
     stockActual: number;
     stockNuevo: number;
     stockUsado: number;
+    stockCritico: number;
   }) {
-    if (input.stockActual < 0 || input.stockNuevo < 0 || input.stockUsado < 0) {
+    const stockActual = this.toNumber(input.stockActual, 0);
+    const stockNuevo = this.toNumber(input.stockNuevo, 0);
+    const stockUsado = this.toNumber(input.stockUsado, 0);
+    const stockCritico = this.toNumber(input.stockCritico, 0);
+    const hasStockCritico = Boolean(input.hasStockCritico);
+
+    if (
+      stockActual < 0 ||
+      stockNuevo < 0 ||
+      stockUsado < 0 ||
+      stockCritico < 0
+    ) {
       throw new BadRequestException(
         'Los valores de stock no pueden ser negativos.',
       );
@@ -2031,43 +2055,37 @@ export class KardexService extends CrudService<Kardex> {
 
     if (!input.hasStockActual) {
       return {
-        stockActual: input.stockNuevo + input.stockUsado,
-        stockNuevo: input.stockNuevo,
-        stockUsado: input.stockUsado,
-      };
-    }
-
-    if (!input.hasStockNuevo && !input.hasStockUsado) {
-      return {
-        stockActual: input.stockActual,
-        stockNuevo: input.stockActual,
-        stockUsado: 0,
-      };
-    }
-
-    const breakdownTotal = input.stockNuevo + input.stockUsado;
-    if (Math.abs(breakdownTotal - input.stockActual) <= 0.000001) {
-      return {
-        stockActual: input.stockActual,
-        stockNuevo: input.stockNuevo,
-        stockUsado: input.stockUsado,
-      };
-    }
-
-    if (input.hasStockUsado) {
-      const stockUsado = Math.min(input.stockUsado, input.stockActual);
-      return {
-        stockActual: input.stockActual,
-        stockNuevo: input.stockActual - stockUsado,
+        stockActual: stockNuevo + stockUsado + stockCritico,
+        stockNuevo,
         stockUsado,
+        stockCritico,
       };
     }
 
-    const stockNuevo = Math.min(input.stockNuevo, input.stockActual);
+    if (
+      !input.hasStockNuevo &&
+      !input.hasStockUsado &&
+      !hasStockCritico
+    ) {
+      return {
+        stockActual,
+        stockNuevo: stockActual,
+        stockUsado: 0,
+        stockCritico: 0,
+      };
+    }
+
+    const breakdownTotal = stockNuevo + stockUsado + stockCritico;
+    if (Math.abs(breakdownTotal - stockActual) > 0.000001) {
+      throw new BadRequestException(
+        `Stock Actual (${stockActual}) debe coincidir con Stock Nuevo + Stock Usado + Stock Critico (${breakdownTotal}).`,
+      );
+    }
     return {
-      stockActual: input.stockActual,
+      stockActual,
       stockNuevo,
-      stockUsado: input.stockActual - stockNuevo,
+      stockUsado,
+      stockCritico,
     };
   }
 
@@ -2366,6 +2384,7 @@ export class KardexService extends CrudService<Kardex> {
       stock_actual: '0.000000',
       stock_nuevo: '0.000000',
       stock_usado: '0.000000',
+      stock_critico: '0.000000',
       stock_fisico: '0.000000',
       stock_min_bodega: '0.000000',
       stock_max_bodega: '0.000000',
@@ -2380,21 +2399,31 @@ export class KardexService extends CrudService<Kardex> {
   private getStockNuevoAmount(stockRow: StockBodega) {
     const actual = this.toNumber(stockRow.stock_actual, 0);
     const usado = this.toNumber(stockRow.stock_usado, 0);
-    const nuevo = this.toNumber(stockRow.stock_nuevo, actual - usado);
-    if (nuevo > 0 || usado > 0 || actual === 0) return Math.max(nuevo, 0);
-    return Math.max(actual, 0);
+    const critico = this.toNumber(stockRow.stock_critico, 0);
+    const nuevo = this.toNumber(stockRow.stock_nuevo, actual - usado - critico);
+    if (nuevo > 0 || usado > 0 || critico > 0 || actual === 0) {
+      return Math.max(nuevo, 0);
+    }
+    return Math.max(actual - usado - critico, 0);
+  }
+
+  private getStockCriticoAmount(stockRow: StockBodega) {
+    return Math.max(this.toNumber(stockRow.stock_critico, 0), 0);
   }
 
   private setStockBreakdown(
     stockRow: StockBodega,
     stockNuevo: number,
     stockUsado = this.toNumber(stockRow.stock_usado, 0),
+    stockCritico = this.toNumber(stockRow.stock_critico, 0),
   ) {
     const normalizedNuevo = Math.max(this.toNumber(stockNuevo, 0), 0);
     const normalizedUsado = Math.max(this.toNumber(stockUsado, 0), 0);
-    const total = normalizedNuevo + normalizedUsado;
+    const normalizedCritico = Math.max(this.toNumber(stockCritico, 0), 0);
+    const total = normalizedNuevo + normalizedUsado + normalizedCritico;
     stockRow.stock_nuevo = this.toFixedText(normalizedNuevo, 6);
     stockRow.stock_usado = this.toFixedText(normalizedUsado, 6);
+    stockRow.stock_critico = this.toFixedText(normalizedCritico, 6);
     stockRow.stock_actual = this.toFixedText(total, 6);
     return total;
   }
@@ -2405,6 +2434,7 @@ export class KardexService extends CrudService<Kardex> {
       stockActual: number;
       stockNuevo: number;
       stockUsado: number;
+      stockCritico: number;
       stockFisico: number;
       stockMinBodega: number;
       stockMaxBodega: number;
@@ -2418,10 +2448,11 @@ export class KardexService extends CrudService<Kardex> {
       stockRow,
       target.stockNuevo,
       target.stockUsado,
+      target.stockCritico,
     );
     if (Math.abs(total - target.stockActual) > 0.000001) {
       throw new BadRequestException(
-        `Stock Actual (${target.stockActual}) no coincide con Stock Nuevo + Stock Usado (${total}).`,
+        `Stock Actual (${target.stockActual}) no coincide con Stock Nuevo + Stock Usado + Stock Critico (${total}).`,
       );
     }
 
@@ -2446,6 +2477,40 @@ export class KardexService extends CrudService<Kardex> {
       );
     }
     return this.setStockBreakdown(stockRow, nextNuevo);
+  }
+
+  private applyCriticalStockDelta(stockRow: StockBodega, delta: number) {
+    const currentCritico = this.getStockCriticoAmount(stockRow);
+    const nextCritico = currentCritico + this.toNumber(delta, 0);
+    if (nextCritico < -0.000001) {
+      throw new BadRequestException(
+        `Stock critico insuficiente. Disponible ${currentCritico.toFixed(2)}, requerido ${Math.abs(delta).toFixed(2)}.`,
+      );
+    }
+    return this.setStockBreakdown(
+      stockRow,
+      this.getStockNuevoAmount(stockRow),
+      this.toNumber(stockRow.stock_usado, 0),
+      nextCritico,
+    );
+  }
+
+  private applyOutgoingStockWithCriticalFallback(
+    stockRow: StockBodega,
+    quantity: number,
+  ) {
+    const stockNuevo = this.getStockNuevoAmount(stockRow);
+    const stockUsado = Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
+    if (stockNuevo <= 0.000001 && stockUsado <= 0.000001) {
+      return {
+        total: this.applyCriticalStockDelta(stockRow, -quantity),
+        condition: 'CRITICO',
+      } as const;
+    }
+    return {
+      total: this.applyNewStockDelta(stockRow, -quantity),
+      condition: 'NUEVO',
+    } as const;
   }
 
   private async createMovementArtifacts(
@@ -2780,6 +2845,7 @@ export class KardexService extends CrudService<Kardex> {
         stockActual: stockObjetivo,
         stockNuevo: stockObjetivo,
         stockUsado: 0,
+        stockCritico: 0,
         stockFisico: stockObjetivo,
         stockMinBodega,
         stockMaxBodega,
@@ -2957,6 +3023,10 @@ export class KardexService extends CrudService<Kardex> {
     const hasStockActual = this.rowHasValue(row, ['Stock Actual', 'Stock']);
     const hasStockNuevo = this.rowHasValue(row, ['Stock Nuevo']);
     const hasStockUsado = this.rowHasValue(row, ['Stock Usado']);
+    const hasStockCritico = this.rowHasValue(row, [
+      'Stock Critico',
+      'Stock Crítico',
+    ]);
     const stockActual = this.toNumber(
       this.rowValue(row, ['Stock Actual', 'Stock']),
       0,
@@ -2964,20 +3034,32 @@ export class KardexService extends CrudService<Kardex> {
     const stockUsadoInformado = hasStockUsado
       ? this.toNumber(this.rowValue(row, ['Stock Usado']), 0)
       : 0;
+    const stockCriticoInformado = hasStockCritico
+      ? this.toNumber(
+          this.rowValue(row, ['Stock Critico', 'Stock Crítico']),
+          0,
+        )
+      : 0;
     const stockNuevoInformado = hasStockNuevo
       ? this.toNumber(this.rowValue(row, ['Stock Nuevo']), 0)
-      : Math.max(stockActual - stockUsadoInformado, 0);
+      : Math.max(
+          stockActual - stockUsadoInformado - stockCriticoInformado,
+          0,
+        );
     const stockTargets = this.reconcileInventoryStockBreakdown({
       hasStockActual,
       hasStockNuevo,
       hasStockUsado,
+      hasStockCritico,
       stockActual,
       stockNuevo: stockNuevoInformado,
       stockUsado: stockUsadoInformado,
+      stockCritico: stockCriticoInformado,
     });
     const stockObjetivo = stockTargets.stockActual;
     const stockNuevoObjetivo = stockTargets.stockNuevo;
     const stockUsadoObjetivo = stockTargets.stockUsado;
+    const stockCriticoObjetivo = stockTargets.stockCritico;
     const stockFisicoObjetivo = this.rowHasValue(row, ['Stock Fisico'])
       ? this.toNumber(this.rowValue(row, ['Stock Fisico']), stockObjetivo)
       : stockObjetivo;
@@ -2985,6 +3067,7 @@ export class KardexService extends CrudService<Kardex> {
       stockObjetivo < 0 ||
       stockNuevoObjetivo < 0 ||
       stockUsadoObjetivo < 0 ||
+      stockCriticoObjetivo < 0 ||
       stockFisicoObjetivo < 0
     ) {
       throw new BadRequestException(
@@ -3221,13 +3304,16 @@ export class KardexService extends CrudService<Kardex> {
       const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
       const stockNuevoAnterior = this.getStockNuevoAmount(stockRow);
       const stockUsadoAnterior = this.toNumber(stockRow.stock_usado, 0);
+      const stockCriticoAnterior = this.getStockCriticoAmount(stockRow);
       const delta = stockObjetivo - stockAnterior;
       const deltaNuevo = stockNuevoObjetivo - stockNuevoAnterior;
       const deltaUsado = stockUsadoObjetivo - stockUsadoAnterior;
-      const stockNuevo = this.applyInventoryImportStockTarget(stockRow, {
+      const deltaCritico = stockCriticoObjetivo - stockCriticoAnterior;
+      const stockTotal = this.applyInventoryImportStockTarget(stockRow, {
         stockActual: stockObjetivo,
         stockNuevo: stockNuevoObjetivo,
         stockUsado: stockUsadoObjetivo,
+        stockCritico: stockCriticoObjetivo,
         stockFisico: stockFisicoObjetivo,
         stockMinBodega: normalizedStockMinBodega,
         stockMaxBodega: normalizedStockMaxBodega,
@@ -3248,10 +3334,15 @@ export class KardexService extends CrudService<Kardex> {
           productoId: producto.id,
           cantidad: Math.abs(delta),
           costoUnitario,
-          stockNuevo,
+          stockNuevo: stockTotal,
           observacion: 'Ajuste por carga masiva CSV/XLSX',
-          condicionMaterial:
-            Math.abs(deltaUsado) > Math.abs(deltaNuevo) ? 'USADO' : 'NUEVO',
+          condicionMaterial: [
+            { condition: 'NUEVO', delta: deltaNuevo },
+            { condition: 'USADO', delta: deltaUsado },
+            { condition: 'CRITICO', delta: deltaCritico },
+          ].sort(
+            (left, right) => Math.abs(right.delta) - Math.abs(left.delta),
+          )[0]?.condition,
           userName,
         });
 

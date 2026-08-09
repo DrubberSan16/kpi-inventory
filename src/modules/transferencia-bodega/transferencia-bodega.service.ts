@@ -499,6 +499,10 @@ export class TransferenciaBodegaService {
         const unitCost = this.resolveUnitCost(orderDetail, product, sourceStock);
         const subtotal = quantity * unitCost;
         totalCost += subtotal;
+        const materialCondition = this.resolveTransferStockCondition(
+          sourceStock,
+          Boolean(order),
+        );
 
         if (order && movementReceipt) {
           currentSourceStock = this.applyNewStockDelta(sourceStock, quantity);
@@ -516,6 +520,7 @@ export class TransferenciaBodegaService {
               cantidad: this.toFixedText(quantity, 6),
               costo_unitario: this.toFixedText(unitCost, 4),
               subtotal_costo: this.toFixedText(subtotal, 4),
+              condicion_material: 'NUEVO',
               observacion:
                 this.toText(detail.observacion) ||
                 baseObservation ||
@@ -539,6 +544,7 @@ export class TransferenciaBodegaService {
               costo_unitario: this.toFixedText(unitCost, 4),
               costo_total: this.toFixedText(subtotal, 4),
               saldo_cantidad: sourceStock.stock_actual,
+              condicion_material: 'NUEVO',
               saldo_costo_promedio: this.toFixedText(unitCost, 4),
               saldo_valorizado: this.toFixedText(
                 this.toNumber(sourceStock.stock_actual, 0) * unitCost,
@@ -554,9 +560,10 @@ export class TransferenciaBodegaService {
           );
         }
 
-        const sourceStockAfterOut = this.applyNewStockDelta(
+        const sourceStockAfterOut = this.applyStockDeltaByCondition(
           sourceStock,
           -quantity,
+          materialCondition,
         );
         sourceStock.stock_fisico = this.toFixedText(
           this.toNumber(sourceStock.stock_fisico, currentSourceStock) - quantity,
@@ -573,7 +580,11 @@ export class TransferenciaBodegaService {
           userName,
         });
         const currentDestStock = this.toNumber(destStock.stock_actual, 0);
-        this.applyNewStockDelta(destStock, quantity);
+        const destinationStockAfterIn = this.applyStockDeltaByCondition(
+          destStock,
+          quantity,
+          materialCondition,
+        );
         destStock.stock_fisico = this.toFixedText(
           this.toNumber(destStock.stock_fisico, currentDestStock) + quantity,
           6,
@@ -591,6 +602,7 @@ export class TransferenciaBodegaService {
             cantidad: this.toFixedText(quantity, 6),
             costo_unitario: this.toFixedText(unitCost, 4),
             subtotal_costo: this.toFixedText(subtotal, 4),
+            condicion_material: materialCondition,
             observacion:
               this.toText(detail.observacion) ||
               baseObservation ||
@@ -608,6 +620,7 @@ export class TransferenciaBodegaService {
             cantidad: this.toFixedText(quantity, 6),
             costo_unitario: this.toFixedText(unitCost, 4),
             subtotal_costo: this.toFixedText(subtotal, 4),
+            condicion_material: materialCondition,
             observacion:
               this.toText(detail.observacion) ||
               baseObservation ||
@@ -631,6 +644,7 @@ export class TransferenciaBodegaService {
             costo_unitario: this.toFixedText(unitCost, 4),
             costo_total: this.toFixedText(subtotal, 4),
             saldo_cantidad: this.toFixedText(sourceStockAfterOut, 6),
+            condicion_material: materialCondition,
             saldo_costo_promedio: this.toFixedText(unitCost, 4),
             saldo_valorizado: this.toFixedText(
               sourceStockAfterOut * unitCost,
@@ -658,10 +672,11 @@ export class TransferenciaBodegaService {
             salida_cantidad: '0.000000',
             costo_unitario: this.toFixedText(unitCost, 4),
             costo_total: this.toFixedText(subtotal, 4),
-            saldo_cantidad: destStock.stock_actual,
+            saldo_cantidad: this.toFixedText(destinationStockAfterIn, 6),
+            condicion_material: materialCondition,
             saldo_costo_promedio: this.toFixedText(unitCost, 4),
             saldo_valorizado: this.toFixedText(
-              this.toNumber(destStock.stock_actual, 0) * unitCost,
+              destinationStockAfterIn * unitCost,
               4,
             ),
             observacion:
@@ -875,6 +890,17 @@ export class TransferenciaBodegaService {
           const unitCost = this.toNumber(detail.costo_unitario, 0);
           const subtotal = quantity * unitCost;
           totalCost += subtotal;
+          const originalOutDetail = detail.movimiento_salida_det_id
+            ? await manager.findOne(MovimientoInventarioDet, {
+                where: {
+                  id: detail.movimiento_salida_det_id,
+                  is_deleted: false,
+                },
+              })
+            : null;
+          const materialCondition = this.normalizeStockCondition(
+            originalOutDetail?.condicion_material,
+          );
 
           const destinationStock = await this.getOrCreateStockRow(manager, {
             bodegaId: transfer.bodega_destino_id,
@@ -882,9 +908,10 @@ export class TransferenciaBodegaService {
             costoPromedio: unitCost,
             userName: annulledBy,
           });
-          const destinationAfter = this.applyNewStockDelta(
+          const destinationAfter = this.applyStockDeltaByCondition(
             destinationStock,
             -quantity,
+            materialCondition,
           );
           destinationStock.stock_fisico = this.toFixedText(
             destinationAfter,
@@ -902,6 +929,7 @@ export class TransferenciaBodegaService {
               cantidad: this.toFixedText(quantity, 6),
               costo_unitario: this.toFixedText(unitCost, 4),
               subtotal_costo: this.toFixedText(subtotal, 4),
+              condicion_material: materialCondition,
               observacion: reversalObservation,
               created_by: annulledBy,
               updated_by: annulledBy,
@@ -921,7 +949,7 @@ export class TransferenciaBodegaService {
               costo_unitario: this.toFixedText(unitCost, 4),
               costo_total: this.toFixedText(subtotal, 4),
               saldo_cantidad: this.toFixedText(destinationAfter, 6),
-              condicion_material: 'NUEVO',
+              condicion_material: materialCondition,
               saldo_costo_promedio: this.toFixedText(unitCost, 4),
               saldo_valorizado: this.toFixedText(
                 destinationAfter * unitCost,
@@ -940,7 +968,11 @@ export class TransferenciaBodegaService {
               costoPromedio: unitCost,
               userName: annulledBy,
             });
-            const sourceAfter = this.applyNewStockDelta(sourceStock, quantity);
+            const sourceAfter = this.applyStockDeltaByCondition(
+              sourceStock,
+              quantity,
+              materialCondition,
+            );
             sourceStock.stock_fisico = this.toFixedText(sourceAfter, 6);
             sourceStock.updated_by = annulledBy;
             await manager.save(StockBodega, sourceStock);
@@ -954,6 +986,7 @@ export class TransferenciaBodegaService {
                 cantidad: this.toFixedText(quantity, 6),
                 costo_unitario: this.toFixedText(unitCost, 4),
                 subtotal_costo: this.toFixedText(subtotal, 4),
+                condicion_material: materialCondition,
                 observacion: reversalObservation,
                 created_by: annulledBy,
                 updated_by: annulledBy,
@@ -973,7 +1006,7 @@ export class TransferenciaBodegaService {
                 costo_unitario: this.toFixedText(unitCost, 4),
                 costo_total: this.toFixedText(subtotal, 4),
                 saldo_cantidad: this.toFixedText(sourceAfter, 6),
-                condicion_material: 'NUEVO',
+                condicion_material: materialCondition,
                 saldo_costo_promedio: this.toFixedText(unitCost, 4),
                 saldo_valorizado: this.toFixedText(sourceAfter * unitCost, 4),
                 observacion: reversalObservation,
@@ -1474,6 +1507,7 @@ export class TransferenciaBodegaService {
         stock_actual: '0.000000',
         stock_nuevo: '0.000000',
         stock_usado: '0.000000',
+        stock_critico: '0.000000',
         stock_fisico: '0.000000',
         stock_min_bodega: '0.000000',
         stock_max_bodega: '0.000000',
@@ -1489,21 +1523,31 @@ export class TransferenciaBodegaService {
   private getStockNuevoAmount(stockRow: StockBodega) {
     const actual = this.toNumber(stockRow.stock_actual, 0);
     const usado = this.toNumber(stockRow.stock_usado, 0);
-    const nuevo = this.toNumber(stockRow.stock_nuevo, actual - usado);
-    if (nuevo > 0 || usado > 0 || actual === 0) return Math.max(nuevo, 0);
-    return Math.max(actual, 0);
+    const critico = this.toNumber(stockRow.stock_critico, 0);
+    const nuevo = this.toNumber(stockRow.stock_nuevo, actual - usado - critico);
+    if (nuevo > 0 || usado > 0 || critico > 0 || actual === 0) {
+      return Math.max(nuevo, 0);
+    }
+    return Math.max(actual - usado - critico, 0);
+  }
+
+  private getStockCriticoAmount(stockRow: StockBodega) {
+    return Math.max(this.toNumber(stockRow.stock_critico, 0), 0);
   }
 
   private setStockBreakdown(
     stockRow: StockBodega,
     stockNuevo: number,
     stockUsado = this.toNumber(stockRow.stock_usado, 0),
+    stockCritico = this.toNumber(stockRow.stock_critico, 0),
   ) {
     const normalizedNuevo = Math.max(this.toNumber(stockNuevo, 0), 0);
     const normalizedUsado = Math.max(this.toNumber(stockUsado, 0), 0);
-    const total = normalizedNuevo + normalizedUsado;
+    const normalizedCritico = Math.max(this.toNumber(stockCritico, 0), 0);
+    const total = normalizedNuevo + normalizedUsado + normalizedCritico;
     stockRow.stock_nuevo = this.toFixedText(normalizedNuevo, 6);
     stockRow.stock_usado = this.toFixedText(normalizedUsado, 6);
+    stockRow.stock_critico = this.toFixedText(normalizedCritico, 6);
     stockRow.stock_actual = this.toFixedText(total, 6);
     return total;
   }
@@ -1517,6 +1561,47 @@ export class TransferenciaBodegaService {
       );
     }
     return this.setStockBreakdown(stockRow, nextNuevo);
+  }
+
+  private normalizeStockCondition(value: unknown): 'NUEVO' | 'USADO' | 'CRITICO' {
+    const normalized = String(value || '').trim().toUpperCase();
+    if (normalized === 'USADO') return 'USADO';
+    if (normalized === 'CRITICO') return 'CRITICO';
+    return 'NUEVO';
+  }
+
+  private resolveTransferStockCondition(
+    stockRow: StockBodega,
+    isPurchaseOrderTransfer: boolean,
+  ): 'NUEVO' | 'CRITICO' {
+    if (isPurchaseOrderTransfer) return 'NUEVO';
+    const nuevo = this.getStockNuevoAmount(stockRow);
+    const usado = Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
+    return nuevo <= 0.000001 && usado <= 0.000001 ? 'CRITICO' : 'NUEVO';
+  }
+
+  private applyStockDeltaByCondition(
+    stockRow: StockBodega,
+    delta: number,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+  ) {
+    if (condition === 'NUEVO') return this.applyNewStockDelta(stockRow, delta);
+    const currentNuevo = this.getStockNuevoAmount(stockRow);
+    const currentUsado = Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
+    const currentCritico = this.getStockCriticoAmount(stockRow);
+    const current = condition === 'USADO' ? currentUsado : currentCritico;
+    const next = current + this.toNumber(delta, 0);
+    if (next < -0.000001) {
+      throw new BadRequestException(
+        `Stock ${condition === 'USADO' ? 'usado' : 'critico'} insuficiente. Disponible ${current.toFixed(2)}, requerido ${Math.abs(delta).toFixed(2)}.`,
+      );
+    }
+    return this.setStockBreakdown(
+      stockRow,
+      currentNuevo,
+      condition === 'USADO' ? next : currentUsado,
+      condition === 'CRITICO' ? next : currentCritico,
+    );
   }
 
   private async generateCode(manager: EntityManager, prefix: string) {

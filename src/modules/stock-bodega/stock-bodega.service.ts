@@ -26,7 +26,7 @@ import { StockBodega } from '../entities/stock-bodega.entity';
 import { StockBodegaQueryDto } from './stock-bodega-query.dto';
 
 type StockMovementType = 'INGRESO' | 'SALIDA';
-type StockMaterialCondition = 'NUEVO' | 'USADO';
+type StockMaterialCondition = 'NUEVO' | 'USADO' | 'CRITICO';
 
 @Injectable()
 export class StockBodegaService
@@ -155,6 +155,11 @@ export class StockBodegaService
         AND reserva.bodega_id = stock.bodega_id
         AND UPPER(TRIM(COALESCE(work_order.status_workflow, 'PLANNED'))) NOT IN (${closedStatusSql})
     ), 0)`;
+    const operationalStockSql = `CASE
+      WHEN COALESCE(stock.stock_nuevo, 0) + COALESCE(stock.stock_usado, 0) > 0
+        THEN COALESCE(stock.stock_nuevo, 0) + COALESCE(stock.stock_usado, 0)
+      ELSE COALESCE(stock.stock_critico, 0)
+    END`;
 
     const baseQuery = this.repository
       .createQueryBuilder('stock')
@@ -251,7 +256,7 @@ export class StockBodegaService
       )
       .addSelect(activeReservationSql, 'cantidad_reservada_activa')
       .addSelect(
-        `GREATEST(COALESCE(stock.stock_actual, 0) - ${activeReservationSql}, 0)`,
+        `GREATEST((${operationalStockSql}) - ${activeReservationSql}, 0)`,
         'stock_disponible',
       )
       .orderBy('stock.updated_at', 'DESC')
@@ -549,23 +554,35 @@ export class StockBodegaService
   ): StockMaterialCondition {
     const previousNuevo = this.toNumeric(
       previous?.stock_nuevo,
-      this.toNumeric(previous?.stock_actual, 0) - this.toNumeric(previous?.stock_usado, 0),
+      this.toNumeric(previous?.stock_actual, 0) -
+        this.toNumeric(previous?.stock_usado, 0) -
+        this.toNumeric(previous?.stock_critico, 0),
     );
     const previousUsado = this.toNumeric(previous?.stock_usado, 0);
+    const previousCritico = this.toNumeric(previous?.stock_critico, 0);
     const currentNuevo = this.toNumeric(
       current.stock_nuevo,
-      this.toNumeric(current.stock_actual, 0) - this.toNumeric(current.stock_usado, 0),
+      this.toNumeric(current.stock_actual, 0) -
+        this.toNumeric(current.stock_usado, 0) -
+        this.toNumeric(current.stock_critico, 0),
     );
     const currentUsado = this.toNumeric(current.stock_usado, 0);
+    const currentCritico = this.toNumeric(current.stock_critico, 0);
     const nuevoDelta = Number((currentNuevo - previousNuevo).toFixed(6));
     const usadoDelta = Number((currentUsado - previousUsado).toFixed(6));
-
-    if (tipo === 'INGRESO') {
-      return usadoDelta > 0 && usadoDelta >= nuevoDelta ? 'USADO' : 'NUEVO';
-    }
-    return usadoDelta < 0 && Math.abs(usadoDelta) >= Math.abs(nuevoDelta)
-      ? 'USADO'
-      : 'NUEVO';
+    const criticoDelta = Number((currentCritico - previousCritico).toFixed(6));
+    const candidates: Array<{
+      condition: StockMaterialCondition;
+      delta: number;
+    }> = [
+      { condition: 'NUEVO', delta: nuevoDelta },
+      { condition: 'USADO', delta: usadoDelta },
+      { condition: 'CRITICO', delta: criticoDelta },
+    ];
+    const matching = candidates
+      .filter((item) => (tipo === 'INGRESO' ? item.delta > 0 : item.delta < 0))
+      .sort((left, right) => Math.abs(right.delta) - Math.abs(left.delta));
+    return matching[0]?.condition ?? 'NUEVO';
   }
 
   private resolveStockAdjustmentUnitCost(
@@ -713,6 +730,10 @@ export class StockBodegaService
       payload,
       'stock_usado',
     );
+    const hasStockCritico = Object.prototype.hasOwnProperty.call(
+      payload,
+      'stock_critico',
+    );
     const hasStockActual = Object.prototype.hasOwnProperty.call(
       payload,
       'stock_actual',
@@ -728,6 +749,10 @@ export class StockBodegaService
           current?.stock_usado ?? '0',
         )
       : '0';
+    const stockCritico = this.toDecimalText(
+      hasStockCritico ? payload.stock_critico : current?.stock_critico,
+      current?.stock_critico ?? '0',
+    );
     const stockNuevo = this.resolveStockNuevoText({
       payload,
       current,
@@ -735,18 +760,22 @@ export class StockBodegaService
       hasStockActual,
       stockActual,
       stockUsado,
+      stockCritico,
     });
     const stockActualTotal = this.toDecimalText(
-      this.toNumeric(stockNuevo) + this.toNumeric(stockUsado),
+      this.toNumeric(stockNuevo) +
+        this.toNumeric(stockUsado) +
+        this.toNumeric(stockCritico),
       stockActual,
     );
     if (
       this.toNumeric(stockNuevo, 0) < 0 ||
       this.toNumeric(stockUsado, 0) < 0 ||
+      this.toNumeric(stockCritico, 0) < 0 ||
       this.toNumeric(stockActualTotal, 0) < 0
     ) {
       throw new BadRequestException(
-        'El stock nuevo, usado y total no pueden ser negativos.',
+        'El stock nuevo, usado, critico y total no pueden ser negativos.',
       );
     }
     const hasPhysicalStock = Object.prototype.hasOwnProperty.call(
@@ -755,7 +784,7 @@ export class StockBodegaService
     );
     const stockFisico = this.toDecimalText(
       hasPhysicalStock ? payload.stock_fisico : current?.stock_fisico,
-      current?.stock_fisico ?? stockActual,
+      current?.stock_fisico ?? stockActualTotal,
     );
 
     return {
@@ -763,6 +792,7 @@ export class StockBodegaService
       stock_actual: stockActualTotal,
       stock_nuevo: stockNuevo,
       stock_usado: stockUsado,
+      stock_critico: stockCritico,
       stock_fisico: stockFisico,
       es_usado: esUsado,
     };
@@ -775,6 +805,7 @@ export class StockBodegaService
     hasStockActual: boolean;
     stockActual: string;
     stockUsado: string;
+    stockCritico: string;
   }) {
     if (args.hasStockNuevo) {
       return this.toDecimalText(args.payload.stock_nuevo, '0');
@@ -783,7 +814,9 @@ export class StockBodegaService
     if (args.hasStockActual && !args.current?.stock_nuevo) {
       return this.toDecimalText(
         Math.max(
-          this.toNumeric(args.stockActual) - this.toNumeric(args.stockUsado),
+          this.toNumeric(args.stockActual) -
+            this.toNumeric(args.stockUsado) -
+            this.toNumeric(args.stockCritico),
           0,
         ),
         '0',
@@ -842,10 +875,15 @@ export class StockBodegaService
       ADD COLUMN IF NOT EXISTS stock_usado numeric(18, 6) NOT NULL DEFAULT 0
     `);
     await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_critico numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
       UPDATE kpi_inventory.tb_stock_bodega
       SET stock_nuevo = COALESCE(stock_actual, 0)
       WHERE COALESCE(stock_nuevo, 0) = 0
         AND COALESCE(stock_usado, 0) = 0
+        AND COALESCE(stock_critico, 0) = 0
         AND COALESCE(stock_actual, 0) <> 0
     `);
     await this.dataSource.query(`
@@ -856,7 +894,9 @@ export class StockBodegaService
     `);
     await this.dataSource.query(`
       UPDATE kpi_inventory.tb_stock_bodega
-      SET stock_actual = COALESCE(stock_nuevo, 0) + COALESCE(stock_usado, 0)
+      SET stock_actual = COALESCE(stock_nuevo, 0)
+        + COALESCE(stock_usado, 0)
+        + COALESCE(stock_critico, 0)
     `);
     await this.dataSource.query(`
       CREATE INDEX IF NOT EXISTS idx_tb_stock_bodega_es_usado
@@ -867,6 +907,11 @@ export class StockBodegaService
       CREATE INDEX IF NOT EXISTS idx_tb_stock_bodega_stock_usado
       ON kpi_inventory.tb_stock_bodega (stock_usado)
       WHERE is_deleted = false AND COALESCE(es_usado, false) = true
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_stock_bodega_stock_critico
+      ON kpi_inventory.tb_stock_bodega (stock_critico)
+      WHERE is_deleted = false AND COALESCE(stock_critico, 0) > 0
     `);
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_inventory.tb_movimiento_inventario_det

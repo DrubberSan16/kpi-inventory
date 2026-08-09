@@ -49,7 +49,7 @@ export class Kardex extends BaseAuditEntity {
   saldo_cantidad: string;
 
   @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
-  @ApiProperty({ description: 'condicion del material: NUEVO o USADO' })
+  @ApiProperty({ description: 'condicion del material: NUEVO, USADO o CRITICO' })
   condicion_material: string;
 
   @Column({ type: 'numeric', precision: 14, scale: 4, default: 0 })
