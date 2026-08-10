@@ -71,6 +71,7 @@ type ImportInventorySummary = {
   ingresos: number;
   salidas: number;
   errores: string[];
+  stock_ids?: string[];
 };
 
 type InventoryImportProgress = {
@@ -976,7 +977,8 @@ export class KardexService extends CrudService<Kardex> {
       this.parseDateBoundary(this.toText(payload.fecha_movimiento), 'start') ??
       new Date();
 
-    return this.dataSource.transaction(async (manager) => {
+    const changedStockIds = new Set<string>();
+    const result = await this.dataSource.transaction(async (manager) => {
       const bodega = await manager.findOne(Bodega, {
         where: { id: bodegaId, is_deleted: false },
       });
@@ -1010,8 +1012,6 @@ export class KardexService extends CrudService<Kardex> {
       );
 
       let totalCost = 0;
-      const changedStockIds = new Set<string>();
-
       for (const detail of detalles) {
         const productoId = this.toText(detail?.producto_id);
         const cantidad = this.toNumber(detail?.cantidad, 0);
@@ -1135,13 +1135,18 @@ export class KardexService extends CrudService<Kardex> {
       movimiento.updated_by = userName;
       await manager.save(MovimientoInventario, movimiento);
 
-      await this.notifyMaintenanceRecalculationForStocks(
-        changedStockIds,
-        'document',
-      );
       const [hydrated] = await this.hydrateMovementDocuments([movimiento]);
       return hydrated ?? null;
     });
+    await this.notifyMaintenanceRecalculationForStocks(
+      changedStockIds,
+      'document',
+      {
+        movementDirection: tipo === 'SALIDA' ? 'decrease' : 'increase',
+        actorUsername: userName,
+      },
+    );
+    return result;
   }
 
   private applyMaterialSearchFilter(
@@ -1656,15 +1661,11 @@ export class KardexService extends CrudService<Kardex> {
       });
     }
 
-    await this.notifyMaintenanceRecalculationForStocks(
-      changedStockIds,
-      'import',
-    );
-
     return {
       ...summary,
       hoja: firstSheetName,
       total_filas: rows.length,
+      stock_ids: [...changedStockIds],
     };
   }
 
@@ -2343,6 +2344,14 @@ export class KardexService extends CrudService<Kardex> {
       job.error_message = null;
       this.logger.log(
         `Carga de inventario completada. Job=${jobId} Archivo=${job.source_file_name} Procesados=${summary.procesados} Errores=${summary.errores.length}`,
+      );
+      await this.notifyMaintenanceRecalculationForStocks(
+        summary.stock_ids ?? [],
+        'import',
+        {
+          actorUsername: this.toText(options?.requestedBy) || 'SYSTEM',
+          jobId,
+        },
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3372,12 +3381,16 @@ export class KardexService extends CrudService<Kardex> {
   private async notifyMaintenanceRecalculationForStocks(
     stockIds: Iterable<string>,
     source: string,
+    context?: {
+      movementDirection?: 'increase' | 'decrease';
+      actorUsername?: string | null;
+      jobId?: string | null;
+    },
   ) {
     const url = this.getMaintenanceRecalcUrl();
     if (!url) return;
 
     const stockIdList = [...new Set([...stockIds].filter(Boolean))];
-    if (!stockIdList.length) return;
 
     if (source === 'import') {
       try {
@@ -3387,6 +3400,9 @@ export class KardexService extends CrudService<Kardex> {
           body: JSON.stringify({
             source: 'inventory-kardex-import-completed',
             stock_count: stockIdList.length,
+            stock_ids: stockIdList,
+            actor_username: context?.actorUsername ?? null,
+            job_id: context?.jobId ?? null,
           }),
         });
 
@@ -3404,6 +3420,8 @@ export class KardexService extends CrudService<Kardex> {
       return;
     }
 
+    if (!stockIdList.length) return;
+
     for (const stockId of stockIdList) {
       if (!stockId) continue;
       try {
@@ -3413,6 +3431,8 @@ export class KardexService extends CrudService<Kardex> {
           body: JSON.stringify({
             source: `inventory-kardex-${source}`,
             stock_id: stockId,
+            movement_direction: context?.movementDirection ?? null,
+            actor_username: context?.actorUsername ?? null,
           }),
         });
 

@@ -77,7 +77,10 @@ export class StockBodegaService
         });
         return createdRow;
       });
-      void this.notifyMaintenanceAlertRecalculation('create', created.id);
+      void this.notifyMaintenanceAlertRecalculation('create', created.id, {
+        movementDirection: 'increase',
+        actorUsername: created.updated_by ?? created.created_by,
+      });
       return created;
     } catch (error) {
       throw await this.normalizeStockWriteError(error, preparedPayload);
@@ -112,7 +115,15 @@ export class StockBodegaService
         });
         return updatedRow;
       });
-      void this.notifyMaintenanceAlertRecalculation('update', id);
+      const previousAvailable = this.getAlertableStockAmount(current);
+      const currentAvailable = this.getAlertableStockAmount(updated);
+      void this.notifyMaintenanceAlertRecalculation('update', id, {
+        movementDirection:
+          currentAvailable < previousAvailable - 0.000001
+            ? 'decrease'
+            : 'increase',
+        actorUsername: updated.updated_by ?? updated.created_by,
+      });
       return updated;
     } catch (error) {
       throw await this.normalizeStockWriteError(
@@ -308,6 +319,10 @@ export class StockBodegaService
   private async notifyMaintenanceAlertRecalculation(
     action: 'create' | 'update' | 'remove',
     stockId: string,
+    context?: {
+      movementDirection?: 'increase' | 'decrease';
+      actorUsername?: string | null;
+    },
   ) {
     const url = this.getMaintenanceRecalcUrl();
     if (!url) return;
@@ -319,6 +334,8 @@ export class StockBodegaService
         body: JSON.stringify({
           source: `inventory-stock-${action}`,
           stock_id: stockId,
+          movement_direction: context?.movementDirection ?? null,
+          actor_username: context?.actorUsername ?? null,
         }),
       });
 
@@ -333,6 +350,14 @@ export class StockBodegaService
         `Error notificando recálculo de alertas desde inventario (${action}:${stockId}): ${message}`,
       );
     }
+  }
+
+  private getAlertableStockAmount(stock?: Partial<StockBodega> | null) {
+    return Math.max(
+      this.toNumeric(stock?.stock_actual, 0) -
+        this.toNumeric(stock?.stock_critico, 0),
+      0,
+    );
   }
 
   private async ensureUniqueWarehouseProductStock(

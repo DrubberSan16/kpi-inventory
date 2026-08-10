@@ -258,6 +258,8 @@ export class TransferenciaBodegaService {
   async create(dto: CreateTransferenciaBodegaDto) {
     const traceId = randomUUID();
     const createdBy = this.resolveUserName(dto);
+    const changedStockIds = new Set<string>();
+    const decreasedStockIds = new Set<string>();
     this.queueTransactionLog({
       traceId,
       createdBy,
@@ -456,7 +458,6 @@ export class TransferenciaBodegaService {
         description: `Cabecera de transferencia ${transfer.codigo} persistida.`,
       });
 
-      const changedStockIds = new Set<string>();
       let totalCost = 0;
       const transferDetailEntities: TransferenciaBodegaDet[] = [];
 
@@ -572,6 +573,7 @@ export class TransferenciaBodegaService {
         sourceStock.updated_by = userName;
         await manager.save(StockBodega, sourceStock);
         changedStockIds.add(sourceStock.id);
+        if (!order) decreasedStockIds.add(sourceStock.id);
 
         const destStock = await this.getOrCreateStockRow(manager, {
           bodegaId: destinationWarehouse.id,
@@ -756,7 +758,6 @@ export class TransferenciaBodegaService {
         await manager.save(OrdenCompra, order);
       }
 
-      await this.notifyMaintenanceRecalculationForStocks(changedStockIds, 'transfer');
       const [hydrated] = await this.hydrateTransfersWithManager(
         manager,
         [transfer],
@@ -769,6 +770,11 @@ export class TransferenciaBodegaService {
         createdBy,
         description: `Transferencia ${this.toText((result as any)?.codigo) || 'sin-codigo'} registrada correctamente.`,
       });
+      await this.notifyMaintenanceRecalculationForStocks(
+        changedStockIds,
+        'transfer',
+        { decreasedStockIds, actorUsername: createdBy },
+      );
       return result;
     } catch (error: any) {
       this.queueTransactionLog({
@@ -785,6 +791,8 @@ export class TransferenciaBodegaService {
     this.assertCanAnnul(actor);
     const annulledBy = this.resolveAnnulmentActorName(actor);
     const traceId = randomUUID();
+    const changedStockIds = new Set<string>();
+    const decreasedStockIds = new Set<string>();
     this.queueTransactionLog({
       traceId,
       createdBy: annulledBy,
@@ -883,7 +891,6 @@ export class TransferenciaBodegaService {
               }),
             );
 
-        const changedStockIds = new Set<string>();
         let totalCost = 0;
         for (const detail of details) {
           const quantity = this.toNumber(detail.cantidad, 0);
@@ -920,6 +927,7 @@ export class TransferenciaBodegaService {
           destinationStock.updated_by = annulledBy;
           await manager.save(StockBodega, destinationStock);
           changedStockIds.add(destinationStock.id);
+          decreasedStockIds.add(destinationStock.id);
 
           const destinationOutDetail = await manager.save(
             MovimientoInventarioDet,
@@ -1064,10 +1072,6 @@ export class TransferenciaBodegaService {
           await manager.save(GuiaRemisionElectronica, guide);
         }
 
-        await this.notifyMaintenanceRecalculationForStocks(
-          changedStockIds,
-          'transfer-annulment',
-        );
         const [hydrated] = await this.hydrateTransfersWithManager(
           manager,
           [transfer],
@@ -1080,6 +1084,11 @@ export class TransferenciaBodegaService {
         createdBy: annulledBy,
         description: `Transferencia ${id} anulada correctamente con reverso de stock.`,
       });
+      await this.notifyMaintenanceRecalculationForStocks(
+        changedStockIds,
+        'transfer-annulment',
+        { decreasedStockIds, actorUsername: annulledBy },
+      );
       return result;
     } catch (error: any) {
       this.queueTransactionLog({
@@ -1672,6 +1681,10 @@ export class TransferenciaBodegaService {
   private async notifyMaintenanceRecalculationForStocks(
     stockIds: Iterable<string>,
     source: string,
+    context?: {
+      decreasedStockIds?: ReadonlySet<string>;
+      actorUsername?: string | null;
+    },
   ) {
     const url = this.getMaintenanceRecalcUrl();
     if (!url) return;
@@ -1684,6 +1697,10 @@ export class TransferenciaBodegaService {
           body: JSON.stringify({
             source: `inventory-transfer-${source}`,
             stock_id: stockId,
+            movement_direction: context?.decreasedStockIds?.has(stockId)
+              ? 'decrease'
+              : 'increase',
+            actor_username: context?.actorUsername ?? null,
           }),
         });
         if (!response.ok) {
