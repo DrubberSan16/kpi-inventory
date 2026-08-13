@@ -23,6 +23,19 @@ export class BodegaController extends CrudController<Bodega> {
     super(service);
   }
 
+  @Get('destinos-transferencia')
+  @ApiOperation({
+    summary: 'Listar todas las bodegas disponibles como destino de transferencia',
+  })
+  findTransferDestinations(@Query() query: PaginationQueryDto) {
+    return this.service.findAllScoped(
+      query.page,
+      query.limit,
+      query.search,
+      null,
+    );
+  }
+
   @Get()
   @ApiOperation({ summary: 'Listar bodegas con paginacion y alcance por sucursal' })
   findAll(@Query() query: PaginationQueryDto, @Req() req?: any) {
