@@ -250,6 +250,71 @@ export class GuiaRemisionElectronicaService
     }));
   }
 
+  async listTransporterCatalog(search?: string, limit?: string | number) {
+    const normalizedSearch = String(search ?? '').trim();
+    const requestedLimit = Number(limit ?? 25);
+    const safeLimit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(Math.trunc(requestedLimit), 50)
+        : 25;
+
+    const rows = await this.guideRepo.query(
+      `
+        SELECT
+          transporters.razon_social_transportista,
+          transporters.tipo_identificacion_transportista,
+          transporters.identificacion_transportista,
+          transporters.placa,
+          transporters.last_used_at
+        FROM (
+          SELECT DISTINCT ON (
+            guide.identificacion_transportista,
+            guide.placa
+          )
+            guide.razon_social_transportista,
+            guide.tipo_identificacion_transportista,
+            guide.identificacion_transportista,
+            guide.placa,
+            COALESCE(guide.updated_at, guide.created_at) AS last_used_at
+          FROM kpi_inventory.tb_guia_remision_electronica guide
+          WHERE guide.is_deleted = false
+            AND NULLIF(TRIM(guide.identificacion_transportista), '') IS NOT NULL
+            AND NULLIF(TRIM(guide.razon_social_transportista), '') IS NOT NULL
+            AND (
+              $2::text = ''
+              OR guide.identificacion_transportista ILIKE '%' || $2::text || '%'
+              OR guide.razon_social_transportista ILIKE '%' || $2::text || '%'
+              OR guide.placa ILIKE '%' || $2::text || '%'
+            )
+          ORDER BY
+            guide.identificacion_transportista,
+            guide.placa,
+            COALESCE(guide.updated_at, guide.created_at) DESC NULLS LAST
+        ) transporters
+        ORDER BY transporters.last_used_at DESC NULLS LAST
+        LIMIT $1
+      `,
+      [safeLimit, normalizedSearch],
+    );
+
+    return rows.map((row: Record<string, unknown>) => ({
+      razon_social_transportista: this.cleanOptionalText(
+        row.razon_social_transportista,
+        300,
+      ),
+      tipo_identificacion_transportista: this.cleanOptionalText(
+        row.tipo_identificacion_transportista,
+        2,
+      ),
+      identificacion_transportista: this.cleanOptionalText(
+        row.identificacion_transportista,
+        20,
+      ),
+      placa: this.cleanOptionalText(row.placa, 20),
+      last_used_at: row.last_used_at ?? null,
+    }));
+  }
+
   assertSuperAdministratorRole(roleName?: string) {
     const normalizedRole = String(roleName || '')
       .normalize('NFD')
@@ -2866,4 +2931,3 @@ export class GuiaRemisionElectronicaService
     return `${warehouse.codigo || ''} - ${warehouse.nombre || warehouse.id}`.trim();
   }
 }
-

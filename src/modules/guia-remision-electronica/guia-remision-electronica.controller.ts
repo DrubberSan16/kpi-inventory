@@ -157,6 +157,22 @@ export class GuiaRemisionElectronicaController {
     };
   }
 
+  @Get('transportistas')
+  @ApiOperation({
+    summary: 'Listar transportistas usados previamente en guias de remision',
+  })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 25 })
+  async listTransporters(
+    @Query('search') search?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return {
+      message: 'Transportistas obtenidos correctamente.',
+      data: await this.service.listTransporterCatalog(search, limit),
+    };
+  }
+
   @Post('config')
   @ApiOperation({ summary: 'Crear o actualizar configuracion SRI global' })
   @ApiBody({ type: UpsertSriEmissionConfigDto })
