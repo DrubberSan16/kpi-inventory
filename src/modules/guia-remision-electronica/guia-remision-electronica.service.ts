@@ -334,6 +334,28 @@ export class GuiaRemisionElectronicaService
     }
   }
 
+  assertAdministratorOrSuperAdministratorRole(roleName?: string) {
+    const normalizedRole = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    const allowedRoles = new Set([
+      'ADMINISTRADOR',
+      'ADMINISTRADOR DEL SISTEMA',
+      'ADMIN',
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ]);
+    if (!allowedRoles.has(normalizedRole)) {
+      throw new ForbiddenException(
+        'Solo Administrador o Super Administrador puede confirmar manualmente la autorizacion SRI.',
+      );
+    }
+  }
+
   async lookupTaxpayerByRuc(ruc: string) {
     const normalizedRuc = this.onlyDigits(ruc, 13);
     const raw = await this.fetchSriTaxpayerRaw(normalizedRuc);
@@ -1297,6 +1319,12 @@ export class GuiaRemisionElectronicaService
         return this.toGuideResponse(guide);
       }
 
+      if (normalizedEmission === '0' || normalizedSri === '0') {
+        throw new BadRequestException(
+          'La guia tiene estado SRI 0. Debes regenerarla antes de solicitar una nueva autorizacion.',
+        );
+      }
+
       if (
         normalizedEmission === 'RECIBIDA' ||
         normalizedSri === 'RECIBIDA'
@@ -1337,6 +1365,67 @@ export class GuiaRemisionElectronicaService
     });
   }
 
+  async confirmManualAuthorization(
+    guideId: string,
+    confirmed: boolean,
+    updatedBy?: string,
+  ) {
+    if (confirmed !== true) {
+      throw new BadRequestException(
+        'Debes confirmar que la guia fue validada como autorizada en el portal SRI.',
+      );
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const guide = await this.findGuideOrFail(guideId, manager);
+      const previousEmissionState = String(guide.estado_emision || '').trim();
+      const previousSriState = String(guide.sri_estado || '').trim();
+      if (previousEmissionState !== '0' && previousSriState !== '0') {
+        throw new BadRequestException(
+          'La confirmacion administrativa solo esta disponible para guias con estado SRI 0.',
+        );
+      }
+
+      const validatedBy = this.resolveUser(updatedBy);
+      const validatedAt = new Date();
+      const previousAuthorizationResponse =
+        guide.sri_authorization_response &&
+        typeof guide.sri_authorization_response === 'object'
+          ? guide.sri_authorization_response
+          : {};
+
+      guide.estado_emision = 'AUTORIZADA';
+      guide.sri_estado = 'AUTORIZADO';
+      guide.fecha_autorizacion = validatedAt;
+      guide.updated_by = validatedBy;
+      guide.sri_authorization_response = {
+        ...previousAuthorizationResponse,
+        validacion_manual_administrativa: {
+          confirmada: true,
+          validada_por: validatedBy,
+          validada_en: validatedAt.toISOString(),
+          estado_emision_previo: previousEmissionState,
+          estado_sri_previo: previousSriState,
+        },
+      };
+      guide.sri_messages = [
+        ...(Array.isArray(guide.sri_messages) ? guide.sri_messages : []),
+        {
+          identificador: 'VALIDACION_MANUAL_ADMINISTRATIVA',
+          mensaje:
+            'Autorizacion confirmada manualmente despues de validarla en el portal SRI.',
+          informacionAdicional: `Responsable: ${validatedBy}`,
+          tipo: 'INFORMACION',
+        },
+      ];
+
+      const saved = await manager.save(GuiaRemisionElectronica, guide);
+      this.clearGuideStatusTracking(saved.id);
+      this.emitGuideStatusUpdate(saved, 'manual');
+      return this.toGuideResponse(saved);
+    });
+  }
+
   async getXmlContent(
     guideId: string,
     kind: 'unsigned' | 'signed' | 'authorized' = 'signed',
@@ -1360,6 +1449,11 @@ export class GuiaRemisionElectronicaService
     });
     if (!guide) {
       throw new NotFoundException('La guía de remisión no existe.');
+    }
+    if (kind === 'signed' && !this.isGuideAuthorized(guide)) {
+      throw new BadRequestException(
+        'El XML firmado solo esta disponible cuando la guia se encuentra autorizada.',
+      );
     }
     const xml =
       kind === 'signed'
@@ -2290,7 +2384,7 @@ export class GuiaRemisionElectronicaService
 
   private emitGuideStatusUpdate(
     guide: GuiaRemisionElectronica,
-    source: 'generate' | 'authorize' | 'consult' | 'tracker',
+    source: 'generate' | 'authorize' | 'consult' | 'tracker' | 'manual',
   ) {
     const payload = this.toGuideResponse(guide);
     this.guideStatusGateway.emitGuideStatusUpdate({
@@ -2335,6 +2429,7 @@ export class GuiaRemisionElectronicaService
       has_xml_authorized: Boolean(authorizedXml),
       created_at: guide.created_at,
       updated_at: guide.updated_at,
+      updated_by: guide.updated_by,
     };
   }
 

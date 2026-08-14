@@ -283,6 +283,28 @@ export class GuiaRemisionElectronicaController {
     };
   }
 
+  @Post(':guideId/confirmar-autorizacion-manual')
+  @ApiOperation({
+    summary:
+      'Confirmar administrativamente una autorizacion verificada en el portal SRI',
+  })
+  async confirmManualAuthorization(
+    @Headers('x-role-name') roleName: string | undefined,
+    @Param('guideId') guideId: string,
+    @Body('confirmed') confirmed: boolean,
+    @Body('updated_by') updatedBy?: string,
+  ) {
+    this.service.assertAdministratorOrSuperAdministratorRole(roleName);
+    return {
+      message: 'Autorizacion SRI confirmada administrativamente.',
+      data: await this.service.confirmManualAuthorization(
+        guideId,
+        confirmed,
+        updatedBy,
+      ),
+    };
+  }
+
   @Get(':guideId/xml')
   @ApiOperation({ summary: 'Descargar XML de la guia generada' })
   @ApiQuery({

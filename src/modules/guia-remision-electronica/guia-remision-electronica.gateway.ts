@@ -5,7 +5,7 @@ import type { Server } from 'socket.io';
 type GuideStatusSocketPayload = {
   guideId: string;
   transferId: string;
-  source: 'generate' | 'authorize' | 'consult' | 'tracker';
+  source: 'generate' | 'authorize' | 'consult' | 'tracker' | 'manual';
   guide: Record<string, unknown>;
 };
 
