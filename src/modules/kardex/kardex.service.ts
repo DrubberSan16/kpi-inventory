@@ -113,6 +113,12 @@ export class KardexService extends CrudService<Kardex> {
   private readonly logger = new Logger(KardexService.name);
   private readonly importJobs = new Map<string, InventoryImportJobState>();
   private readonly importRoot: string;
+  private readonly visibleProductJoinCondition = [
+    'producto.id = kardex.producto_id',
+    'producto.is_deleted = false',
+    "NULLIF(BTRIM(producto.codigo), '') IS NOT NULL",
+    "NULLIF(BTRIM(producto.nombre), '') IS NOT NULL",
+  ].join(' AND ');
 
   constructor(
     @InjectRepository(Kardex)
@@ -274,10 +280,10 @@ export class KardexService extends CrudService<Kardex> {
         'bodega',
         'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
       )
-      .leftJoin(
+      .innerJoin(
         Producto,
         'producto',
-        'producto.id = kardex.producto_id AND producto.is_deleted = false',
+        this.visibleProductJoinCondition,
       )
       .where('kardex.is_deleted = false');
 
@@ -365,10 +371,10 @@ export class KardexService extends CrudService<Kardex> {
         'bodega',
         'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
       )
-      .leftJoin(
+      .innerJoin(
         Producto,
         'producto',
-        'producto.id = kardex.producto_id AND producto.is_deleted = false',
+        this.visibleProductJoinCondition,
       )
       .leftJoin(
         Linea,
@@ -591,10 +597,10 @@ export class KardexService extends CrudService<Kardex> {
         'bodega',
         'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
       )
-      .leftJoin(
+      .innerJoin(
         Producto,
         'producto',
-        'producto.id = kardex.producto_id AND producto.is_deleted = false',
+        this.visibleProductJoinCondition,
       )
       .leftJoin(
         Linea,
