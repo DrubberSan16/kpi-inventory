@@ -316,6 +316,14 @@ export class GuiaRemisionElectronicaService
   }
 
   assertSuperAdministratorRole(roleName?: string) {
+    if (!this.isSuperAdministratorRole(roleName)) {
+      throw new ForbiddenException(
+        'Solo el Super Administrador puede gestionar la firma global SRI.',
+      );
+    }
+  }
+
+  private isSuperAdministratorRole(roleName?: string) {
     const normalizedRole = String(roleName || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
@@ -327,11 +335,7 @@ export class GuiaRemisionElectronicaService
       'SUPER_ADMINISTRADOR',
       'SUPER ADMIN',
     ]);
-    if (!allowedRoles.has(normalizedRole)) {
-      throw new ForbiddenException(
-        'Solo el Super Administrador puede gestionar la firma global SRI.',
-      );
-    }
+    return allowedRoles.has(normalizedRole);
   }
 
   assertAdministratorOrSuperAdministratorRole(roleName?: string) {
@@ -963,7 +967,11 @@ export class GuiaRemisionElectronicaService
     return this.toGuideResponse(guide);
   }
 
-  async generateFromTransfer(transferId: string, dto: GenerateGuideFromTransferDto) {
+  async generateFromTransfer(
+    transferId: string,
+    dto: GenerateGuideFromTransferDto,
+    roleName?: string,
+  ) {
     return this.dataSource.transaction(async (manager) => {
       const context = await this.loadGuideContext(transferId, manager);
       const userName = this.resolveUser(dto.updated_by || dto.created_by);
@@ -1023,10 +1031,16 @@ export class GuiaRemisionElectronicaService
       const shouldRegenerateExistingGuide = Boolean(
         existingGuide && dto.forzar_regeneracion !== false,
       );
+      const existingGuideIsAuthorized = Boolean(
+        existingGuide && this.isGuideAuthorized(existingGuide),
+      );
 
-      if (existingGuide && this.isGuideAuthorized(existingGuide)) {
-        throw new BadRequestException(
-          'La guía ya fue autorizada por el SRI. Solo puedes visualizarla o descargar el XML autorizado y su RIDE.',
+      if (
+        existingGuideIsAuthorized &&
+        !this.isSuperAdministratorRole(roleName)
+      ) {
+        throw new ForbiddenException(
+          'Solo el Super Administrador puede regenerar una guía ya autorizada por el SRI.',
         );
       }
 
@@ -1126,12 +1140,42 @@ export class GuiaRemisionElectronicaService
       const enrichedDetails = await this.enrichTransferDetails(context.details);
       const effectiveSupplier =
         context.supplier || this.buildSupplierContextFromDto(dto);
-      const infoAdicional = this.buildInfoAdicional(
+      let infoAdicional: Record<string, unknown> = this.buildInfoAdicional(
         dto,
         lockedConfig,
         context,
         effectiveSupplier,
       );
+      if (existingGuideIsAuthorized && existingGuide) {
+        const previousInfo =
+          existingGuide.info_adicional &&
+          typeof existingGuide.info_adicional === 'object'
+            ? existingGuide.info_adicional
+            : {};
+        const previousHistory = Array.isArray(
+          (previousInfo as Record<string, unknown>)
+            .historial_regeneraciones_autorizadas,
+        )
+          ? ((previousInfo as Record<string, unknown>)
+              .historial_regeneraciones_autorizadas as unknown[])
+          : [];
+        infoAdicional = {
+          ...infoAdicional,
+          historial_regeneraciones_autorizadas: [
+            ...previousHistory,
+            {
+              numero_guia: existingGuide.numero_guia,
+              clave_acceso: existingGuide.clave_acceso,
+              estado_emision: existingGuide.estado_emision,
+              estado_sri: existingGuide.sri_estado,
+              numero_autorizacion: existingGuide.numero_autorizacion,
+              fecha_autorizacion: existingGuide.fecha_autorizacion,
+              regenerada_por: userName,
+              regenerada_en: new Date().toISOString(),
+            },
+          ],
+        };
+      }
 
       const resolvedTransportIdentification = this.resolveGuideTransportIdentification(
         dto,
@@ -1233,7 +1277,21 @@ export class GuiaRemisionElectronicaService
         info_adicional: infoAdicional,
       };
 
-      const xmlUnsigned = this.buildGuideXml(context, lockedConfig, model, enrichedDetails, infoAdicional);
+      const xmlInfoAdicional = Object.entries(infoAdicional).reduce<
+        Record<string, string>
+      >((values, [key, value]) => {
+        if (typeof value === 'string') {
+          values[key] = value;
+        }
+        return values;
+      }, {});
+      const xmlUnsigned = this.buildGuideXml(
+        context,
+        lockedConfig,
+        model,
+        enrichedDetails,
+        xmlInfoAdicional,
+      );
       const xmlSigned = await this.signXmlWithCertificate(
         xmlUnsigned,
         globalSignature,

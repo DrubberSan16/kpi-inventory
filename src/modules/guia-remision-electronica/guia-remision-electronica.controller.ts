@@ -243,12 +243,17 @@ export class GuiaRemisionElectronicaController {
   })
   @ApiBody({ type: GenerateGuideFromTransferDto })
   async generateFromTransfer(
+    @Headers('x-role-name') roleName: string | undefined,
     @Param('transferId') transferId: string,
     @Body() payload: GenerateGuideFromTransferDto,
   ) {
     return {
       message: 'Guia de remision generada correctamente.',
-      data: await this.service.generateFromTransfer(transferId, payload),
+      data: await this.service.generateFromTransfer(
+        transferId,
+        payload,
+        roleName,
+      ),
     };
   }
 
