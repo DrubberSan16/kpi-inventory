@@ -344,6 +344,7 @@ export class KardexService extends CrudService<Kardex> {
       producto_id?: string | null;
       linea_id?: string | null;
       categoria_id?: string | null;
+      tipo_movimiento?: string | null;
       page?: number | null;
       limit?: number | null;
     },
@@ -427,6 +428,11 @@ export class KardexService extends CrudService<Kardex> {
     }
     if (categoryId) {
       baseQb.andWhere('producto.categoria_id = :categoryId', { categoryId });
+    }
+
+    const normalizedType = this.normalizeMovementType(params?.tipo_movimiento);
+    if (normalizedType) {
+      baseQb.andWhere('kardex.tipo_movimiento = :normalizedType', { normalizedType });
     }
 
     this.applyMaterialSearchFilter(baseQb, search);
@@ -578,6 +584,7 @@ export class KardexService extends CrudService<Kardex> {
       hasta?: string | null;
       search?: string | null;
       bodega_id?: string | null;
+      tipo_movimiento?: string | null;
     },
     sucursalId?: string | null,
   ) {
@@ -647,6 +654,11 @@ export class KardexService extends CrudService<Kardex> {
 
     if (warehouseId) {
       qb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
+    }
+
+    const normalizedType = this.normalizeMovementType(params?.tipo_movimiento);
+    if (normalizedType) {
+      qb.andWhere('kardex.tipo_movimiento = :normalizedType', { normalizedType });
     }
 
     this.applyMaterialSearchFilter(qb, search);

@@ -67,6 +67,7 @@ export class KardexController extends CrudController<Kardex> {
   @ApiQuery({ name: 'producto_id', required: false, type: String })
   @ApiQuery({ name: 'linea_id', required: false, type: String })
   @ApiQuery({ name: 'categoria_id', required: false, type: String })
+  @ApiQuery({ name: 'tipo_movimiento', required: false, type: String, example: 'INGRESO' })
   async getMaterialSummary(
     @Query() query: PaginationQueryDto,
     @Query('desde') desde?: string,
@@ -76,6 +77,7 @@ export class KardexController extends CrudController<Kardex> {
     @Query('producto_id') productoId?: string,
     @Query('linea_id') lineaId?: string,
     @Query('categoria_id') categoriaId?: string,
+    @Query('tipo_movimiento') tipoMovimiento?: string,
     @Req() req?: any,
   ) {
     return {
@@ -89,6 +91,7 @@ export class KardexController extends CrudController<Kardex> {
           producto_id: productoId,
           linea_id: lineaId,
           categoria_id: categoriaId,
+          tipo_movimiento: tipoMovimiento,
           page: query.page,
           limit: query.limit,
         },
@@ -110,19 +113,21 @@ export class KardexController extends CrudController<Kardex> {
   @ApiQuery({ name: 'hasta', required: false, type: String, example: '2026-04-15' })
   @ApiQuery({ name: 'search', required: false, type: String })
   @ApiQuery({ name: 'bodega_id', required: false, type: String })
+  @ApiQuery({ name: 'tipo_movimiento', required: false, type: String, example: 'INGRESO' })
   async getMaterialMovements(
     @Param('productoId') productoId: string,
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
     @Query('search') search?: string,
     @Query('bodega_id') bodegaId?: string,
+    @Query('tipo_movimiento') tipoMovimiento?: string,
     @Req() req?: any,
   ) {
     return {
       message: 'Detalle de kardex por material obtenido correctamente.',
       data: await this.service.getMaterialMovements(
         productoId,
-        { desde, hasta, search, bodega_id: bodegaId },
+        { desde, hasta, search, bodega_id: bodegaId, tipo_movimiento: tipoMovimiento },
         getSucursalScopeId(req),
       ),
     };
