@@ -253,7 +253,11 @@ export class StockBodegaService
       .clone()
       .select('stock')
       .addSelect(
-        `TRIM(CONCAT(COALESCE(producto.codigo || ' - ', ''), COALESCE(producto.nombre, 'Sin material')))`,
+        `TRIM(CONCAT(
+          COALESCE(producto.codigo || ' - ', ''),
+          COALESCE(producto.nombre, 'Sin material'),
+          CASE WHEN producto.descripcion IS NOT NULL AND TRIM(producto.descripcion) <> '' THEN ' (' || TRIM(producto.descripcion) || ')' ELSE '' END
+        ))`,
         'producto_label',
       )
       .addSelect(
