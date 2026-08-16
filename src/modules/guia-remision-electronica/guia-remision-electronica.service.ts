@@ -2914,7 +2914,7 @@ export class GuiaRemisionElectronicaService
       value instanceof Date ? value : value ? new Date(value) : new Date();
     if (Number.isNaN(parsed.getTime())) {
       throw new BadRequestException(
-        `Fecha invÃ¡lida para guÃ­a de remisiÃ³n: ${value}`,
+        `Fecha inválida para guía de remisión: ${value}`,
       );
     }
 
@@ -3140,19 +3140,19 @@ export class GuiaRemisionElectronicaService
 
     if (identificationType === '04' && digits.length !== 13) {
       throw new BadRequestException(
-        'El tipo de identificaciÃ³n del transportista es RUC (04), por lo que debe tener 13 dÃ­gitos segÃºn la ficha tÃ©cnica del SRI.',
+        'El tipo de identificación del transportista es RUC (04), por lo que debe tener 13 dígitos según la ficha técnica del SRI.',
       );
     }
 
     if (identificationType === '05' && digits.length !== 10) {
       throw new BadRequestException(
-        'El tipo de identificaciÃ³n del transportista es CÃ©dula (05), por lo que debe tener 10 dÃ­gitos segÃºn la ficha tÃ©cnica del SRI.',
+        'El tipo de identificación del transportista es Cédula (05), por lo que debe tener 10 dígitos según la ficha técnica del SRI.',
       );
     }
 
     if (text.length > 13) {
       throw new BadRequestException(
-        'La identificaciÃ³n del transportista supera la longitud mÃ¡xima permitida por el SRI para la guÃ­a de remisiÃ³n.',
+        'La identificación del transportista supera la longitud máxima permitida por el SRI para la guía de remisión.',
       );
     }
 
