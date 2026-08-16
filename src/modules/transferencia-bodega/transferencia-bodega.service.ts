@@ -1663,17 +1663,26 @@ export class TransferenciaBodegaService {
     const nuevo = this.getStockNuevoAmount(stockRow);
     const usado = this.getStockUsadoAmount(stockRow);
     const critico = this.getStockCriticoAmount(stockRow);
+
+    // Compatibilidad con stock crítico histórico: solo se usa automáticamente
+    // cuando no existe disponibilidad NUEVO/USADO.
     if (nuevo <= 0.000001 && usado <= 0.000001 && critico > 0.000001) {
       return 'CRITICO';
     }
 
-    if (!Boolean(stockRow.es_usado)) return 'NUEVO';
-    if (!requestedCondition) {
-      throw new BadRequestException(
-        'Debes indicar si la transferencia manual se realiza desde stock NUEVO o USADO.',
-      );
-    }
-    return requestedCondition;
+    // Para transferencias manuales modernas el frontend puede enviar dos filas
+    // del mismo producto: una NUEVO y otra USADO. Se debe respetar la condición
+    // solicitada sin depender del flag legado es_usado de la fila de stock.
+    if (requestedCondition) return requestedCondition;
+
+    // Compatibilidad con clientes antiguos que no enviaban condición cuando
+    // solo existía un único tipo de stock operativo.
+    if (nuevo > 0.000001 && usado <= 0.000001) return 'NUEVO';
+    if (usado > 0.000001 && nuevo <= 0.000001) return 'USADO';
+
+    throw new BadRequestException(
+      'Debes indicar cuánto se transfiere desde stock NUEVO y cuánto desde stock USADO.',
+    );
   }
 
   private async getActiveReservedQuantity(
