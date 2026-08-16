@@ -203,6 +203,13 @@ export class KardexController extends CrudController<Kardex> {
             properties: {
               producto_id: { type: 'string', format: 'uuid' },
               cantidad: { type: 'number', example: 3 },
+              condicion_material: {
+                type: 'string',
+                enum: ['NUEVO', 'USADO'],
+                nullable: true,
+                description:
+                  'Condicion del stock. En ingresos, si se omite se usa NUEVO. En egresos con stock usado habilitado debe indicarse.',
+              },
               observacion: { type: 'string', nullable: true },
             },
           },
@@ -257,6 +264,11 @@ export class KardexController extends CrudController<Kardex> {
         bodega_id: { type: 'string', format: 'uuid' },
         producto_id: { type: 'string', format: 'uuid' },
         cantidad: { type: 'number', example: 5 },
+        condicion_material: {
+          type: 'string',
+          enum: ['NUEVO', 'USADO'],
+          nullable: true,
+        },
         observacion: { type: 'string', nullable: true },
         created_by: { type: 'string', nullable: true },
         updated_by: { type: 'string', nullable: true },

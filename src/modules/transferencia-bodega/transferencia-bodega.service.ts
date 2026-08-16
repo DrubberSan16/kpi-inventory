@@ -37,6 +37,7 @@ type PreparedTransferDetail = {
   codigoProducto: string | null;
   nombreProducto: string;
   orderUnitCost: number;
+  requestedCondition: 'NUEVO' | 'USADO' | null;
 };
 
 type DocumentAnnulmentActor = {
@@ -48,6 +49,19 @@ type DocumentAnnulmentActor = {
 @Injectable()
 export class TransferenciaBodegaService {
   private readonly logger = new Logger(TransferenciaBodegaService.name);
+  private readonly closedWorkOrderStatuses = [
+    'CANCELLED',
+    'CANCELED',
+    'ANULADA',
+    'ANULADO',
+    'VOID',
+    'VOIDED',
+    'CLOSED',
+    'CERRADA',
+    'CERRADO',
+    'DONE',
+    'COMPLETED',
+  ];
 
   constructor(
     @InjectRepository(TransferenciaBodega)
@@ -498,21 +512,37 @@ export class TransferenciaBodegaService {
             )}, requerido ${quantity.toFixed(2)}.`,
           );
         }
-        if (!order && currentSourceStock < quantity) {
-          throw new BadRequestException(
-            `Stock insuficiente en ${sourceWarehouse.nombre} para ${product.nombre}. Disponible ${currentSourceStock.toFixed(
-              2,
-            )}, requerido ${quantity.toFixed(2)}.`,
+
+        const materialCondition = this.resolveTransferStockCondition(
+          sourceStock,
+          Boolean(order),
+          detail.requestedCondition,
+        );
+        if (!order) {
+          const reservedQuantity = await this.getActiveReservedQuantity(
+            manager,
+            sourceWarehouse.id,
+            product.id,
           );
+          const availableForCondition = this.getTransferableStockByCondition(
+            sourceStock,
+            materialCondition,
+            reservedQuantity,
+          );
+          if (availableForCondition + 0.000001 < quantity) {
+            throw new BadRequestException(
+              `Stock ${materialCondition.toLowerCase()} insuficiente en ${sourceWarehouse.nombre} para ${product.nombre}. Disponible para transferir ${availableForCondition.toFixed(
+                2,
+              )}, reservado en ordenes de trabajo ${reservedQuantity.toFixed(
+                2,
+              )}, requerido ${quantity.toFixed(2)}.`,
+            );
+          }
         }
 
         const unitCost = this.resolveUnitCost(orderDetail, product, sourceStock);
         const subtotal = quantity * unitCost;
         totalCost += subtotal;
-        const materialCondition = this.resolveTransferStockCondition(
-          sourceStock,
-          Boolean(order),
-        );
 
         if (order && movementReceipt) {
           currentSourceStock = this.applyNewStockDelta(sourceStock, quantity);
@@ -921,7 +951,7 @@ export class TransferenciaBodegaService {
                 },
               })
             : null;
-          const materialCondition = this.normalizeStockCondition(
+          const materialCondition = this.normalizePersistedStockCondition(
             originalOutDetail?.condicion_material,
           );
 
@@ -1406,6 +1436,7 @@ export class TransferenciaBodegaService {
           codigoProducto: item.codigo_producto || null,
           nombreProducto: item.nombre_producto,
           orderUnitCost: this.toNumber(item.costo_unitario, 0),
+          requestedCondition: 'NUEVO' as const,
         }))
         .filter((item) => item.cantidad > 0);
     }
@@ -1438,6 +1469,7 @@ export class TransferenciaBodegaService {
         codigoProducto: orderDetail.codigo_producto || null,
         nombreProducto: orderDetail.nombre_producto,
         orderUnitCost: this.toNumber(orderDetail.costo_unitario, 0),
+        requestedCondition: 'NUEVO',
       };
     });
   }
@@ -1479,6 +1511,9 @@ export class TransferenciaBodegaService {
           product.costo_promedio ?? product.ultimo_costo,
           0,
         ),
+        requestedCondition: detail.condicion_material
+          ? this.normalizeRequestedStockCondition(detail.condicion_material)
+          : null,
       });
     }
     return prepared;
@@ -1590,7 +1625,28 @@ export class TransferenciaBodegaService {
     return this.setStockBreakdown(stockRow, nextNuevo);
   }
 
-  private normalizeStockCondition(value: unknown): 'NUEVO' | 'USADO' | 'CRITICO' {
+  private getStockUsadoAmount(stockRow: StockBodega) {
+    return Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
+  }
+
+  private getOperationalStockAmount(stockRow: StockBodega) {
+    const primary =
+      this.getStockNuevoAmount(stockRow) + this.getStockUsadoAmount(stockRow);
+    return primary > 0.000001 ? primary : this.getStockCriticoAmount(stockRow);
+  }
+
+  private normalizeRequestedStockCondition(value: unknown): 'NUEVO' | 'USADO' {
+    const normalized = String(value || '').trim().toUpperCase();
+    if (normalized === 'NUEVO') return 'NUEVO';
+    if (normalized === 'USADO') return 'USADO';
+    throw new BadRequestException(
+      'La condicion del material para una transferencia manual debe ser NUEVO o USADO.',
+    );
+  }
+
+  private normalizePersistedStockCondition(
+    value: unknown,
+  ): 'NUEVO' | 'USADO' | 'CRITICO' {
     const normalized = String(value || '').trim().toUpperCase();
     if (normalized === 'USADO') return 'USADO';
     if (normalized === 'CRITICO') return 'CRITICO';
@@ -1600,11 +1656,67 @@ export class TransferenciaBodegaService {
   private resolveTransferStockCondition(
     stockRow: StockBodega,
     isPurchaseOrderTransfer: boolean,
-  ): 'NUEVO' | 'CRITICO' {
+    requestedCondition?: 'NUEVO' | 'USADO' | null,
+  ): 'NUEVO' | 'USADO' | 'CRITICO' {
     if (isPurchaseOrderTransfer) return 'NUEVO';
+
     const nuevo = this.getStockNuevoAmount(stockRow);
-    const usado = Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
-    return nuevo <= 0.000001 && usado <= 0.000001 ? 'CRITICO' : 'NUEVO';
+    const usado = this.getStockUsadoAmount(stockRow);
+    const critico = this.getStockCriticoAmount(stockRow);
+    if (nuevo <= 0.000001 && usado <= 0.000001 && critico > 0.000001) {
+      return 'CRITICO';
+    }
+
+    if (!Boolean(stockRow.es_usado)) return 'NUEVO';
+    if (!requestedCondition) {
+      throw new BadRequestException(
+        'Debes indicar si la transferencia manual se realiza desde stock NUEVO o USADO.',
+      );
+    }
+    return requestedCondition;
+  }
+
+  private async getActiveReservedQuantity(
+    manager: EntityManager,
+    bodegaId: string,
+    productoId: string,
+  ) {
+    const closedStatuses = this.closedWorkOrderStatuses
+      .map((status) => `'${status.replace(/'/g, "''")}'`)
+      .join(', ');
+    const rows = await manager.query(
+      `SELECT COALESCE(SUM(COALESCE(reserva.cantidad, 0)), 0) AS cantidad
+       FROM kpi_inventory.tb_reserva_stock reserva
+       INNER JOIN kpi_process.tb_work_order work_order
+         ON work_order.id = reserva.work_order_id
+        AND work_order.is_deleted = false
+       WHERE reserva.is_deleted = false
+         AND UPPER(TRIM(COALESCE(reserva.estado, ''))) = 'RESERVADO'
+         AND reserva.producto_id = $1
+         AND reserva.bodega_id = $2
+         AND UPPER(TRIM(COALESCE(work_order.status_workflow, 'PLANNED'))) NOT IN (${closedStatuses})`,
+      [productoId, bodegaId],
+    );
+    return Math.max(this.toNumber(rows?.[0]?.cantidad, 0), 0);
+  }
+
+  private getTransferableStockByCondition(
+    stockRow: StockBodega,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+    reservedQuantity: number,
+  ) {
+    const totalTransferable = Math.max(
+      this.getOperationalStockAmount(stockRow) -
+        Math.max(this.toNumber(reservedQuantity, 0), 0),
+      0,
+    );
+    const conditionStock =
+      condition === 'USADO'
+        ? this.getStockUsadoAmount(stockRow)
+        : condition === 'CRITICO'
+          ? this.getStockCriticoAmount(stockRow)
+          : this.getStockNuevoAmount(stockRow);
+    return Math.max(Math.min(conditionStock, totalTransferable), 0);
   }
 
   private applyStockDeltaByCondition(
@@ -1614,10 +1726,13 @@ export class TransferenciaBodegaService {
   ) {
     if (condition === 'NUEVO') return this.applyNewStockDelta(stockRow, delta);
     const currentNuevo = this.getStockNuevoAmount(stockRow);
-    const currentUsado = Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
+    const currentUsado = this.getStockUsadoAmount(stockRow);
     const currentCritico = this.getStockCriticoAmount(stockRow);
     const current = condition === 'USADO' ? currentUsado : currentCritico;
     const next = current + this.toNumber(delta, 0);
+    if (condition === 'USADO' && delta > 0) {
+      stockRow.es_usado = true;
+    }
     if (next < -0.000001) {
       throw new BadRequestException(
         `Stock ${condition === 'USADO' ? 'usado' : 'critico'} insuficiente. Disponible ${current.toFixed(2)}, requerido ${Math.abs(delta).toFixed(2)}.`,

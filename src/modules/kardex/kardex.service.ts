@@ -41,6 +41,7 @@ type ManualMovementPayload = {
   bodega_id?: string;
   producto_id?: string;
   cantidad?: string | number;
+  condicion_material?: string | null;
   observacion?: string | null;
   created_by?: string | null;
   updated_by?: string | null;
@@ -49,6 +50,7 @@ type ManualMovementPayload = {
 type MovementDocumentDetailPayload = {
   producto_id?: string;
   cantidad?: string | number;
+  condicion_material?: string | null;
   observacion?: string | null;
 };
 
@@ -111,6 +113,19 @@ type InventoryImportJobState = {
 @Injectable()
 export class KardexService extends CrudService<Kardex> {
   private readonly logger = new Logger(KardexService.name);
+  private readonly closedWorkOrderStatuses = [
+    'CANCELLED',
+    'CANCELED',
+    'ANULADA',
+    'ANULADO',
+    'VOID',
+    'VOIDED',
+    'CLOSED',
+    'CERRADA',
+    'CERRADO',
+    'DONE',
+    'COMPLETED',
+  ];
   private readonly importJobs = new Map<string, InventoryImportJobState>();
   private readonly importRoot: string;
   private readonly visibleProductJoinCondition = [
@@ -1061,23 +1076,43 @@ export class KardexService extends CrudService<Kardex> {
           userName,
         });
         const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
-        if (tipo === 'SALIDA' && stockAnterior < cantidad) {
-          throw new BadRequestException(
-            `Stock insuficiente para ${producto.nombre}. Disponible ${stockAnterior.toFixed(
-              2,
-            )}, requerido ${cantidad.toFixed(2)}.`,
+        const condition = this.resolveManualMovementCondition(
+          stockRow,
+          tipo,
+          detail?.condicion_material,
+        );
+        if (tipo === 'SALIDA') {
+          const reservedQuantity = await this.getActiveReservedQuantity(
+            manager,
+            bodega.id,
+            producto.id,
           );
+          const availableForCondition = this.getAvailableStockByCondition(
+            stockRow,
+            condition,
+            reservedQuantity,
+          );
+          if (availableForCondition + 0.000001 < cantidad) {
+            throw new BadRequestException(
+              `Stock ${condition.toLowerCase()} insuficiente para ${producto.nombre}. Disponible para egreso ${availableForCondition.toFixed(
+                2,
+              )}, reservado en ordenes de trabajo ${reservedQuantity.toFixed(
+                2,
+              )}, requerido ${cantidad.toFixed(2)}.`,
+            );
+          }
         }
 
         const costoUnitario = this.resolveProductoUnitCost(producto, stockRow);
         const subtotal = cantidad * costoUnitario;
-        const stockAdjustment =
-          tipo === 'INGRESO'
-            ? {
-                total: this.applyNewStockDelta(stockRow, cantidad),
-                condition: 'NUEVO' as const,
-              }
-            : this.applyOutgoingStockWithCriticalFallback(stockRow, cantidad);
+        const stockAdjustment = {
+          total: this.applyStockDeltaByCondition(
+            stockRow,
+            tipo === 'INGRESO' ? cantidad : -cantidad,
+            condition,
+          ),
+          condition,
+        };
         const stockFisicoAnterior = this.toNumber(
           stockRow.stock_fisico,
           stockAnterior,
@@ -1583,6 +1618,7 @@ export class KardexService extends CrudService<Kardex> {
         {
           producto_id: payload.producto_id,
           cantidad: payload.cantidad,
+          condicion_material: payload.condicion_material,
           observacion: payload.observacion,
         },
       ],
@@ -2522,22 +2558,125 @@ export class KardexService extends CrudService<Kardex> {
     );
   }
 
-  private applyOutgoingStockWithCriticalFallback(
+  private getStockUsadoAmount(stockRow: StockBodega) {
+    return Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
+  }
+
+  private getOperationalStockAmount(stockRow: StockBodega) {
+    const primary =
+      this.getStockNuevoAmount(stockRow) + this.getStockUsadoAmount(stockRow);
+    return primary > 0.000001 ? primary : this.getStockCriticoAmount(stockRow);
+  }
+
+  private normalizeManualMaterialCondition(value: unknown): 'NUEVO' | 'USADO' {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    if (normalized === 'NUEVO') return 'NUEVO';
+    if (normalized === 'USADO') return 'USADO';
+    throw new BadRequestException(
+      'La condicion del material debe ser NUEVO o USADO.',
+    );
+  }
+
+  private resolveManualMovementCondition(
     stockRow: StockBodega,
-    quantity: number,
-  ) {
-    const stockNuevo = this.getStockNuevoAmount(stockRow);
-    const stockUsado = Math.max(this.toNumber(stockRow.stock_usado, 0), 0);
-    if (stockNuevo <= 0.000001 && stockUsado <= 0.000001) {
-      return {
-        total: this.applyCriticalStockDelta(stockRow, -quantity),
-        condition: 'CRITICO',
-      } as const;
+    tipo: MovementType,
+    requestedCondition: unknown,
+  ): 'NUEVO' | 'USADO' | 'CRITICO' {
+    const nuevo = this.getStockNuevoAmount(stockRow);
+    const usado = this.getStockUsadoAmount(stockRow);
+    const critico = this.getStockCriticoAmount(stockRow);
+
+    if (
+      tipo === 'SALIDA' &&
+      nuevo <= 0.000001 &&
+      usado <= 0.000001 &&
+      critico > 0.000001
+    ) {
+      return 'CRITICO';
     }
-    return {
-      total: this.applyNewStockDelta(stockRow, -quantity),
-      condition: 'NUEVO',
-    } as const;
+
+    const raw = String(requestedCondition ?? '').trim();
+    if (tipo === 'INGRESO') {
+      return raw ? this.normalizeManualMaterialCondition(raw) : 'NUEVO';
+    }
+
+    if (!Boolean(stockRow.es_usado)) return 'NUEVO';
+    if (!raw) {
+      throw new BadRequestException(
+        'Debes indicar si el egreso se realiza desde stock NUEVO o USADO.',
+      );
+    }
+    return this.normalizeManualMaterialCondition(raw);
+  }
+
+  private async getActiveReservedQuantity(
+    manager: EntityManager,
+    bodegaId: string,
+    productoId: string,
+  ) {
+    const closedStatuses = this.closedWorkOrderStatuses
+      .map((status) => `'${status.replace(/'/g, "''")}'`)
+      .join(', ');
+    const rows = await manager.query(
+      `SELECT COALESCE(SUM(COALESCE(reserva.cantidad, 0)), 0) AS cantidad
+       FROM kpi_inventory.tb_reserva_stock reserva
+       INNER JOIN kpi_process.tb_work_order work_order
+         ON work_order.id = reserva.work_order_id
+        AND work_order.is_deleted = false
+       WHERE reserva.is_deleted = false
+         AND UPPER(TRIM(COALESCE(reserva.estado, ''))) = 'RESERVADO'
+         AND reserva.producto_id = $1
+         AND reserva.bodega_id = $2
+         AND UPPER(TRIM(COALESCE(work_order.status_workflow, 'PLANNED'))) NOT IN (${closedStatuses})`,
+      [productoId, bodegaId],
+    );
+    return Math.max(this.toNumber(rows?.[0]?.cantidad, 0), 0);
+  }
+
+  private getAvailableStockByCondition(
+    stockRow: StockBodega,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+    reservedQuantity: number,
+  ) {
+    const totalAvailable = Math.max(
+      this.getOperationalStockAmount(stockRow) -
+        Math.max(this.toNumber(reservedQuantity, 0), 0),
+      0,
+    );
+    const conditionStock =
+      condition === 'USADO'
+        ? this.getStockUsadoAmount(stockRow)
+        : condition === 'CRITICO'
+          ? this.getStockCriticoAmount(stockRow)
+          : this.getStockNuevoAmount(stockRow);
+    return Math.max(Math.min(conditionStock, totalAvailable), 0);
+  }
+
+  private applyUsedStockDelta(stockRow: StockBodega, delta: number) {
+    const currentUsado = this.getStockUsadoAmount(stockRow);
+    const nextUsado = currentUsado + this.toNumber(delta, 0);
+    if (nextUsado < -0.000001) {
+      throw new BadRequestException(
+        `Stock usado insuficiente. Disponible ${currentUsado.toFixed(2)}, requerido ${Math.abs(delta).toFixed(2)}.`,
+      );
+    }
+    if (delta > 0) stockRow.es_usado = true;
+    return this.setStockBreakdown(
+      stockRow,
+      this.getStockNuevoAmount(stockRow),
+      nextUsado,
+      this.getStockCriticoAmount(stockRow),
+    );
+  }
+
+  private applyStockDeltaByCondition(
+    stockRow: StockBodega,
+    delta: number,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+  ) {
+    if (condition === 'USADO') return this.applyUsedStockDelta(stockRow, delta);
+    if (condition === 'CRITICO') return this.applyCriticalStockDelta(stockRow, delta);
+    return this.applyNewStockDelta(stockRow, delta);
   }
 
   private async createMovementArtifacts(

@@ -4,6 +4,7 @@ import {
   IsArray,
   IsBoolean,
   IsDateString,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -28,6 +29,16 @@ export class TransferenciaBodegaDetalleDto {
   @IsNumber()
   @Min(0.000001)
   cantidad: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Condicion del stock a transferir. En transferencias de orden de compra se fuerza NUEVO.',
+    enum: ['NUEVO', 'USADO'],
+  })
+  @IsOptional()
+  @IsString()
+  @IsIn(['NUEVO', 'USADO'])
+  condicion_material?: 'NUEVO' | 'USADO';
 
   @ApiPropertyOptional({ description: 'observacion' })
   @IsOptional()
