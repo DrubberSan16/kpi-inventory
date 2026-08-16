@@ -10,7 +10,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { randomUUID, createCipheriv, createDecipheriv, createHash } from 'crypto';
+import {
+  randomUUID,
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+} from 'crypto';
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -203,32 +208,57 @@ export class GuiaRemisionElectronicaService
 
     const rows = await this.guideRepo.query(
       `
+        WITH guide_recipients AS (
+          SELECT DISTINCT ON (guide.identificacion_destinatario)
+            TRIM(guide.identificacion_destinatario) AS identificacion_destinatario,
+            NULLIF(TRIM(guide.razon_social_destinatario), '') AS razon_social_destinatario,
+            NULLIF(TRIM(guide.dir_destinatario), '') AS dir_destinatario,
+            NULLIF(TRIM(guide.cod_estab_destino), '') AS cod_estab_destino,
+            COALESCE(guide.updated_at, guide.created_at) AS last_used_at
+          FROM kpi_inventory.tb_guia_remision_electronica guide
+          WHERE guide.is_deleted = false
+            AND NULLIF(TRIM(guide.identificacion_destinatario), '') IS NOT NULL
+          ORDER BY
+            guide.identificacion_destinatario,
+            COALESCE(guide.updated_at, guide.created_at) DESC NULLS LAST
+        ),
+        user_recipients AS (
+          SELECT DISTINCT ON (TRIM(app_user.identificacion))
+            TRIM(app_user.identificacion) AS identificacion_destinatario,
+            NULLIF(TRIM(app_user.name_surname), '') AS razon_social_destinatario,
+            COALESCE(app_user.updated_at, app_user.created_at) AS last_used_at
+          FROM kpi_security.tb_user app_user
+          WHERE app_user.is_deleted = false
+            AND COALESCE(app_user.es_destinatario, false) = true
+            AND NULLIF(TRIM(app_user.identificacion), '') IS NOT NULL
+          ORDER BY
+            TRIM(app_user.identificacion),
+            COALESCE(app_user.updated_at, app_user.created_at) DESC NULLS LAST
+        ),
+        recipients AS (
+          SELECT
+            COALESCE(users.identificacion_destinatario, guides.identificacion_destinatario)
+              AS identificacion_destinatario,
+            COALESCE(users.razon_social_destinatario, guides.razon_social_destinatario)
+              AS razon_social_destinatario,
+            guides.dir_destinatario,
+            guides.cod_estab_destino,
+            GREATEST(users.last_used_at, guides.last_used_at) AS last_used_at
+          FROM guide_recipients guides
+          FULL OUTER JOIN user_recipients users
+            ON users.identificacion_destinatario = guides.identificacion_destinatario
+        )
         SELECT
           recipients.identificacion_destinatario,
           recipients.razon_social_destinatario,
           recipients.dir_destinatario,
           recipients.cod_estab_destino,
           recipients.last_used_at
-        FROM (
-          SELECT DISTINCT ON (guide.identificacion_destinatario)
-            guide.identificacion_destinatario,
-            guide.razon_social_destinatario,
-            guide.dir_destinatario,
-            guide.cod_estab_destino,
-            COALESCE(guide.updated_at, guide.created_at) AS last_used_at
-          FROM kpi_inventory.tb_guia_remision_electronica guide
-          WHERE guide.is_deleted = false
-            AND NULLIF(TRIM(guide.identificacion_destinatario), '') IS NOT NULL
-            AND (
-              $2::text = ''
-              OR guide.identificacion_destinatario ILIKE '%' || $2::text || '%'
-              OR guide.razon_social_destinatario ILIKE '%' || $2::text || '%'
-              OR guide.dir_destinatario ILIKE '%' || $2::text || '%'
-            )
-          ORDER BY
-            guide.identificacion_destinatario,
-            COALESCE(guide.updated_at, guide.created_at) DESC NULLS LAST
-        ) recipients
+        FROM recipients
+        WHERE $2::text = ''
+          OR recipients.identificacion_destinatario ILIKE '%' || $2::text || '%'
+          OR recipients.razon_social_destinatario ILIKE '%' || $2::text || '%'
+          OR recipients.dir_destinatario ILIKE '%' || $2::text || '%'
         ORDER BY recipients.last_used_at DESC NULLS LAST
         LIMIT $1
       `,
@@ -367,7 +397,8 @@ export class GuiaRemisionElectronicaService
       normalizedRuc,
       false,
     );
-    const primaryEstablishment = this.pickPreferredEstablishment(establishments);
+    const primaryEstablishment =
+      this.pickPreferredEstablishment(establishments);
     const matrixEstablishment =
       establishments.find((item) => item.matriz === 'SI') || null;
     const specialTaxpayer = this.resolveSpecialTaxpayerInfo(
@@ -440,9 +471,8 @@ export class GuiaRemisionElectronicaService
       const rows = Array.isArray(payload) ? payload : [];
       const establishments = rows
         .map((item) => this.normalizeSriEstablishment(item))
-        .filter(
-          (item): item is SriEstablishmentRecord =>
-            Boolean(item?.numero_establecimiento || item?.direccion_completa),
+        .filter((item): item is SriEstablishmentRecord =>
+          Boolean(item?.numero_establecimiento || item?.direccion_completa),
         );
 
       if (!establishments.length && throwWhenEmpty) {
@@ -464,8 +494,7 @@ export class GuiaRemisionElectronicaService
       }
 
       const message =
-        error?.message ||
-        'No se pudo consultar los establecimientos del SRI.';
+        error?.message || 'No se pudo consultar los establecimientos del SRI.';
       this.logger.warn(
         `Error consultando establecimientos SRI (${normalizedRuc}): ${message}`,
       );
@@ -502,7 +531,9 @@ export class GuiaRemisionElectronicaService
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new BadRequestException(`${errorPrefix} HTTP ${response.status}.`);
+        throw new BadRequestException(
+          `${errorPrefix} HTTP ${response.status}.`,
+        );
       }
       return await response.json();
     } catch (error: any) {
@@ -528,10 +559,7 @@ export class GuiaRemisionElectronicaService
   ): SriEstablishmentRecord | null {
     if (!payload || typeof payload !== 'object') return null;
     const numeroEstablecimiento =
-      this.cleanOptionalText(
-        payload.numeroEstablecimiento,
-        3,
-      ) || null;
+      this.cleanOptionalText(payload.numeroEstablecimiento, 3) || null;
     const direccionCompleta =
       this.cleanOptionalText(payload.direccionCompleta, 300) || null;
     const matriz = this.cleanOptionalText(payload.matriz, 2) || null;
@@ -561,11 +589,15 @@ export class GuiaRemisionElectronicaService
       establishments.find(
         (item) =>
           item.matriz === 'SI' &&
-          String(item.estado || '').trim().toUpperCase() === 'ABIERTO',
+          String(item.estado || '')
+            .trim()
+            .toUpperCase() === 'ABIERTO',
       ) ||
       establishments.find(
         (item) =>
-          String(item.estado || '').trim().toUpperCase() === 'ABIERTO',
+          String(item.estado || '')
+            .trim()
+            .toUpperCase() === 'ABIERTO',
       ) ||
       establishments.find((item) => item.matriz === 'SI') ||
       establishments[0]
@@ -654,7 +686,9 @@ export class GuiaRemisionElectronicaService
         throw error;
       }
       const message = error?.message || 'No se pudo consultar el SRI.';
-      this.logger.warn(`Error consultando catastro SRI (${normalizedRuc}): ${message}`);
+      this.logger.warn(
+        `Error consultando catastro SRI (${normalizedRuc}): ${message}`,
+      );
       throw new BadRequestException(message);
     } finally {
       clearTimeout(timeoutHandle);
@@ -678,7 +712,9 @@ export class GuiaRemisionElectronicaService
 
     const payload = {
       sucursal_id: anchorSucursalId,
-      ambiente_default: this.normalizeEnvironment(dto.ambiente_default || 'PRUEBAS'),
+      ambiente_default: this.normalizeEnvironment(
+        dto.ambiente_default || 'PRUEBAS',
+      ),
       ruc: this.onlyDigits(dto.ruc, 13),
       razon_social: this.cleanText(dto.razon_social, 300),
       nombre_comercial: this.cleanOptionalText(dto.nombre_comercial, 300),
@@ -689,18 +725,34 @@ export class GuiaRemisionElectronicaService
       ),
       estab: this.onlyDigits(dto.estab, 3),
       pto_emi: this.onlyDigits(dto.pto_emi, 3),
-      codigo_numerico: config?.codigo_numerico || this.generateConfigNumericSeed(dto),
+      codigo_numerico:
+        config?.codigo_numerico || this.generateConfigNumericSeed(dto),
       contribuyente_especial: this.normalizeSpecialTaxpayerResolution(
         dto.contribuyente_especial,
       ),
       obligado_contabilidad: this.normalizeYesNo(dto.obligado_contabilidad),
       dir_partida_default: this.cleanOptionalText(dto.dir_partida_default, 300),
-      razon_social_transportista_default: this.cleanOptionalText(dto.razon_social_transportista_default, 300),
-      tipo_identificacion_transportista_default: this.cleanOptionalText(dto.tipo_identificacion_transportista_default, 2),
-      identificacion_transportista_default: this.cleanOptionalText(dto.identificacion_transportista_default, 20),
+      razon_social_transportista_default: this.cleanOptionalText(
+        dto.razon_social_transportista_default,
+        300,
+      ),
+      tipo_identificacion_transportista_default: this.cleanOptionalText(
+        dto.tipo_identificacion_transportista_default,
+        2,
+      ),
+      identificacion_transportista_default: this.cleanOptionalText(
+        dto.identificacion_transportista_default,
+        20,
+      ),
       placa_default: this.cleanOptionalText(dto.placa_default, 20),
-      info_adicional_email: this.cleanOptionalText(dto.info_adicional_email, 150),
-      info_adicional_telefono: this.cleanOptionalText(dto.info_adicional_telefono, 40),
+      info_adicional_email: this.cleanOptionalText(
+        dto.info_adicional_email,
+        150,
+      ),
+      info_adicional_telefono: this.cleanOptionalText(
+        dto.info_adicional_telefono,
+        40,
+      ),
       updated_by: this.resolveUser(dto.updated_by || dto.created_by),
     } as Partial<SriEmissionConfig>;
 
@@ -731,7 +783,11 @@ export class GuiaRemisionElectronicaService
     if (!file?.buffer?.length) {
       throw new BadRequestException('Debes adjuntar un archivo .p12 válido.');
     }
-    if (!String(file.originalname || '').toLowerCase().endsWith('.p12')) {
+    if (
+      !String(file.originalname || '')
+        .toLowerCase()
+        .endsWith('.p12')
+    ) {
       throw new BadRequestException('El archivo debe tener extensión .p12.');
     }
     const config = await this.configRepo.findOne({
@@ -783,8 +839,12 @@ export class GuiaRemisionElectronicaService
     }
 
     const inspection = await this.inspectP12Buffer(file.buffer, password);
-    config.certificate_filename = String(file.originalname || 'certificado.p12');
-    config.certificate_p12_encrypted = this.encryptToText(file.buffer.toString('base64'));
+    config.certificate_filename = String(
+      file.originalname || 'certificado.p12',
+    );
+    config.certificate_p12_encrypted = this.encryptToText(
+      file.buffer.toString('base64'),
+    );
     config.certificate_password_encrypted = this.encryptToText(password);
     config.cert_subject = inspection.subject || null;
     config.cert_issuer = inspection.issuer || null;
@@ -809,7 +869,11 @@ export class GuiaRemisionElectronicaService
     if (!file?.buffer?.length) {
       throw new BadRequestException('Debes adjuntar un archivo .p12 valido.');
     }
-    if (!String(file.originalname || '').toLowerCase().endsWith('.p12')) {
+    if (
+      !String(file.originalname || '')
+        .toLowerCase()
+        .endsWith('.p12')
+    ) {
       throw new BadRequestException('El archivo debe tener extension .p12.');
     }
 
@@ -845,7 +909,9 @@ export class GuiaRemisionElectronicaService
     }
 
     const inspection = await this.inspectP12Buffer(file.buffer, password);
-    signature.certificate_filename = String(file.originalname || 'certificado.p12');
+    signature.certificate_filename = String(
+      file.originalname || 'certificado.p12',
+    );
     signature.certificate_p12_encrypted = this.encryptToText(
       file.buffer.toString('base64'),
     );
@@ -871,15 +937,18 @@ export class GuiaRemisionElectronicaService
       where: { transferencia_bodega_id: transferId, is_deleted: false },
     });
     const fallbackSupplier =
-      context.supplier || this.buildSupplierContextFromGuideDraft(existingGuide);
+      context.supplier ||
+      this.buildSupplierContextFromGuideDraft(existingGuide);
     const defaultGuideDate = this.formatDateOnly(
       existingGuide?.fecha_emision || context.transfer.fecha_transferencia,
     );
     const defaultTransportStartDate = this.formatDateOnly(
-      existingGuide?.fecha_ini_transporte || context.transfer.fecha_transferencia,
+      existingGuide?.fecha_ini_transporte ||
+        context.transfer.fecha_transferencia,
     );
     const defaultTransportEndDate = this.formatDateOnly(
-      existingGuide?.fecha_fin_transporte || context.transfer.fecha_transferencia,
+      existingGuide?.fecha_fin_transporte ||
+        context.transfer.fecha_transferencia,
     );
 
     return {
@@ -903,7 +972,9 @@ export class GuiaRemisionElectronicaService
       config: this.maskConfig(context.config, context.signature),
       draft: {
         ambiente:
-          existingGuide?.ambiente || context.config.ambiente_default || 'PRUEBAS',
+          existingGuide?.ambiente ||
+          context.config.ambiente_default ||
+          'PRUEBAS',
         fecha_emision: defaultGuideDate,
         fecha_ini_transporte: defaultTransportStartDate,
         fecha_fin_transporte: defaultTransportEndDate,
@@ -939,11 +1010,18 @@ export class GuiaRemisionElectronicaService
           existingGuide?.ruta ||
           `${this.warehouseLabel(context.sourceWarehouse)} -> ${this.warehouseLabel(context.destinationWarehouse)}`,
         info_adicional_email:
-          String((existingGuide?.info_adicional as Record<string, unknown> | null)?.["E-MAIL"] || "") ||
+          String(
+            (existingGuide?.info_adicional as Record<string, unknown> | null)?.[
+              'E-MAIL'
+            ] || '',
+          ) ||
           context.config.info_adicional_email ||
           '',
         info_adicional_telefono:
-          String((existingGuide?.info_adicional as Record<string, unknown> | null)?.TELEFONO || "") ||
+          String(
+            (existingGuide?.info_adicional as Record<string, unknown> | null)
+              ?.TELEFONO || '',
+          ) ||
           context.config.info_adicional_telefono ||
           '',
       },
@@ -1094,13 +1172,17 @@ export class GuiaRemisionElectronicaService
         } as any,
       });
       if (!lockedConfig) {
-        throw new NotFoundException('No existe configuración SRI para la sucursal.');
+        throw new NotFoundException(
+          'No existe configuración SRI para la sucursal.',
+        );
       }
       const globalSignature = await this.loadGlobalSignature(manager);
       this.ensureCertificatePresent(globalSignature);
 
       const defaultGuideDate = shouldRegenerateExistingGuide
-        ? this.formatDateOnly(existingGuide?.fecha_emision || this.currentDateOnly())
+        ? this.formatDateOnly(
+            existingGuide?.fecha_emision || this.currentDateOnly(),
+          )
         : this.formatDateOnly(context.transfer.fecha_transferencia);
       const normalizedFechaEmision = this.formatDateOnly(
         dto.fecha_emision || defaultGuideDate,
@@ -1117,7 +1199,9 @@ export class GuiaRemisionElectronicaService
 
       const nextSecuencial = Number(lockedConfig.ultimo_secuencial || 0) + 1;
       const secuencial = String(nextSecuencial).padStart(9, '0');
-      const ambiente = this.normalizeEnvironment(dto.ambiente || lockedConfig.ambiente_default || 'PRUEBAS');
+      const ambiente = this.normalizeEnvironment(
+        dto.ambiente || lockedConfig.ambiente_default || 'PRUEBAS',
+      );
       const claveAcceso = this.generateAccessKey({
         fechaEmision: normalizedFechaEmision,
         codDoc: '06',
@@ -1177,11 +1261,12 @@ export class GuiaRemisionElectronicaService
         };
       }
 
-      const resolvedTransportIdentification = this.resolveGuideTransportIdentification(
-        dto,
-        effectiveSupplier,
-        lockedConfig,
-      );
+      const resolvedTransportIdentification =
+        this.resolveGuideTransportIdentification(
+          dto,
+          effectiveSupplier,
+          lockedConfig,
+        );
       const resolvedTransportIdentificationType =
         this.resolveTransportIdentificationType(
           this.cleanOptionalText(dto.tipo_identificacion_transportista, 2),
@@ -1271,7 +1356,10 @@ export class GuiaRemisionElectronicaService
         ruta: this.cleanOptionalText(dto.ruta, 300) || autoRoute,
         cod_doc_sustento: this.cleanOptionalText(dto.cod_doc_sustento, 2),
         num_doc_sustento: this.cleanOptionalText(dto.num_doc_sustento, 17),
-        num_aut_doc_sustento: this.cleanOptionalText(dto.num_aut_doc_sustento, 49),
+        num_aut_doc_sustento: this.cleanOptionalText(
+          dto.num_aut_doc_sustento,
+          49,
+        ),
         fecha_emision_doc_sustento: normalizedFechaEmisionDocSustento,
         detalle_snapshot: enrichedDetails,
         info_adicional: infoAdicional,
@@ -1344,15 +1432,21 @@ export class GuiaRemisionElectronicaService
   async consultAuthorization(guideId: string, updatedBy?: string) {
     return this.dataSource.transaction(async (manager) => {
       const guide = await this.findGuideOrFail(guideId, manager);
-      const result = await this.invokeAuthorizationWs(guide.ambiente, guide.clave_acceso);
+      const result = await this.invokeAuthorizationWs(
+        guide.ambiente,
+        guide.clave_acceso,
+      );
       guide.sri_authorization_response = result.raw;
       guide.sri_messages = result.messages;
       guide.sri_estado = result.authorizationState || result.state || null;
-      guide.numero_autorizacion = result.authorizationNumber || guide.numero_autorizacion || null;
+      guide.numero_autorizacion =
+        result.authorizationNumber || guide.numero_autorizacion || null;
       guide.fecha_autorizacion = result.authorizationDate
         ? new Date(result.authorizationDate)
         : guide.fecha_autorizacion || null;
-      guide.estado_emision = this.resolveEmissionStatus(result.authorizationState || result.state || 'PENDIENTE');
+      guide.estado_emision = this.resolveEmissionStatus(
+        result.authorizationState || result.state || 'PENDIENTE',
+      );
       guide.updated_by = this.resolveUser(updatedBy);
       const saved = await manager.save(GuiaRemisionElectronica, guide);
       this.emitGuideStatusUpdate(saved, 'consult');
@@ -1367,7 +1461,9 @@ export class GuiaRemisionElectronicaService
       const normalizedEmission = String(guide.estado_emision || '')
         .trim()
         .toUpperCase();
-      const normalizedSri = String(guide.sri_estado || '').trim().toUpperCase();
+      const normalizedSri = String(guide.sri_estado || '')
+        .trim()
+        .toUpperCase();
 
       if (
         normalizedEmission === 'AUTORIZADA' ||
@@ -1383,10 +1479,7 @@ export class GuiaRemisionElectronicaService
         );
       }
 
-      if (
-        normalizedEmission === 'RECIBIDA' ||
-        normalizedSri === 'RECIBIDA'
-      ) {
+      if (normalizedEmission === 'RECIBIDA' || normalizedSri === 'RECIBIDA') {
         const result = await this.invokeAuthorizationWs(
           guide.ambiente,
           guide.clave_acceso,
@@ -1532,29 +1625,47 @@ export class GuiaRemisionElectronicaService
     };
   }
 
-  private async sendGuideToSri(guideId: string, manager: EntityManager, userName?: string) {
+  private async sendGuideToSri(
+    guideId: string,
+    manager: EntityManager,
+    userName?: string,
+  ) {
     const guide = await this.findGuideOrFail(guideId, manager);
     if (!guide.xml_signed) {
-      throw new BadRequestException('La guía no tiene XML firmado para enviar al SRI.');
+      throw new BadRequestException(
+        'La guía no tiene XML firmado para enviar al SRI.',
+      );
     }
-    const receipt = await this.invokeReceiptWs(guide.ambiente, guide.xml_signed);
+    const receipt = await this.invokeReceiptWs(
+      guide.ambiente,
+      guide.xml_signed,
+    );
     guide.sri_receipt_response = receipt.raw;
     guide.sri_messages = receipt.messages;
     guide.sri_estado = receipt.state || null;
-    guide.estado_emision = this.resolveEmissionStatus(receipt.state || 'RECIBIDA');
+    guide.estado_emision = this.resolveEmissionStatus(
+      receipt.state || 'RECIBIDA',
+    );
     guide.updated_by = this.resolveUser(userName);
     let saved = await manager.save(GuiaRemisionElectronica, guide);
 
     if (receipt.state === 'RECIBIDA') {
-      const auth = await this.invokeAuthorizationWs(guide.ambiente, guide.clave_acceso);
+      const auth = await this.invokeAuthorizationWs(
+        guide.ambiente,
+        guide.clave_acceso,
+      );
       saved.sri_authorization_response = auth.raw;
       saved.sri_messages = auth.messages;
-      saved.sri_estado = auth.authorizationState || auth.state || saved.sri_estado;
-      saved.numero_autorizacion = auth.authorizationNumber || saved.numero_autorizacion || null;
+      saved.sri_estado =
+        auth.authorizationState || auth.state || saved.sri_estado;
+      saved.numero_autorizacion =
+        auth.authorizationNumber || saved.numero_autorizacion || null;
       saved.fecha_autorizacion = auth.authorizationDate
         ? new Date(auth.authorizationDate)
         : saved.fecha_autorizacion || null;
-      saved.estado_emision = this.resolveEmissionStatus(auth.authorizationState || auth.state || saved.sri_estado || 'RECIBIDA');
+      saved.estado_emision = this.resolveEmissionStatus(
+        auth.authorizationState || auth.state || saved.sri_estado || 'RECIBIDA',
+      );
       saved.updated_by = this.resolveUser(userName);
       saved = await manager.save(GuiaRemisionElectronica, saved);
     }
@@ -1562,7 +1673,10 @@ export class GuiaRemisionElectronicaService
     return saved;
   }
 
-  private async loadGuideContext(transferId: string, manager?: EntityManager): Promise<PreparedGuideContext> {
+  private async loadGuideContext(
+    transferId: string,
+    manager?: EntityManager,
+  ): Promise<PreparedGuideContext> {
     const repo = manager ?? this.dataSource.manager;
     const transfer = await repo.findOne(TransferenciaBodega, {
       where: { id: transferId, is_deleted: false },
@@ -1571,7 +1685,14 @@ export class GuiaRemisionElectronicaService
       throw new NotFoundException('La transferencia no existe.');
     }
     const transferStatus = String(transfer.estado || '').toUpperCase();
-    const eligibleStates = new Set(['COMPLETADA', 'COMPLETADO', 'FINALIZADA', 'FINALIZADO', 'APROBADA', 'APROBADO']);
+    const eligibleStates = new Set([
+      'COMPLETADA',
+      'COMPLETADO',
+      'FINALIZADA',
+      'FINALIZADO',
+      'APROBADA',
+      'APROBADO',
+    ]);
     if (!eligibleStates.has(transferStatus)) {
       throw new BadRequestException(
         'La guía de remisión solo puede generarse cuando la transferencia esté aprobada, completada o finalizada.',
@@ -1579,12 +1700,16 @@ export class GuiaRemisionElectronicaService
     }
     const [sourceWarehouse, destinationWarehouse, details, purchaseOrder] =
       await Promise.all([
-      repo.findOne(Bodega, { where: { id: transfer.bodega_origen_id, is_deleted: false } }),
-      repo.findOne(Bodega, { where: { id: transfer.bodega_destino_id, is_deleted: false } }),
-      repo.find(TransferenciaBodegaDet, {
-        where: { transferencia_bodega_id: transferId, is_deleted: false },
-        order: { created_at: 'ASC' },
-      }),
+        repo.findOne(Bodega, {
+          where: { id: transfer.bodega_origen_id, is_deleted: false },
+        }),
+        repo.findOne(Bodega, {
+          where: { id: transfer.bodega_destino_id, is_deleted: false },
+        }),
+        repo.find(TransferenciaBodegaDet, {
+          where: { transferencia_bodega_id: transferId, is_deleted: false },
+          order: { created_at: 'ASC' },
+        }),
         transfer.orden_compra_id
           ? repo.findOne(OrdenCompra, {
               where: { id: transfer.orden_compra_id, is_deleted: false },
@@ -1592,7 +1717,9 @@ export class GuiaRemisionElectronicaService
           : Promise.resolve(null),
       ]);
     if (!sourceWarehouse || !destinationWarehouse) {
-      throw new BadRequestException('No se pudo resolver la bodega origen o destino de la transferencia.');
+      throw new BadRequestException(
+        'No se pudo resolver la bodega origen o destino de la transferencia.',
+      );
     }
     sourceWarehouse.direccion = this.requireWarehouseAddress(
       sourceWarehouse,
@@ -1603,13 +1730,17 @@ export class GuiaRemisionElectronicaService
       'destino',
     );
     if (!details.length) {
-      throw new BadRequestException('La transferencia no tiene detalles para emitir la guía.');
+      throw new BadRequestException(
+        'La transferencia no tiene detalles para emitir la guía.',
+      );
     }
     const sucursal = await repo.findOne(Sucursal, {
       where: { id: sourceWarehouse.sucursal_id, is_deleted: false },
     });
     if (!sucursal) {
-      throw new BadRequestException('La bodega origen no tiene una sucursal válida asociada.');
+      throw new BadRequestException(
+        'La bodega origen no tiene una sucursal válida asociada.',
+      );
     }
     const config = await repo.findOne(SriEmissionConfig, {
       where: { is_deleted: false },
@@ -1720,7 +1851,8 @@ export class GuiaRemisionElectronicaService
       return {
         ...localContext,
         identificacion: sriCatalog.ruc || localContext.identificacion || null,
-        razon_social: sriCatalog.razon_social || localContext.razon_social || null,
+        razon_social:
+          sriCatalog.razon_social || localContext.razon_social || null,
         nombre_comercial:
           sriCatalog.nombre_comercial || localContext.nombre_comercial || null,
         direccion:
@@ -1745,8 +1877,13 @@ export class GuiaRemisionElectronicaService
     }
   }
 
-  private buildSupplierContextFromDto(dto: GenerateGuideFromTransferDto): GuideSupplierContext | null {
-    const identificacion = this.cleanOptionalText(dto.proveedor_identificacion, 20);
+  private buildSupplierContextFromDto(
+    dto: GenerateGuideFromTransferDto,
+  ): GuideSupplierContext | null {
+    const identificacion = this.cleanOptionalText(
+      dto.proveedor_identificacion,
+      20,
+    );
     const razonSocial = this.cleanOptionalText(dto.proveedor_razon_social, 300);
     const nombreComercial = this.cleanOptionalText(
       dto.proveedor_nombre_comercial,
@@ -1811,7 +1948,10 @@ export class GuiaRemisionElectronicaService
   }
 
   private ensureCertificatePresent(config?: SignatureCarrier | null) {
-    if (!config?.certificate_p12_encrypted || !config?.certificate_password_encrypted) {
+    if (
+      !config?.certificate_p12_encrypted ||
+      !config?.certificate_password_encrypted
+    ) {
       throw new BadRequestException(
         'La firma global SRI no tiene certificado .p12 cargado.',
       );
@@ -1819,7 +1959,9 @@ export class GuiaRemisionElectronicaService
   }
 
   private async enrichTransferDetails(details: TransferenciaBodegaDet[]) {
-    const productIds = [...new Set(details.map((item) => item.producto_id).filter(Boolean))];
+    const productIds = [
+      ...new Set(details.map((item) => item.producto_id).filter(Boolean)),
+    ];
     const products = productIds.length
       ? await this.productoRepo.find({
           where: productIds.map((id) => ({ id, is_deleted: false })),
@@ -1864,10 +2006,7 @@ export class GuiaRemisionElectronicaService
       pairs.PROVEEDOR = this.cleanText(supplier.razon_social, 300);
     }
     if (supplier?.identificacion) {
-      pairs['RUC PROVEEDOR'] = this.cleanText(
-        supplier.identificacion,
-        20,
-      );
+      pairs['RUC PROVEEDOR'] = this.cleanText(supplier.identificacion, 20);
     }
     if (supplier?.nombre_comercial) {
       pairs['NOMBRE COMERCIAL PROVEEDOR'] = this.cleanText(
@@ -1881,13 +2020,17 @@ export class GuiaRemisionElectronicaService
     if (supplier?.origen) {
       pairs['ORIGEN PROVEEDOR'] = this.cleanText(supplier.origen, 120);
     }
-    pairs['BODEGA ORIGEN'] = this.cleanText(this.warehouseLabel(context.sourceWarehouse), 300);
-    pairs['BODEGA DESTINO'] = this.cleanText(this.warehouseLabel(context.destinationWarehouse), 300);
+    pairs['BODEGA ORIGEN'] = this.cleanText(
+      this.warehouseLabel(context.sourceWarehouse),
+      300,
+    );
+    pairs['BODEGA DESTINO'] = this.cleanText(
+      this.warehouseLabel(context.destinationWarehouse),
+      300,
+    );
     if (dto.info_adicional_extra_nombre && dto.info_adicional_extra_valor) {
-      pairs[this.cleanText(dto.info_adicional_extra_nombre, 300)] = this.cleanText(
-        dto.info_adicional_extra_valor,
-        300,
-      );
+      pairs[this.cleanText(dto.info_adicional_extra_nombre, 300)] =
+        this.cleanText(dto.info_adicional_extra_valor, 300);
     }
     return pairs;
   }
@@ -1950,12 +2093,18 @@ export class GuiaRemisionElectronicaService
       `<dirMatriz>${this.escapeXml(config.dir_matriz)}</dirMatriz>`,
       '</infoTributaria>',
       '<infoGuiaRemision>',
-      appendIf('dirEstablecimiento', config.dir_establecimiento || context.sourceWarehouse.direccion || null),
+      appendIf(
+        'dirEstablecimiento',
+        config.dir_establecimiento || context.sourceWarehouse.direccion || null,
+      ),
       `<dirPartida>${this.escapeXml(model.dir_partida)}</dirPartida>`,
       `<razonSocialTransportista>${this.escapeXml(model.razon_social_transportista)}</razonSocialTransportista>`,
       `<tipoIdentificacionTransportista>${this.escapeXml(model.tipo_identificacion_transportista)}</tipoIdentificacionTransportista>`,
       `<rucTransportista>${this.escapeXml(model.identificacion_transportista)}</rucTransportista>`,
-      appendIf('obligadoContabilidad', this.normalizeYesNo(config.obligado_contabilidad)),
+      appendIf(
+        'obligadoContabilidad',
+        this.normalizeYesNo(config.obligado_contabilidad),
+      ),
       appendIf(
         'contribuyenteEspecial',
         this.normalizeSpecialTaxpayerResolution(config.contribuyente_especial),
@@ -1981,7 +2130,9 @@ export class GuiaRemisionElectronicaService
       `<detalles>${detallesXml}</detalles>`,
       '</destinatario>',
       '</destinatarios>',
-      infoAdicionalXml ? `<infoAdicional>${infoAdicionalXml}</infoAdicional>` : '',
+      infoAdicionalXml
+        ? `<infoAdicional>${infoAdicionalXml}</infoAdicional>`
+        : '',
       '</guiaRemision>',
     ].join('');
   }
@@ -2015,32 +2166,36 @@ export class GuiaRemisionElectronicaService
         signatureValueId: `SignatureValue${Math.floor(Math.random() * 1000000)}`,
       };
       const signingTime = new Date().toISOString();
-      const { stdout, stderr } = await execFileAsync(this.getPythonBin(), [
-        helperPath,
-        'sign',
-        '--p12-path',
-        p12Path,
-        '--password',
-        password,
-        '--xml-path',
-        xmlPath,
-        '--signature-id',
-        ids.signatureId,
-        '--signed-info-id',
-        ids.signedInfoId,
-        '--signed-properties-id',
-        ids.signedPropertiesId,
-        '--key-info-id',
-        ids.keyInfoId,
-        '--reference-id',
-        ids.referenceId,
-        '--object-id',
-        ids.objectId,
-        '--signature-value-id',
-        ids.signatureValueId,
-        '--signing-time',
-        signingTime,
-      ], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+      const { stdout, stderr } = await execFileAsync(
+        this.getPythonBin(),
+        [
+          helperPath,
+          'sign',
+          '--p12-path',
+          p12Path,
+          '--password',
+          password,
+          '--xml-path',
+          xmlPath,
+          '--signature-id',
+          ids.signatureId,
+          '--signed-info-id',
+          ids.signedInfoId,
+          '--signed-properties-id',
+          ids.signedPropertiesId,
+          '--key-info-id',
+          ids.keyInfoId,
+          '--reference-id',
+          ids.referenceId,
+          '--object-id',
+          ids.objectId,
+          '--signature-value-id',
+          ids.signatureValueId,
+          '--signing-time',
+          signingTime,
+        ],
+        { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+      );
       if (stderr?.trim()) {
         this.logger.warn(`Firma XAdES helper stderr: ${stderr}`);
       }
@@ -2064,13 +2219,16 @@ export class GuiaRemisionElectronicaService
     const p12Path = join(tmpdir(), `sri-inspect-${workId}.p12`);
     try {
       await fs.writeFile(p12Path, buffer);
-      const { stdout } = await execFileAsync(this.getPythonBin(),
+      const { stdout } = await execFileAsync(
+        this.getPythonBin(),
         [helperPath, 'inspect', '--p12-path', p12Path, '--password', password],
         { encoding: 'utf8', maxBuffer: 1024 * 1024 },
       );
       return JSON.parse(stdout || '{}');
     } catch (error: any) {
-      this.logger.error(`No se pudo inspeccionar el certificado .p12: ${error?.message || error}`);
+      this.logger.error(
+        `No se pudo inspeccionar el certificado .p12: ${error?.message || error}`,
+      );
       throw new BadRequestException(
         'No se pudo validar el archivo .p12 o la clave proporcionada.',
       );
@@ -2166,11 +2324,21 @@ export class GuiaRemisionElectronicaService
     const responseText = await this.postSoap(endpoint, payload);
     const authorizationXml = this.extractTagValue(responseText, 'autorizacion');
     return {
-      state: this.extractTagValue(responseText, 'estado') || this.extractTagValue(responseText, 'numeroComprobantes'),
-      authorizationState: authorizationXml ? this.extractTagValue(authorizationXml, 'estado') : null,
-      authorizationNumber: authorizationXml ? this.extractTagValue(authorizationXml, 'numeroAutorizacion') : null,
-      authorizationDate: authorizationXml ? this.extractTagValue(authorizationXml, 'fechaAutorizacion') : null,
-      messages: authorizationXml ? this.extractMessages(authorizationXml) : this.extractMessages(responseText),
+      state:
+        this.extractTagValue(responseText, 'estado') ||
+        this.extractTagValue(responseText, 'numeroComprobantes'),
+      authorizationState: authorizationXml
+        ? this.extractTagValue(authorizationXml, 'estado')
+        : null,
+      authorizationNumber: authorizationXml
+        ? this.extractTagValue(authorizationXml, 'numeroAutorizacion')
+        : null,
+      authorizationDate: authorizationXml
+        ? this.extractTagValue(authorizationXml, 'fechaAutorizacion')
+        : null,
+      messages: authorizationXml
+        ? this.extractMessages(authorizationXml)
+        : this.extractMessages(responseText),
       raw: { endpoint, response: responseText },
     };
   }
@@ -2206,7 +2374,10 @@ export class GuiaRemisionElectronicaService
   }
 
   private extractTagValue(xml: string, tagName: string) {
-    const pattern = new RegExp(`<${tagName}(?:>|\\s[^>]*>)([\\s\\S]*?)</${tagName}>`, 'i');
+    const pattern = new RegExp(
+      `<${tagName}(?:>|\\s[^>]*>)([\\s\\S]*?)</${tagName}>`,
+      'i',
+    );
     const match = pattern.exec(xml || '');
     return match ? match[1].trim() : null;
   }
@@ -2234,7 +2405,8 @@ export class GuiaRemisionElectronicaService
 
     const authorizationXml = this.extractTagValue(responseText, 'autorizacion');
     const comprobante =
-      (authorizationXml && this.extractTagValue(authorizationXml, 'comprobante')) ||
+      (authorizationXml &&
+        this.extractTagValue(authorizationXml, 'comprobante')) ||
       this.extractTagValue(responseText, 'comprobante');
 
     if (!comprobante) {
@@ -2296,12 +2468,15 @@ export class GuiaRemisionElectronicaService
   }
 
   private resolveEmissionStatus(state: string) {
-    const normalized = String(state || '').trim().toUpperCase();
+    const normalized = String(state || '')
+      .trim()
+      .toUpperCase();
     if (!normalized) return 'GENERADA';
     if (normalized === 'RECIBIDA') return 'RECIBIDA';
     if (normalized === 'DEVUELTA') return 'DEVUELTA';
     if (normalized === 'AUTORIZADO') return 'AUTORIZADA';
-    if (normalized === 'RECHAZADO' || normalized === 'NO AUTORIZADO') return 'NO_AUTORIZADA';
+    if (normalized === 'RECHAZADO' || normalized === 'NO AUTORIZADO')
+      return 'NO_AUTORIZADA';
     return normalized;
   }
 
@@ -2352,17 +2527,17 @@ export class GuiaRemisionElectronicaService
 
   private syncGuideStatusTracking(
     guide:
-      | Pick<
-          GuiaRemisionElectronica,
-          'id' | 'estado_emision' | 'sri_estado'
-        >
+      | Pick<GuiaRemisionElectronica, 'id' | 'estado_emision' | 'sri_estado'>
       | null
       | undefined,
     updatedBy?: string | null,
   ) {
     const normalizedGuideId = String(guide?.id || '').trim();
     if (!normalizedGuideId) return;
-    if (this.isGuideAuthorized(guide) || !this.isGuidePendingAuthorization(guide)) {
+    if (
+      this.isGuideAuthorized(guide) ||
+      !this.isGuidePendingAuthorization(guide)
+    ) {
       this.clearGuideStatusTracking(normalizedGuideId);
       return;
     }
@@ -2414,7 +2589,10 @@ export class GuiaRemisionElectronicaService
           ? new Date(result.authorizationDate)
           : guide.fecha_autorizacion || null;
         guide.estado_emision = this.resolveEmissionStatus(
-          result.authorizationState || result.state || guide.sri_estado || 'PENDIENTE',
+          result.authorizationState ||
+            result.state ||
+            guide.sri_estado ||
+            'PENDIENTE',
         );
         guide.updated_by = this.resolveUser(updatedBy);
         return manager.save(GuiaRemisionElectronica, guide);
@@ -2422,7 +2600,10 @@ export class GuiaRemisionElectronicaService
 
       this.emitGuideStatusUpdate(saved, 'tracker');
 
-      if (this.isGuideAuthorized(saved) || !this.isGuidePendingAuthorization(saved)) {
+      if (
+        this.isGuideAuthorized(saved) ||
+        !this.isGuidePendingAuthorization(saved)
+      ) {
         this.clearGuideStatusTracking(saved.id);
         return;
       }
@@ -2470,7 +2651,8 @@ export class GuiaRemisionElectronicaService
       fecha_fin_transporte: this.formatDateOnly(guide.fecha_fin_transporte),
       dir_partida: guide.dir_partida,
       razon_social_transportista: guide.razon_social_transportista,
-      tipo_identificacion_transportista: guide.tipo_identificacion_transportista,
+      tipo_identificacion_transportista:
+        guide.tipo_identificacion_transportista,
       identificacion_transportista: guide.identificacion_transportista,
       placa: guide.placa,
       identificacion_destinatario: guide.identificacion_destinatario,
@@ -2517,9 +2699,12 @@ export class GuiaRemisionElectronicaService
       es_contribuyente_especial: Boolean(config.contribuyente_especial),
       obligado_contabilidad: config.obligado_contabilidad,
       dir_partida_default: config.dir_partida_default,
-      razon_social_transportista_default: config.razon_social_transportista_default,
-      tipo_identificacion_transportista_default: config.tipo_identificacion_transportista_default,
-      identificacion_transportista_default: config.identificacion_transportista_default,
+      razon_social_transportista_default:
+        config.razon_social_transportista_default,
+      tipo_identificacion_transportista_default:
+        config.tipo_identificacion_transportista_default,
+      identificacion_transportista_default:
+        config.identificacion_transportista_default,
       placa_default: config.placa_default,
       info_adicional_email: config.info_adicional_email,
       info_adicional_telefono: config.info_adicional_telefono,
@@ -2677,8 +2862,12 @@ export class GuiaRemisionElectronicaService
     codigoNumerico: string;
     tipoEmision: string;
   }) {
-    const fecha = this.toSriCalendarDate(params.fechaEmision).replace(/\//g, '');
-    const ambienteCode = this.normalizeEnvironment(params.ambiente) === 'PRODUCCION' ? '2' : '1';
+    const fecha = this.toSriCalendarDate(params.fechaEmision).replace(
+      /\//g,
+      '',
+    );
+    const ambienteCode =
+      this.normalizeEnvironment(params.ambiente) === 'PRODUCCION' ? '2' : '1';
     const base = [
       fecha,
       params.codDoc,
@@ -2692,15 +2881,10 @@ export class GuiaRemisionElectronicaService
     const dv = this.mod11(base);
     return `${base}${dv}`;
   }
-  
 
   private getPythonBin() {
-  return (
-    this.configService.get<string>('SRI_PYTHON_BIN') ||
-    'python3'
-  );
-}
-
+    return this.configService.get<string>('SRI_PYTHON_BIN') || 'python3';
+  }
 
   private mod11(base: string) {
     let factor = 2;
@@ -2730,9 +2914,12 @@ export class GuiaRemisionElectronicaService
       };
     }
 
-    const parsed = value instanceof Date ? value : value ? new Date(value) : new Date();
+    const parsed =
+      value instanceof Date ? value : value ? new Date(value) : new Date();
     if (Number.isNaN(parsed.getTime())) {
-      throw new BadRequestException(`Fecha invÃ¡lida para guÃ­a de remisiÃ³n: ${value}`);
+      throw new BadRequestException(
+        `Fecha invÃ¡lida para guÃ­a de remisiÃ³n: ${value}`,
+      );
     }
 
     const parts = new Intl.DateTimeFormat('en-CA', {
@@ -2754,9 +2941,15 @@ export class GuiaRemisionElectronicaService
 
   private encryptToText(plainText: string) {
     const key = this.getEncryptionKey();
-    const iv = Buffer.from(randomUUID().replace(/-/g, '').slice(0, 24), 'hex').subarray(0, 12);
+    const iv = Buffer.from(
+      randomUUID().replace(/-/g, '').slice(0, 24),
+      'hex',
+    ).subarray(0, 12);
     const cipher = createCipheriv('aes-256-gcm', key, iv);
-    const encrypted = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+    const encrypted = Buffer.concat([
+      cipher.update(plainText, 'utf8'),
+      cipher.final(),
+    ]);
     const tag = cipher.getAuthTag();
     return `${iv.toString('base64')}.${tag.toString('base64')}.${encrypted.toString('base64')}`;
   }
@@ -2764,10 +2957,16 @@ export class GuiaRemisionElectronicaService
   private decryptFromText(payload: string) {
     const [ivB64, tagB64, bodyB64] = String(payload || '').split('.');
     if (!ivB64 || !tagB64 || !bodyB64) {
-      throw new InternalServerErrorException('No se pudo descifrar la información protegida del certificado.');
+      throw new InternalServerErrorException(
+        'No se pudo descifrar la información protegida del certificado.',
+      );
     }
     const key = this.getEncryptionKey();
-    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivB64, 'base64'));
+    const decipher = createDecipheriv(
+      'aes-256-gcm',
+      key,
+      Buffer.from(ivB64, 'base64'),
+    );
     decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
     const decrypted = Buffer.concat([
       decipher.update(Buffer.from(bodyB64, 'base64')),
@@ -2786,7 +2985,9 @@ export class GuiaRemisionElectronicaService
   }
 
   private normalizeEnvironment(value?: string | null) {
-    return String(value || 'PRUEBAS').trim().toUpperCase() === 'PRODUCCION'
+    return String(value || 'PRUEBAS')
+      .trim()
+      .toUpperCase() === 'PRODUCCION'
       ? 'PRODUCCION'
       : 'PRUEBAS';
   }
@@ -2797,7 +2998,9 @@ export class GuiaRemisionElectronicaService
   }
 
   private normalizeSpecialTaxpayerResolution(value?: string | null) {
-    const text = String(value || '').trim().toUpperCase();
+    const text = String(value || '')
+      .trim()
+      .toUpperCase();
     if (!text || text === 'NO' || text === 'SI') {
       return null;
     }
@@ -2840,7 +3043,9 @@ export class GuiaRemisionElectronicaService
 
   private resolveSpecialTaxpayerInfo(value?: unknown) {
     const label = this.cleanOptionalText(value, 20);
-    const normalized = String(value || '').trim().toUpperCase();
+    const normalized = String(value || '')
+      .trim()
+      .toUpperCase();
     const enabled = Boolean(normalized) && normalized !== 'NO';
 
     if (!enabled) {
@@ -2852,8 +3057,7 @@ export class GuiaRemisionElectronicaService
     }
 
     const digits = this.extractDigits(String(value || ''));
-    const resolution =
-      digits.length >= 3 && digits.length <= 5 ? digits : null;
+    const resolution = digits.length >= 3 && digits.length <= 5 ? digits : null;
 
     return {
       enabled: true,
@@ -2878,7 +3082,9 @@ export class GuiaRemisionElectronicaService
   private onlyDigits(value: string, length: number) {
     const digits = this.extractDigits(value);
     if (digits.length !== length) {
-      throw new BadRequestException(`El valor ${value} debe contener exactamente ${length} dígitos.`);
+      throw new BadRequestException(
+        `El valor ${value} debe contener exactamente ${length} dígitos.`,
+      );
     }
     return digits;
   }
@@ -2962,7 +3168,10 @@ export class GuiaRemisionElectronicaService
     supplier: GuideSupplierContext | null,
     config: SriEmissionConfig,
   ) {
-    const directValue = this.cleanOptionalText(dto.identificacion_transportista, 20);
+    const directValue = this.cleanOptionalText(
+      dto.identificacion_transportista,
+      20,
+    );
     if (directValue) return directValue;
 
     const normalizedTransportName = this.normalizeComparableText(
@@ -3018,7 +3227,9 @@ export class GuiaRemisionElectronicaService
   private cleanText(value: unknown, maxLength: number) {
     const text = String(value ?? '').trim();
     if (!text) {
-      throw new BadRequestException('Existen campos obligatorios vacíos para la guía de remisión.');
+      throw new BadRequestException(
+        'Existen campos obligatorios vacíos para la guía de remisión.',
+      );
     }
     return text.slice(0, maxLength);
   }
@@ -3054,7 +3265,9 @@ export class GuiaRemisionElectronicaService
   private toSriDate(value: string) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) {
-      throw new BadRequestException(`Fecha inválida para guía de remisión: ${value}`);
+      throw new BadRequestException(
+        `Fecha inválida para guía de remisión: ${value}`,
+      );
     }
     const day = String(date.getDate()).padStart(2, '0');
     const month = String(date.getMonth() + 1).padStart(2, '0');
