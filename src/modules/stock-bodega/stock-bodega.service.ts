@@ -254,7 +254,7 @@ export class StockBodegaService
       .select('stock')
       .addSelect(
         `TRIM(CONCAT(
-          COALESCE(producto.codigo || ' - ', ''),
+          COALESCE(producto.codigo || '-', ''),
           COALESCE(producto.nombre, 'Sin material'),
           CASE WHEN producto.descripcion IS NOT NULL AND TRIM(producto.descripcion) <> '' THEN ' (' || TRIM(producto.descripcion) || ')' ELSE '' END
         ))`,
@@ -480,14 +480,12 @@ export class StockBodegaService
     producto?: Producto | null,
     fallback?: string | null,
   ) {
-    return (
-      [producto?.codigo, producto?.nombre]
-        .map((item) => String(item || '').trim())
-        .filter(Boolean)
-        .join(' - ') ||
-      String(fallback || 'seleccionado').trim() ||
-      'seleccionado'
-    );
+    const codigo = String(producto?.codigo || '').trim();
+    const nombre = String(producto?.nombre || '').trim();
+    const descripcion = String(producto?.descripcion || '').trim();
+    const material = codigo && nombre ? `${codigo}-${nombre}` : nombre || codigo;
+    const label = descripcion ? `${material} (${descripcion})` : material;
+    return label || String(fallback || 'seleccionado').trim() || 'seleccionado';
   }
 
   private buildWarehouseLabel(

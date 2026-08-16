@@ -9,6 +9,7 @@ import {
 } from '@nestjs/swagger';
 import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import {
+  AnnulTransferenciaBodegaQueryDto,
   CreateTransferenciaBodegaDto,
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
@@ -83,8 +84,16 @@ export class TransferenciaBodegaController {
 
   @Patch(':id/anular')
   @ApiOperation({ summary: 'Anular transferencia y revertir sus movimientos de stock' })
-  annul(@Param('id') id: string, @Req() req?: any) {
-    return this.service.annul(id, getRequestActor(req));
+  annul(
+    @Param('id') id: string,
+    @Query() query: AnnulTransferenciaBodegaQueryDto,
+    @Req() req?: any,
+  ) {
+    return this.service.annul(
+      id,
+      getRequestActor(req),
+      query.forzar_guia_autorizada === true,
+    );
   }
 
   @Delete('purge-all')

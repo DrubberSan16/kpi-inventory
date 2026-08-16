@@ -939,16 +939,14 @@ export class GuiaRemisionElectronicaService
     const fallbackSupplier =
       context.supplier ||
       this.buildSupplierContextFromGuideDraft(existingGuide);
-    const defaultGuideDate = this.formatDateOnly(
-      existingGuide?.fecha_emision || context.transfer.fecha_transferencia,
+    const defaultGuideDate = this.resolveDefaultGuideDate(
+      existingGuide?.fecha_emision,
     );
     const defaultTransportStartDate = this.formatDateOnly(
-      existingGuide?.fecha_ini_transporte ||
-        context.transfer.fecha_transferencia,
+      existingGuide?.fecha_ini_transporte || defaultGuideDate,
     );
     const defaultTransportEndDate = this.formatDateOnly(
-      existingGuide?.fecha_fin_transporte ||
-        context.transfer.fecha_transferencia,
+      existingGuide?.fecha_fin_transporte || defaultTransportStartDate,
     );
 
     return {
@@ -1179,11 +1177,9 @@ export class GuiaRemisionElectronicaService
       const globalSignature = await this.loadGlobalSignature(manager);
       this.ensureCertificatePresent(globalSignature);
 
-      const defaultGuideDate = shouldRegenerateExistingGuide
-        ? this.formatDateOnly(
-            existingGuide?.fecha_emision || this.currentDateOnly(),
-          )
-        : this.formatDateOnly(context.transfer.fecha_transferencia);
+      const defaultGuideDate = this.resolveDefaultGuideDate(
+        shouldRegenerateExistingGuide ? existingGuide?.fecha_emision : null,
+      );
       const normalizedFechaEmision = this.formatDateOnly(
         dto.fecha_emision || defaultGuideDate,
       );
@@ -2903,7 +2899,7 @@ export class GuiaRemisionElectronicaService
   private extractCalendarDateParts(value: Date | string | null | undefined) {
     const dateOnlyMatch =
       typeof value === 'string'
-        ? /^\s*(\d{4})-(\d{2})-(\d{2})/.exec(value)
+        ? /^\s*(\d{4})-(\d{2})-(\d{2})\s*$/.exec(value)
         : null;
 
     if (dateOnlyMatch) {
@@ -3255,6 +3251,12 @@ export class GuiaRemisionElectronicaService
 
   private currentDateOnly() {
     return this.formatDateOnly(new Date());
+  }
+
+  private resolveDefaultGuideDate(existingDate?: Date | string | null) {
+    return existingDate
+      ? this.formatDateOnly(existingDate)
+      : this.currentDateOnly();
   }
 
   private toSriCalendarDate(value: Date | string | null | undefined) {

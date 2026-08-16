@@ -83,6 +83,15 @@ export class TransferenciaBodegaService {
     );
   }
 
+  private assertCanForceAuthorizedGuideAnnul(
+    actor?: DocumentAnnulmentActor | null,
+  ) {
+    if (this.isSuperAdministratorRoleName(actor?.roleName || undefined)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede forzar la anulacion de una transferencia con guia autorizada.',
+    );
+  }
+
   private resolveAnnulmentActorName(actor?: DocumentAnnulmentActor | null) {
     return this.toText(actor?.displayName) || this.toText(actor?.username) || 'SYSTEM';
   }
@@ -787,8 +796,15 @@ export class TransferenciaBodegaService {
     }
   }
 
-  async annul(id: string, actor?: DocumentAnnulmentActor | null) {
+  async annul(
+    id: string,
+    actor?: DocumentAnnulmentActor | null,
+    forceAuthorizedGuide = false,
+  ) {
     this.assertCanAnnul(actor);
+    if (forceAuthorizedGuide) {
+      this.assertCanForceAuthorizedGuideAnnul(actor);
+    }
     const annulledBy = this.resolveAnnulmentActorName(actor);
     const traceId = randomUUID();
     const changedStockIds = new Set<string>();
@@ -827,10 +843,10 @@ export class TransferenciaBodegaService {
         const guideSriState = String(guide?.sri_estado || '')
           .trim()
           .toUpperCase();
-        if (
+        const hasAuthorizedGuide =
           ['AUTORIZADA', 'AUTORIZADO'].includes(guideEmissionState) ||
-          ['AUTORIZADA', 'AUTORIZADO'].includes(guideSriState)
-        ) {
+          ['AUTORIZADA', 'AUTORIZADO'].includes(guideSriState);
+        if (hasAuthorizedGuide && !forceAuthorizedGuide) {
           throw new BadRequestException(
             'La transferencia tiene una guia autorizada por el SRI y no se puede anular.',
           );
@@ -1065,7 +1081,7 @@ export class TransferenciaBodegaService {
             await manager.save(OrdenCompra, order);
           }
         }
-        if (guide) {
+        if (guide && !hasAuthorizedGuide) {
           guide.estado_emision = 'ANULADA';
           guide.sri_estado = 'ANULADA';
           guide.updated_by = annulledBy;
@@ -1082,7 +1098,9 @@ export class TransferenciaBodegaService {
       this.queueTransactionLog({
         traceId,
         createdBy: annulledBy,
-        description: `Transferencia ${id} anulada correctamente con reverso de stock.`,
+        description: forceAuthorizedGuide
+          ? `Transferencia ${id} anulada de forma forzada con reverso de stock; la autorizacion SRI de la guia se conserva.`
+          : `Transferencia ${id} anulada correctamente con reverso de stock.`,
       });
       await this.notifyMaintenanceRecalculationForStocks(
         changedStockIds,

@@ -1,7 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
   IsNumber,
   IsOptional,
@@ -102,4 +103,23 @@ export class TransferenciaBodegaQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsDateString()
   hasta?: string;
+}
+
+export class AnnulTransferenciaBodegaQueryDto {
+  @ApiPropertyOptional({
+    description:
+      'Permite al Super Administrador revertir stock y Kardex aunque la guía ya esté autorizada. La autorización SRI se conserva.',
+    type: Boolean,
+    default: false,
+  })
+  @IsOptional()
+  @Transform(({ value }) =>
+    ['true', '1', 'yes', 'si', 'sí'].includes(
+      String(value ?? '')
+        .trim()
+        .toLowerCase(),
+    ),
+  )
+  @IsBoolean()
+  forzar_guia_autorizada?: boolean;
 }
