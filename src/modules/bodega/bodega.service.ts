@@ -8,6 +8,14 @@ import { Brackets, DeepPartial, QueryFailedError, Repository } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { Bodega } from '../entities/bodega.entity';
 
+type BodegaPayload = DeepPartial<Bodega> & {
+  tiene_chatarra?: boolean;
+};
+
+type BodegaWithScrapOption = Bodega & {
+  tiene_chatarra: boolean;
+};
+
 @Injectable()
 export class BodegaService extends CrudService<Bodega> {
   private readonly scrapNameSuffix = ' - CHATARRA';
@@ -72,7 +80,18 @@ export class BodegaService extends CrudService<Bodega> {
     };
   }
 
-  async create(payload: DeepPartial<Bodega>) {
+  async findOne(id: string): Promise<BodegaWithScrapOption> {
+    const warehouse = await super.findOne(id);
+    const scrapWarehouse = warehouse.es_chatarra
+      ? null
+      : await this.findActiveScrapWarehouseByParent(this.repository, warehouse.id);
+
+    return Object.assign(warehouse, {
+      tiene_chatarra: Boolean(scrapWarehouse),
+    });
+  }
+
+  async create(payload: BodegaPayload) {
     this.preventManualScrapWarehouseMutation(payload);
     this.ensureWarehouseAddress(payload);
     await this.ensureDefaultPurchaseWarehouseAvailability(
@@ -96,20 +115,22 @@ export class BodegaService extends CrudService<Bodega> {
 
         const created = await repo.save(repo.create(preparedPayload));
 
-        await this.ensureScrapWarehouseForParent(
+        const tieneChatarra = payload.tiene_chatarra === true;
+        await this.syncScrapWarehouseForParent(
           repo,
           created,
+          tieneChatarra,
           this.resolveAuditActor(payload, created),
         );
 
-        return created;
+        return Object.assign(created, { tiene_chatarra: tieneChatarra });
       });
     } catch (error) {
       throw await this.normalizeWarehouseWriteError(error);
     }
   }
 
-  async update(id: string, payload: DeepPartial<Bodega>) {
+  async update(id: string, payload: BodegaPayload) {
     const current = await this.findOne(id);
     if (current.es_chatarra) {
       throw new BadRequestException(
@@ -152,13 +173,18 @@ export class BodegaService extends CrudService<Bodega> {
         const merged = repo.merge(fresh, preparedPayload);
         const saved = await repo.save(merged);
 
-        await this.ensureScrapWarehouseForParent(
+        const tieneChatarra =
+          payload.tiene_chatarra === undefined
+            ? current.tiene_chatarra
+            : payload.tiene_chatarra === true;
+        await this.syncScrapWarehouseForParent(
           repo,
           saved,
+          tieneChatarra,
           this.resolveAuditActor(payload, saved),
         );
 
-        return saved;
+        return Object.assign(saved, { tiene_chatarra: tieneChatarra });
       });
     } catch (error) {
       throw await this.normalizeWarehouseWriteError(error, id);
@@ -311,7 +337,7 @@ export class BodegaService extends CrudService<Bodega> {
   }
 
   private ensureWarehouseAddress(
-    payload: DeepPartial<Bodega>,
+    payload: BodegaPayload,
     current?: Bodega | null,
   ) {
     const nextAddress = this.normalizeWarehouseAddress(
@@ -327,7 +353,7 @@ export class BodegaService extends CrudService<Bodega> {
     payload.direccion = nextAddress;
   }
 
-  private preventManualScrapWarehouseMutation(payload: DeepPartial<Bodega>) {
+  private preventManualScrapWarehouseMutation(payload: BodegaPayload) {
     if (payload?.es_chatarra === true || payload?.bodega_padre_id) {
       throw new BadRequestException(
         'Las bodegas chatarra se generan automáticamente. Crea o actualiza la bodega principal.',
@@ -335,8 +361,8 @@ export class BodegaService extends CrudService<Bodega> {
     }
   }
 
-  private prepareRegularWarehousePayload(payload: DeepPartial<Bodega>) {
-    const prepared: DeepPartial<Bodega> = { ...payload };
+  private prepareRegularWarehousePayload(payload: BodegaPayload) {
+    const { tiene_chatarra: _tieneChatarra, ...prepared } = payload;
     if (prepared.codigo !== undefined && prepared.codigo !== null) {
       prepared.codigo = String(prepared.codigo).trim();
     }
@@ -393,7 +419,7 @@ export class BodegaService extends CrudService<Bodega> {
   }
 
   private resolveAuditActor(
-    payload?: DeepPartial<Bodega> | null,
+    payload?: BodegaPayload | null,
     current?: Partial<Bodega> | null,
   ) {
     return this.firstNonEmptyString(
@@ -403,6 +429,19 @@ export class BodegaService extends CrudService<Bodega> {
       current?.created_by,
       'SYSTEM',
     );
+  }
+
+  private async syncScrapWarehouseForParent(
+    repository: Repository<Bodega>,
+    parent: Bodega,
+    enabled: boolean,
+    actor: string,
+  ) {
+    if (enabled) {
+      return this.ensureScrapWarehouseForParent(repository, parent, actor);
+    }
+
+    return this.deactivateScrapWarehouseForParent(repository, parent.id, actor);
   }
 
   private async ensureScrapWarehouseForParent(
@@ -415,7 +454,7 @@ export class BodegaService extends CrudService<Bodega> {
     const scrapName = this.buildScrapWarehouseName(parent.nombre);
     const scrapCode = this.buildScrapWarehouseCode(parent.codigo);
 
-    let scrapWarehouse = await this.findActiveScrapWarehouseByParent(
+    let scrapWarehouse = await this.findScrapWarehouseByParent(
       repository,
       parent.id,
     );
@@ -472,6 +511,38 @@ export class BodegaService extends CrudService<Bodega> {
         is_deleted: false,
       },
     });
+  }
+
+  private async findScrapWarehouseByParent(
+    repository: Repository<Bodega>,
+    parentId: string,
+  ) {
+    return repository.findOne({
+      where: {
+        bodega_padre_id: parentId,
+        es_chatarra: true,
+      },
+      order: { updated_at: 'DESC' },
+    });
+  }
+
+  private async deactivateScrapWarehouseForParent(
+    repository: Repository<Bodega>,
+    parentId: string,
+    actor: string,
+  ) {
+    const scrapWarehouse = await this.findActiveScrapWarehouseByParent(
+      repository,
+      parentId,
+    );
+    if (!scrapWarehouse) return null;
+
+    const now = new Date();
+    scrapWarehouse.is_deleted = true;
+    scrapWarehouse.deleted_at = now;
+    scrapWarehouse.deleted_by = actor || null;
+    scrapWarehouse.updated_by = actor || scrapWarehouse.updated_by;
+    return repository.save(scrapWarehouse);
   }
 
   private async findMatchingScrapWarehouseCandidate(

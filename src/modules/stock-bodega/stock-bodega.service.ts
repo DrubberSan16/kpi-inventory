@@ -238,6 +238,9 @@ export class StockBodegaService
             .orWhere('producto.codigo ILIKE :search', {
               search: `%${search}%`,
             })
+            .orWhere("COALESCE(producto.descripcion, '') ILIKE :search", {
+              search: `%${search}%`,
+            })
             .orWhere('bodega.nombre ILIKE :search', {
               search: `%${search}%`,
             })
