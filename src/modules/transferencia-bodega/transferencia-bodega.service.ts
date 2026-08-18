@@ -1097,7 +1097,38 @@ export class TransferenciaBodegaService {
           await manager.save(MovimientoInventario, sourceIn);
         }
 
+        const annulledMovementIds = [
+          transfer.movimiento_salida_id,
+          transfer.movimiento_ingreso_id,
+          destinationOut.id,
+          sourceIn?.id,
+        ].filter((value): value is string => Boolean(value));
+        if (annulledMovementIds.length) {
+          await manager
+            .createQueryBuilder()
+            .update(MovimientoInventario)
+            .set({
+              estado: 'ANULADO',
+              status: 'INACTIVE',
+              updated_by: annulledBy,
+            })
+            .where('id IN (:...annulledMovementIds)', { annulledMovementIds })
+            .execute();
+          await manager
+            .createQueryBuilder()
+            .update(Kardex)
+            .set({
+              status: 'INACTIVE',
+              updated_by: annulledBy,
+            })
+            .where('movimiento_id IN (:...annulledMovementIds)', {
+              annulledMovementIds,
+            })
+            .execute();
+        }
+
         transfer.estado = 'ANULADA';
+        transfer.status = 'INACTIVE';
         transfer.updated_by = annulledBy;
         await manager.save(TransferenciaBodega, transfer);
 

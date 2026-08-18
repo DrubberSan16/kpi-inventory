@@ -302,6 +302,8 @@ export class KardexService extends CrudService<Kardex> {
       )
       .where('kardex.is_deleted = false');
 
+    this.applyVisibleKardexTransactionFilter(qb);
+
     if (sucursalId) {
       qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
     }
@@ -427,6 +429,8 @@ export class KardexService extends CrudService<Kardex> {
         fromDate: range.from,
         toDate: range.to,
       });
+
+    this.applyVisibleKardexTransactionFilter(baseQb);
 
     if (sucursalId) {
       baseQb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
@@ -663,6 +667,8 @@ export class KardexService extends CrudService<Kardex> {
         toDate: range.to,
       });
 
+    this.applyVisibleKardexTransactionFilter(qb);
+
     if (sucursalId) {
       qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
     }
@@ -871,6 +877,8 @@ export class KardexService extends CrudService<Kardex> {
       .andWhere(
         "(COALESCE(movimiento.numero_documento, '') <> '' OR COALESCE(movimiento.referencia, '') <> '')",
       );
+
+    this.applyVisibleMovementDocumentFilter(qb);
 
     if (sucursalId) {
       qb.andWhere(
@@ -1202,6 +1210,72 @@ export class KardexService extends CrudService<Kardex> {
     return result;
   }
 
+  private applyVisibleKardexTransactionFilter(
+    qb: SelectQueryBuilder<Kardex>,
+  ) {
+    qb.andWhere(`
+      NOT EXISTS (
+        SELECT 1
+        FROM kpi_inventory.tb_movimiento_inventario movimiento_anulado
+        WHERE movimiento_anulado.id = kardex.movimiento_id
+          AND (
+            movimiento_anulado.is_deleted = true
+            OR UPPER(TRIM(COALESCE(movimiento_anulado.tipo_documento, ''))) LIKE 'ANULACION_TRANSFERENCIA%'
+            OR UPPER(TRIM(COALESCE(movimiento_anulado.estado, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+            OR UPPER(TRIM(COALESCE(movimiento_anulado.status, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+          )
+      )
+    `);
+    qb.andWhere(`
+      NOT EXISTS (
+        SELECT 1
+        FROM kpi_inventory.tb_transferencia_bodega transferencia_anulada
+        LEFT JOIN kpi_inventory.tb_transferencia_bodega_det transferencia_det_anulada
+          ON transferencia_det_anulada.transferencia_bodega_id = transferencia_anulada.id
+        WHERE (
+            transferencia_anulada.movimiento_salida_id = kardex.movimiento_id
+            OR transferencia_anulada.movimiento_ingreso_id = kardex.movimiento_id
+            OR transferencia_det_anulada.kardex_salida_id = kardex.id
+            OR transferencia_det_anulada.kardex_ingreso_id = kardex.id
+          )
+          AND (
+            transferencia_anulada.is_deleted = true
+            OR UPPER(TRIM(COALESCE(transferencia_anulada.estado, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+            OR UPPER(TRIM(COALESCE(transferencia_anulada.status, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+          )
+      )
+    `);
+  }
+
+  private applyVisibleMovementDocumentFilter(
+    qb: SelectQueryBuilder<MovimientoInventario>,
+  ) {
+    qb.andWhere(`
+      UPPER(TRIM(COALESCE(movimiento.tipo_documento, ''))) NOT LIKE 'ANULACION_TRANSFERENCIA%'
+    `);
+    qb.andWhere(`
+      UPPER(TRIM(COALESCE(movimiento.estado, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+    `);
+    qb.andWhere(`
+      UPPER(TRIM(COALESCE(movimiento.status, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+    `);
+    qb.andWhere(`
+      NOT EXISTS (
+        SELECT 1
+        FROM kpi_inventory.tb_transferencia_bodega transferencia_anulada
+        WHERE (
+            transferencia_anulada.movimiento_salida_id = movimiento.id
+            OR transferencia_anulada.movimiento_ingreso_id = movimiento.id
+          )
+          AND (
+            transferencia_anulada.is_deleted = true
+            OR UPPER(TRIM(COALESCE(transferencia_anulada.estado, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+            OR UPPER(TRIM(COALESCE(transferencia_anulada.status, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+          )
+      )
+    `);
+  }
+
   private applyMaterialSearchFilter(
     qb: SelectQueryBuilder<Kardex>,
     search?: string | null,
@@ -1360,6 +1434,8 @@ export class KardexService extends CrudService<Kardex> {
       .where('kardex.is_deleted = false')
       .andWhere('kardex.producto_id IN (:...productIds)', { productIds })
       .andWhere('kardex.fecha < :fromDate', { fromDate });
+
+    this.applyVisibleKardexTransactionFilter(qb);
 
     if (sucursalId) {
       qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
