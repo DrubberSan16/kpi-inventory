@@ -1104,6 +1104,7 @@ export class TransferenciaBodegaService {
           sourceIn?.id,
         ].filter((value): value is string => Boolean(value));
         if (annulledMovementIds.length) {
+          const annulledAt = new Date();
           await manager
             .createQueryBuilder()
             .update(MovimientoInventario)
@@ -1111,6 +1112,9 @@ export class TransferenciaBodegaService {
               estado: 'ANULADO',
               status: 'INACTIVE',
               updated_by: annulledBy,
+              is_deleted: true,
+              deleted_at: annulledAt,
+              deleted_by: annulledBy,
             })
             .where('id IN (:...annulledMovementIds)', { annulledMovementIds })
             .execute();
@@ -1120,6 +1124,9 @@ export class TransferenciaBodegaService {
             .set({
               status: 'INACTIVE',
               updated_by: annulledBy,
+              is_deleted: true,
+              deleted_at: annulledAt,
+              deleted_by: annulledBy,
             })
             .where('movimiento_id IN (:...annulledMovementIds)', {
               annulledMovementIds,
