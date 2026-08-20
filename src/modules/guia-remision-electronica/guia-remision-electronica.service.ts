@@ -1347,7 +1347,7 @@ export class GuiaRemisionElectronicaService
         cod_estab_destino: this.requireGuideText(
           dto.cod_estab_destino,
           3,
-          'CÃ³digo establecimiento destino',
+          'Código establecimiento destino',
         ),
         ruta: this.cleanOptionalText(dto.ruta, 300) || autoRoute,
         cod_doc_sustento: this.cleanOptionalText(dto.cod_doc_sustento, 2),
