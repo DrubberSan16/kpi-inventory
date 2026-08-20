@@ -1971,6 +1971,7 @@ export class GuiaRemisionElectronicaService
         producto_id: item.producto_id,
         codigo_producto: item.codigo_producto || product?.codigo || '',
         nombre_producto: item.nombre_producto || product?.nombre || '',
+        descripcion_producto: product?.descripcion || '',
         cantidad: item.cantidad,
         observacion: item.observacion || '',
       };
