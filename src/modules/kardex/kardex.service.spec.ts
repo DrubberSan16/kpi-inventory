@@ -5,6 +5,7 @@ import {
   EntityManager,
   ObjectLiteral,
   Repository,
+  WhereExpressionBuilder,
 } from 'typeorm';
 import { Bodega } from '../entities/bodega.entity';
 import { Categoria } from '../entities/categoria.entity';
@@ -95,10 +96,16 @@ type MaterialSearchFilterResolver = {
 };
 
 type CriticalStockResolver = {
-  applyOutgoingStockWithCriticalFallback(
+  resolveManualMovementCondition(
     stock: StockBodega,
-    quantity: number,
-  ): { total: number; condition: 'NUEVO' | 'CRITICO' };
+    type: 'INGRESO' | 'SALIDA',
+    requestedCondition?: unknown,
+  ): 'NUEVO' | 'USADO' | 'CRITICO';
+  applyStockDeltaByCondition(
+    stock: StockBodega,
+    delta: number,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+  ): number;
 };
 
 const emptyRepository = <T extends ObjectLiteral>() =>
@@ -138,14 +145,21 @@ describe('KardexService material search filters', () => {
     );
 
     expect(andWhere).toHaveBeenCalledTimes(1);
-    const brackets = andWhere.mock.calls[0][0] as Brackets;
+    const calls = andWhere.mock.calls as unknown as Array<[Brackets]>;
+    const brackets = calls[0][0];
     const where = jest.fn().mockReturnThis();
     const orWhere = jest.fn().mockReturnThis();
-    brackets.whereFactory({ where, orWhere } as any);
+    brackets.whereFactory({
+      where,
+      orWhere,
+    } as unknown as WhereExpressionBuilder);
 
     const params = { search: '%EMPAQUE TAPA VALVULA%' };
     expect(where).toHaveBeenCalledWith('producto.nombre ILIKE :search', params);
-    expect(orWhere).toHaveBeenCalledWith('producto.codigo ILIKE :search', params);
+    expect(orWhere).toHaveBeenCalledWith(
+      'producto.codigo ILIKE :search',
+      params,
+    );
     expect(orWhere).toHaveBeenCalledWith(
       "COALESCE(movimiento.numero_documento, '') ILIKE :search",
       params,
@@ -166,11 +180,15 @@ describe('KardexService critical stock', () => {
       stock_critico: '5.000000',
     } as StockBodega;
 
-    const result = asCriticalStockResolver(
-      buildService(),
-    ).applyOutgoingStockWithCriticalFallback(stock, 2);
+    const resolver = asCriticalStockResolver(buildService());
+    const condition = resolver.resolveManualMovementCondition(
+      stock,
+      'SALIDA',
+      'NUEVO',
+    );
+    const total = resolver.applyStockDeltaByCondition(stock, -2, condition);
 
-    expect(result).toEqual({ total: 3, condition: 'CRITICO' });
+    expect({ total, condition }).toEqual({ total: 3, condition: 'CRITICO' });
     expect(stock).toMatchObject({
       stock_actual: '3.000000',
       stock_nuevo: '0.000000',
@@ -405,18 +423,18 @@ describe('KardexService inventory import locations', () => {
 
   it('rechaza un desglose que no coincide con el stock total', () => {
     expect(() =>
-      asImportLocationResolver(
-        buildService(),
-      ).reconcileInventoryStockBreakdown({
-        hasStockActual: true,
-        hasStockNuevo: true,
-        hasStockUsado: true,
-        hasStockCritico: true,
-        stockActual: 1,
-        stockNuevo: 2,
-        stockUsado: 1,
-        stockCritico: 0,
-      }),
+      asImportLocationResolver(buildService()).reconcileInventoryStockBreakdown(
+        {
+          hasStockActual: true,
+          hasStockNuevo: true,
+          hasStockUsado: true,
+          hasStockCritico: true,
+          stockActual: 1,
+          stockNuevo: 2,
+          stockUsado: 1,
+          stockCritico: 0,
+        },
+      ),
     ).toThrow(
       'Stock Actual (1) debe coincidir con Stock Nuevo + Stock Usado + Stock Critico (3).',
     );

@@ -295,11 +295,7 @@ export class KardexService extends CrudService<Kardex> {
         'bodega',
         'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
       )
-      .innerJoin(
-        Producto,
-        'producto',
-        this.visibleProductJoinCondition,
-      )
+      .innerJoin(Producto, 'producto', this.visibleProductJoinCondition)
       .where('kardex.is_deleted = false');
 
     this.applyVisibleKardexTransactionFilter(qb);
@@ -389,11 +385,7 @@ export class KardexService extends CrudService<Kardex> {
         'bodega',
         'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
       )
-      .innerJoin(
-        Producto,
-        'producto',
-        this.visibleProductJoinCondition,
-      )
+      .innerJoin(Producto, 'producto', this.visibleProductJoinCondition)
       .leftJoin(
         Linea,
         'linea',
@@ -451,7 +443,9 @@ export class KardexService extends CrudService<Kardex> {
 
     const normalizedType = this.normalizeMovementType(params?.tipo_movimiento);
     if (normalizedType) {
-      baseQb.andWhere('kardex.tipo_movimiento = :normalizedType', { normalizedType });
+      baseQb.andWhere('kardex.tipo_movimiento = :normalizedType', {
+        normalizedType,
+      });
     }
 
     this.applyMaterialSearchFilter(baseQb, search);
@@ -623,11 +617,7 @@ export class KardexService extends CrudService<Kardex> {
         'bodega',
         'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
       )
-      .innerJoin(
-        Producto,
-        'producto',
-        this.visibleProductJoinCondition,
-      )
+      .innerJoin(Producto, 'producto', this.visibleProductJoinCondition)
       .leftJoin(
         Linea,
         'linea',
@@ -679,7 +669,9 @@ export class KardexService extends CrudService<Kardex> {
 
     const normalizedType = this.normalizeMovementType(params?.tipo_movimiento);
     if (normalizedType) {
-      qb.andWhere('kardex.tipo_movimiento = :normalizedType', { normalizedType });
+      qb.andWhere('kardex.tipo_movimiento = :normalizedType', {
+        normalizedType,
+      });
     }
 
     this.applyMaterialSearchFilter(qb, search);
@@ -706,6 +698,7 @@ export class KardexService extends CrudService<Kardex> {
         'unidad.nombre AS unidad_nombre',
         'bodega.codigo AS bodega_codigo',
         'bodega.nombre AS bodega_nombre',
+        'movimiento.id AS movimiento_id',
         'movimiento.numero_documento AS movimiento_numero_documento',
         'movimiento.referencia AS movimiento_referencia',
         'movimiento.tipo_documento AS movimiento_tipo_documento',
@@ -761,7 +754,8 @@ export class KardexService extends CrudService<Kardex> {
       ).getTime();
       const movementHasLatestUpdate =
         Number.isFinite(movementUpdatedAt) &&
-        (!Number.isFinite(kardexUpdatedAt) || movementUpdatedAt >= kardexUpdatedAt);
+        (!Number.isFinite(kardexUpdatedAt) ||
+          movementUpdatedAt >= kardexUpdatedAt);
       const latestUpdateValue = movementHasLatestUpdate
         ? row.movimiento_updated_at
         : row.kardex_updated_at || row.created_at;
@@ -780,6 +774,7 @@ export class KardexService extends CrudService<Kardex> {
 
       return {
         id: this.toText(row.kardex_id),
+        documento_id: this.toText(row.movimiento_id) || null,
         fecha_emision: this.formatDateTimeForClient(row.fecha),
         fecha_creacion: this.formatDateTimeForClient(row.created_at),
         fecha_actualizacion: this.formatDateTimeForClient(latestUpdateValue),
@@ -1210,9 +1205,7 @@ export class KardexService extends CrudService<Kardex> {
     return result;
   }
 
-  private applyVisibleKardexTransactionFilter(
-    qb: SelectQueryBuilder<Kardex>,
-  ) {
+  private applyVisibleKardexTransactionFilter(qb: SelectQueryBuilder<Kardex>) {
     qb.andWhere(`
       NOT EXISTS (
         SELECT 1
@@ -1550,6 +1543,10 @@ export class KardexService extends CrudService<Kardex> {
           cantidad: this.toNumber(detail.cantidad, 0),
           costo_unitario: this.toNumber(detail.costo_unitario, 0),
           subtotal_costo: this.toNumber(detail.subtotal_costo, 0),
+          condicion_material: this.toText(detail.condicion_material) || 'NUEVO',
+          lote: this.toText(detail.lote) || null,
+          serie: this.toText(detail.serie) || null,
+          fecha_vencimiento: this.toText(detail.fecha_vencimiento) || null,
           observacion: this.toText(detail.observacion) || null,
         };
       });
@@ -1614,22 +1611,22 @@ export class KardexService extends CrudService<Kardex> {
   ) {
     const movementRows = await manager.find(MovimientoInventario, {
       where: { is_deleted: false },
-      select: { numero_documento: true } as any,
+      select: { numero_documento: true },
       take: 500,
-      order: { created_at: 'DESC' } as any,
+      order: { created_at: 'DESC' },
     });
     const orderRows =
       prefix === 'IB'
         ? await manager.find(OrdenCompra, {
             where: { is_deleted: false },
-            select: { referencia: true } as any,
+            select: { referencia: true },
             take: 500,
-            order: { created_at: 'DESC' } as any,
+            order: { created_at: 'DESC' },
           })
         : [];
     const values = [
-      ...movementRows.map((item: any) => this.toText(item?.numero_documento)),
-      ...orderRows.map((item: any) => this.toText(item?.referencia)),
+      ...movementRows.map((item) => this.toText(item.numero_documento)),
+      ...orderRows.map((item) => this.toText(item.referencia)),
     ];
     const maxNumber = values.reduce((max, current) => {
       const match = new RegExp(`^${prefix}-(\\d{8})$`, 'i').exec(current);
@@ -1777,10 +1774,10 @@ export class KardexService extends CrudService<Kardex> {
           );
           if (processed) summary.procesados += 1;
           else summary.omitidos += 1;
-        } catch (error: any) {
-          summary.errores.push(
-            `Fila ${index + 2}: ${error?.message ?? 'No se pudo importar.'}`,
-          );
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : 'No se pudo importar.';
+          summary.errores.push(`Fila ${index + 2}: ${errorMessage}`);
         }
       }
 
@@ -2097,7 +2094,17 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private toText(value: unknown) {
-    return this.repairText(String(value ?? ''));
+    if (value == null) return '';
+    if (typeof value === 'string') return this.repairText(value);
+    if (
+      typeof value === 'number' ||
+      typeof value === 'boolean' ||
+      typeof value === 'bigint'
+    ) {
+      return this.repairText(String(value));
+    }
+    if (value instanceof Date) return value.toISOString();
+    return '';
   }
 
   private toFixedText(value: number, decimals: number) {
@@ -2193,11 +2200,7 @@ export class KardexService extends CrudService<Kardex> {
       };
     }
 
-    if (
-      !input.hasStockNuevo &&
-      !input.hasStockUsado &&
-      !hasStockCritico
-    ) {
+    if (!input.hasStockNuevo && !input.hasStockUsado && !hasStockCritico) {
       return {
         stockActual,
         stockNuevo: stockActual,
@@ -2367,8 +2370,8 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private repairText(value: string) {
-    let text = String(value ?? '')
-      .replace(/\u0000/g, '')
+    const text = String(value ?? '')
+      .replaceAll(String.fromCharCode(0), '')
       .replace(/^\uFEFF/, '')
       .trim();
     if (!text) return '';
@@ -2452,7 +2455,7 @@ export class KardexService extends CrudService<Kardex> {
     try {
       const summary = await this.importInventoryWorkbook(buffer, {
         ...options,
-        onProgress: async ({ currentIndex, totalRows, currentStep }) => {
+        onProgress: ({ currentIndex, totalRows, currentStep }) => {
           const currentJob = this.importJobs.get(jobId);
           if (!currentJob) return;
           currentJob.current_index = currentIndex;
@@ -2645,7 +2648,7 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   private normalizeManualMaterialCondition(value: unknown): 'NUEVO' | 'USADO' {
-    const normalized = String(value ?? '').trim().toUpperCase();
+    const normalized = this.toText(value).trim().toUpperCase();
     if (normalized === 'NUEVO') return 'NUEVO';
     if (normalized === 'USADO') return 'USADO';
     throw new BadRequestException(
@@ -2671,12 +2674,12 @@ export class KardexService extends CrudService<Kardex> {
       return 'CRITICO';
     }
 
-    const raw = String(requestedCondition ?? '').trim();
+    const raw = this.toText(requestedCondition).trim();
     if (tipo === 'INGRESO') {
       return raw ? this.normalizeManualMaterialCondition(raw) : 'NUEVO';
     }
 
-    if (!Boolean(stockRow.es_usado)) return 'NUEVO';
+    if (!stockRow.es_usado) return 'NUEVO';
     if (!raw) {
       throw new BadRequestException(
         'Debes indicar si el egreso se realiza desde stock NUEVO o USADO.',
@@ -2693,7 +2696,7 @@ export class KardexService extends CrudService<Kardex> {
     const closedStatuses = this.closedWorkOrderStatuses
       .map((status) => `'${status.replace(/'/g, "''")}'`)
       .join(', ');
-    const rows = await manager.query(
+    const queryResult: unknown = await manager.query(
       `SELECT COALESCE(SUM(COALESCE(reserva.cantidad, 0)), 0) AS cantidad
        FROM kpi_inventory.tb_reserva_stock reserva
        INNER JOIN kpi_process.tb_work_order work_order
@@ -2706,7 +2709,14 @@ export class KardexService extends CrudService<Kardex> {
          AND UPPER(TRIM(COALESCE(work_order.status_workflow, 'PLANNED'))) NOT IN (${closedStatuses})`,
       [productoId, bodegaId],
     );
-    return Math.max(this.toNumber(rows?.[0]?.cantidad, 0), 0);
+    const firstRow: unknown = Array.isArray(queryResult)
+      ? queryResult[0]
+      : null;
+    const quantity =
+      firstRow && typeof firstRow === 'object' && 'cantidad' in firstRow
+        ? firstRow.cantidad
+        : 0;
+    return Math.max(this.toNumber(quantity, 0), 0);
   }
 
   private getAvailableStockByCondition(
@@ -2751,7 +2761,8 @@ export class KardexService extends CrudService<Kardex> {
     condition: 'NUEVO' | 'USADO' | 'CRITICO',
   ) {
     if (condition === 'USADO') return this.applyUsedStockDelta(stockRow, delta);
-    if (condition === 'CRITICO') return this.applyCriticalStockDelta(stockRow, delta);
+    if (condition === 'CRITICO')
+      return this.applyCriticalStockDelta(stockRow, delta);
     return this.applyNewStockDelta(stockRow, delta);
   }
 
@@ -3277,17 +3288,11 @@ export class KardexService extends CrudService<Kardex> {
       ? this.toNumber(this.rowValue(row, ['Stock Usado']), 0)
       : 0;
     const stockCriticoInformado = hasStockCritico
-      ? this.toNumber(
-          this.rowValue(row, ['Stock Critico', 'Stock Crítico']),
-          0,
-        )
+      ? this.toNumber(this.rowValue(row, ['Stock Critico', 'Stock Crítico']), 0)
       : 0;
     const stockNuevoInformado = hasStockNuevo
       ? this.toNumber(this.rowValue(row, ['Stock Nuevo']), 0)
-      : Math.max(
-          stockActual - stockUsadoInformado - stockCriticoInformado,
-          0,
-        );
+      : Math.max(stockActual - stockUsadoInformado - stockCriticoInformado, 0);
     const stockTargets = this.reconcileInventoryStockBreakdown({
       hasStockActual,
       hasStockNuevo,
