@@ -181,6 +181,15 @@ export class KardexService
       ALTER TABLE IF EXISTS kpi_inventory.tb_movimiento_inventario
       ADD COLUMN IF NOT EXISTS origen_documento text
     `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_movimiento_inventario
+      SET origen_documento = 'KARDEX_MANUAL'
+      WHERE is_deleted = false
+        AND NULLIF(BTRIM(COALESCE(origen_documento, '')), '') IS NULL
+        AND UPPER(TRIM(COALESCE(tipo_documento, ''))) IN ('INGRESO_BODEGA', 'EGRESO_BODEGA')
+        AND NULLIF(BTRIM(COALESCE(referencia, '')), '') IS NULL
+        AND work_order_id IS NULL
+    `);
   }
 
   private isKardexPurgeSuperAdministratorRoleName(roleName?: string): boolean {

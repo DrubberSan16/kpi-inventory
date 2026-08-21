@@ -199,6 +199,18 @@ describe('KardexService critical stock', () => {
 });
 
 describe('KardexService manual movement annulment', () => {
+  it('marca de forma conservadora los movimientos manuales históricos', async () => {
+    const query = jest.fn().mockResolvedValue(undefined);
+    const service = buildService({ query } as unknown as DataSource);
+
+    await service.onModuleInit();
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[1][0]).toContain("SET origen_documento = 'KARDEX_MANUAL'");
+    expect(query.mock.calls[1][0]).toContain('NULLIF(BTRIM(COALESCE(referencia, \'\')), \'\') IS NULL');
+    expect(query.mock.calls[1][0]).toContain('work_order_id IS NULL');
+  });
+
   it('revierte el stock y desactiva los documentos generados desde Kardex', async () => {
     const movement = {
       id: 'movimiento-1',
