@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
@@ -111,7 +112,10 @@ type InventoryImportJobState = {
 };
 
 @Injectable()
-export class KardexService extends CrudService<Kardex> {
+export class KardexService
+  extends CrudService<Kardex>
+  implements OnModuleInit
+{
   private readonly logger = new Logger(KardexService.name);
   private readonly closedWorkOrderStatuses = [
     'CANCELLED',
@@ -166,6 +170,17 @@ export class KardexService extends CrudService<Kardex> {
     this.importRoot =
       configuredImportRoot ||
       join(process.cwd(), 'storage', 'inventory-imports');
+  }
+
+  async onModuleInit() {
+    await this.ensureKardexMovementSchema();
+  }
+
+  private async ensureKardexMovementSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_movimiento_inventario
+      ADD COLUMN IF NOT EXISTS origen_documento text
+    `);
   }
 
   private isKardexPurgeSuperAdministratorRoleName(roleName?: string): boolean {
@@ -1034,6 +1049,7 @@ export class KardexService extends CrudService<Kardex> {
           fecha_movimiento: fechaMovimiento,
           tipo_documento:
             tipo === 'INGRESO' ? 'INGRESO_BODEGA' : 'EGRESO_BODEGA',
+          origen_documento: 'KARDEX_MANUAL',
           numero_documento: numeroDocumento,
           referencia: this.toText(payload.referencia) || null,
           observacion: this.toText(payload.observacion) || null,
@@ -1202,6 +1218,77 @@ export class KardexService extends CrudService<Kardex> {
         actorUsername: userName,
       },
     );
+    return result;
+  }
+
+  async annulMovementDocument(
+    id: string,
+    annulledBy = 'SYSTEM',
+    sucursalId?: string | null,
+  ) {
+    const changedStockIds = new Set<string>();
+    const result = await this.dataSource.transaction(async (manager) => {
+      const movement = await manager.findOne(MovimientoInventario, {
+        where: { id, is_deleted: false },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!movement) throw new NotFoundException('El documento de bodega no existe.');
+      if (this.toText(movement.origen_documento).toUpperCase() !== 'KARDEX_MANUAL') {
+        throw new BadRequestException('Solo se pueden anular documentos registrados desde el módulo de Kardex.');
+      }
+      const warehouseId = this.toText(
+        movement.tipo_movimiento === 'INGRESO'
+          ? movement.bodega_destino_id
+          : movement.bodega_origen_id,
+      );
+      if (!warehouseId) throw new BadRequestException('El documento no tiene una bodega válida.');
+      if (sucursalId) {
+        const warehouse = await manager.findOne(Bodega, { where: { id: warehouseId, sucursal_id: sucursalId, is_deleted: false } });
+        if (!warehouse) throw new NotFoundException('El documento de bodega no existe.');
+      }
+      const details = await manager.find(MovimientoInventarioDet, {
+        where: { movimiento_id: movement.id, is_deleted: false },
+        order: { created_at: 'ASC' },
+      });
+      if (!details.length) throw new BadRequestException('El documento no tiene detalles para revertir.');
+
+      for (const detail of details) {
+        const quantity = this.toNumber(detail.cantidad, 0);
+        const condition =
+          String(detail.condicion_material || 'NUEVO').trim().toUpperCase() ===
+          'USADO'
+            ? 'USADO'
+            : String(detail.condicion_material || 'NUEVO')
+                  .trim()
+                  .toUpperCase() === 'CRITICO'
+              ? 'CRITICO'
+              : 'NUEVO';
+        const stock = await manager.findOne(StockBodega, {
+          where: { bodega_id: warehouseId, producto_id: detail.producto_id, is_deleted: false },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!stock) throw new BadRequestException('No se encontró el stock a revertir.');
+        const delta = movement.tipo_movimiento === 'INGRESO' ? -quantity : quantity;
+        const total = this.applyStockDeltaByCondition(stock, delta, condition);
+        stock.stock_fisico = this.toFixedText(this.toNumber(stock.stock_fisico, total - delta) + delta, 6);
+        stock.updated_by = annulledBy;
+        await manager.save(StockBodega, stock);
+        changedStockIds.add(stock.id);
+      }
+
+      const now = new Date();
+      await manager.createQueryBuilder().update(MovimientoInventarioDet).set({ status: 'INACTIVE', is_deleted: true, deleted_at: now, deleted_by: annulledBy, updated_by: annulledBy }).where('movimiento_id = :id', { id: movement.id }).execute();
+      await manager.createQueryBuilder().update(Kardex).set({ status: 'INACTIVE', is_deleted: true, deleted_at: now, deleted_by: annulledBy, updated_by: annulledBy }).where('movimiento_id = :id', { id: movement.id }).execute();
+      movement.estado = 'ANULADO';
+      movement.status = 'INACTIVE';
+      movement.is_deleted = true;
+      movement.deleted_at = now;
+      movement.deleted_by = annulledBy;
+      movement.updated_by = annulledBy;
+      await manager.save(MovimientoInventario, movement);
+      return { id: movement.id, numero_documento: movement.numero_documento, estado: movement.estado };
+    });
+    await this.notifyMaintenanceRecalculationForStocks([...changedStockIds], 'document-annulment', { actorUsername: annulledBy });
     return result;
   }
 

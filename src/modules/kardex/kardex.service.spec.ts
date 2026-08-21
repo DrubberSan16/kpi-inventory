@@ -111,7 +111,7 @@ type CriticalStockResolver = {
 const emptyRepository = <T extends ObjectLiteral>() =>
   ({}) as unknown as Repository<T>;
 
-const buildService = () =>
+const buildService = (dataSource = {} as DataSource) =>
   new KardexService(
     emptyRepository<Kardex>(),
     emptyRepository<StockBodega>(),
@@ -124,7 +124,7 @@ const buildService = () =>
     emptyRepository<Categoria>(),
     emptyRepository<UnidadMedida>(),
     { get: jest.fn().mockReturnValue('') } as unknown as ConfigService,
-    {} as unknown as DataSource,
+    dataSource,
   );
 
 const asImportLocationResolver = (service: KardexService) =>
@@ -195,6 +195,89 @@ describe('KardexService critical stock', () => {
       stock_usado: '0.000000',
       stock_critico: '3.000000',
     });
+  });
+});
+
+describe('KardexService manual movement annulment', () => {
+  it('revierte el stock y desactiva los documentos generados desde Kardex', async () => {
+    const movement = {
+      id: 'movimiento-1',
+      origen_documento: 'KARDEX_MANUAL',
+      tipo_movimiento: 'SALIDA',
+      bodega_origen_id: 'bodega-1',
+      numero_documento: 'KB-0001',
+    } as MovimientoInventario;
+    const stock = {
+      id: 'stock-1',
+      bodega_id: 'bodega-1',
+      producto_id: 'producto-1',
+      stock_actual: '5.000000',
+      stock_fisico: '5.000000',
+      stock_nuevo: '5.000000',
+      stock_usado: '0.000000',
+      stock_critico: '0.000000',
+    } as StockBodega;
+    const queryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    const manager = {
+      findOne: jest
+        .fn()
+        .mockResolvedValueOnce(movement)
+        .mockResolvedValueOnce(stock),
+      find: jest.fn().mockResolvedValue([
+        {
+          producto_id: 'producto-1',
+          cantidad: '5',
+          condicion_material: 'NUEVO',
+        } as MovimientoInventarioDet,
+      ]),
+      save: jest.fn().mockResolvedValue(undefined),
+      createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+    };
+    const dataSource = {
+      transaction: jest.fn((callback) => callback(manager)),
+    } as unknown as DataSource;
+    const service = buildService(dataSource);
+    jest
+      .spyOn(service as any, 'notifyMaintenanceRecalculationForStocks')
+      .mockResolvedValue(undefined);
+
+    await expect(
+      service.annulMovementDocument('movimiento-1', 'tester'),
+    ).resolves.toMatchObject({ id: 'movimiento-1', estado: 'ANULADO' });
+
+    expect(stock).toMatchObject({
+      stock_actual: '10.000000',
+      stock_fisico: '10.000000',
+      stock_nuevo: '10.000000',
+    });
+    expect(movement).toMatchObject({
+      estado: 'ANULADO',
+      status: 'INACTIVE',
+      is_deleted: true,
+      deleted_by: 'tester',
+    });
+    expect(queryBuilder.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('rechaza documentos que no se originaron en Kardex', async () => {
+    const manager = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'movimiento-transferencia',
+        origen_documento: 'TRANSFERENCIA_BODEGA',
+      }),
+    };
+    const service = buildService({
+      transaction: jest.fn((callback) => callback(manager)),
+    } as unknown as DataSource);
+
+    await expect(
+      service.annulMovementDocument('movimiento-transferencia'),
+    ).rejects.toThrow('Solo se pueden anular documentos registrados desde el módulo de Kardex.');
   });
 });
 

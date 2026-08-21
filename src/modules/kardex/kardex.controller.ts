@@ -33,6 +33,17 @@ import { KardexService } from './kardex.service';
 const { CreateDto: CreateKardexDto, UpdateDto: UpdateKardexDto } =
   buildCrudRequestDtos(Kardex);
 
+function getRequestActor(req?: any) {
+  return String(
+    req?.headers?.['x-user-display-name'] ||
+      req?.headers?.['x-user-name'] ||
+      req?.user?.nameSurname ||
+      req?.user?.nameUser ||
+      req?.user?.username ||
+      'SYSTEM',
+  ).trim();
+}
+
 @ApiTags('kardex')
 @Controller('kardex')
 export class KardexController extends CrudController<Kardex> {
@@ -221,6 +232,19 @@ export class KardexController extends CrudController<Kardex> {
     return {
       message: 'Documento de bodega registrado correctamente.',
       data: await this.service.createMovementDocument(payload),
+    };
+  }
+
+  @Patch('documentos/:id/anular')
+  @ApiOperation({ summary: 'Anular un documento manual de Kardex y revertir su stock' })
+  async annulMovementDocument(@Param('id') id: string, @Req() req?: any) {
+    return {
+      message: 'Documento manual de Kardex anulado correctamente.',
+      data: await this.service.annulMovementDocument(
+        id,
+        getRequestActor(req),
+        getSucursalScopeId(req),
+      ),
     };
   }
 
