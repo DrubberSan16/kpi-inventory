@@ -252,6 +252,7 @@ describe('KardexService manual movement annulment', () => {
       createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
     };
     const dataSource = {
+      query: jest.fn().mockResolvedValue(undefined),
       transaction: jest.fn((callback) => callback(manager)),
     } as unknown as DataSource;
     const service = buildService(dataSource);
@@ -285,6 +286,7 @@ describe('KardexService manual movement annulment', () => {
       }),
     };
     const service = buildService({
+      query: jest.fn().mockResolvedValue(undefined),
       transaction: jest.fn((callback) => callback(manager)),
     } as unknown as DataSource);
 
