@@ -187,8 +187,26 @@ export class KardexService
       WHERE is_deleted = false
         AND NULLIF(BTRIM(COALESCE(origen_documento, '')), '') IS NULL
         AND UPPER(TRIM(COALESCE(tipo_documento, ''))) IN ('INGRESO_BODEGA', 'EGRESO_BODEGA')
-        AND NULLIF(BTRIM(COALESCE(referencia, '')), '') IS NULL
         AND work_order_id IS NULL
+        AND UPPER(TRIM(COALESCE(referencia, ''))) NOT LIKE 'TB-%'
+        AND UPPER(TRIM(COALESCE(referencia, ''))) NOT LIKE 'OC-%'
+        AND UPPER(TRIM(COALESCE(referencia, ''))) NOT LIKE 'OT-%'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM kpi_inventory.tb_transferencia_bodega transferencia
+          WHERE transferencia.movimiento_salida_id = tb_movimiento_inventario.id
+             OR transferencia.movimiento_ingreso_id = tb_movimiento_inventario.id
+             OR UPPER(TRIM(COALESCE(transferencia.codigo, '')))
+                = UPPER(TRIM(COALESCE(tb_movimiento_inventario.referencia, '')))
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM kpi_inventory.tb_orden_compra orden_compra
+          WHERE UPPER(TRIM(COALESCE(orden_compra.codigo, '')))
+                  = UPPER(TRIM(COALESCE(tb_movimiento_inventario.referencia, '')))
+             OR UPPER(TRIM(COALESCE(orden_compra.referencia, '')))
+                  = UPPER(TRIM(COALESCE(tb_movimiento_inventario.referencia, '')))
+        )
     `);
   }
 

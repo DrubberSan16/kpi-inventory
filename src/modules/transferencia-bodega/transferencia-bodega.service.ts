@@ -392,6 +392,7 @@ export class TransferenciaBodegaService {
               tipo_movimiento: 'INGRESO',
               fecha_movimiento: fechaTransferencia,
               tipo_documento: 'INGRESO_BODEGA',
+              origen_documento: 'TRANSFERENCIA_BODEGA',
               numero_documento: await this.generateMovementDocumentCode(
                 manager,
                 'IB',
@@ -421,6 +422,7 @@ export class TransferenciaBodegaService {
           tipo_movimiento: 'SALIDA',
           fecha_movimiento: fechaTransferencia,
           tipo_documento: 'EGRESO_BODEGA',
+          origen_documento: 'TRANSFERENCIA_BODEGA',
           numero_documento: egressCode,
           referencia: code,
           observacion: baseObservation,
@@ -439,6 +441,7 @@ export class TransferenciaBodegaService {
           tipo_movimiento: 'INGRESO',
           fecha_movimiento: fechaTransferencia,
           tipo_documento: 'INGRESO_BODEGA',
+          origen_documento: 'TRANSFERENCIA_BODEGA',
           numero_documento: ingressCode,
           referencia: code,
           observacion: baseObservation,

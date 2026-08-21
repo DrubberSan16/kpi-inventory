@@ -207,8 +207,9 @@ describe('KardexService manual movement annulment', () => {
 
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[1][0]).toContain("SET origen_documento = 'KARDEX_MANUAL'");
-    expect(query.mock.calls[1][0]).toContain('NULLIF(BTRIM(COALESCE(referencia, \'\')), \'\') IS NULL');
     expect(query.mock.calls[1][0]).toContain('work_order_id IS NULL');
+    expect(query.mock.calls[1][0]).toContain('tb_transferencia_bodega transferencia');
+    expect(query.mock.calls[1][0]).toContain('tb_orden_compra orden_compra');
   });
 
   it('revierte el stock y desactiva los documentos generados desde Kardex', async () => {
