@@ -16,13 +16,6 @@ export class MovimientoInventario extends BaseAuditEntity {
   @ApiPropertyOptional({ description: 'tipo documento' })
   tipo_documento?: string | null;
 
-  @Column({ type: 'text', nullable: true })
-  @ApiPropertyOptional({
-    description:
-      'Origen del documento (ej. KARDEX_MANUAL). Permite habilitar la anulacion solo para documentos registrados manualmente desde el modulo de Kardex.',
-  })
-  origen_documento?: string | null;
-
   @Column({ type: 'varchar', length: 60, nullable: true })
   @ApiPropertyOptional({ description: 'numero documento' })
   numero_documento?: string | null;

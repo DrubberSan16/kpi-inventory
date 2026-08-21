@@ -199,24 +199,30 @@ describe('KardexService critical stock', () => {
 });
 
 describe('KardexService manual movement annulment', () => {
-  it('marca de forma conservadora los movimientos manuales históricos', async () => {
-    const query = jest.fn().mockResolvedValue(undefined);
+  it('identifica movimientos manuales históricos con referencia libre', async () => {
+    const query = jest.fn().mockResolvedValue([
+      { es_transferencia: false, es_compra: false },
+    ]);
     const service = buildService({ query } as unknown as DataSource);
 
-    await service.onModuleInit();
+    await expect(
+      (service as any).isKardexManualMovement({ query }, {
+        id: 'movimiento-manual',
+        tipo_documento: 'INGRESO_BODEGA',
+        referencia: 'INGRESO PARA ENVIO A BLOQUE',
+      }),
+    ).resolves.toBe(true);
 
-    expect(query).toHaveBeenCalledTimes(2);
-    expect(query.mock.calls[1][0]).toContain("SET origen_documento = 'KARDEX_MANUAL'");
-    expect(query.mock.calls[1][0]).toContain('work_order_id IS NULL');
-    expect(query.mock.calls[1][0]).toContain('tb_transferencia_bodega transferencia');
-    expect(query.mock.calls[1][0]).toContain('tb_orden_compra orden_compra');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toContain('tb_transferencia_bodega transferencia');
+    expect(query.mock.calls[0][0]).toContain('tb_orden_compra orden_compra');
   });
 
   it('revierte el stock y desactiva los documentos generados desde Kardex', async () => {
     const movement = {
       id: 'movimiento-1',
-      origen_documento: 'KARDEX_MANUAL',
       tipo_movimiento: 'SALIDA',
+      tipo_documento: 'EGRESO_BODEGA',
       bodega_origen_id: 'bodega-1',
       numero_documento: 'KB-0001',
     } as MovimientoInventario;
@@ -237,6 +243,9 @@ describe('KardexService manual movement annulment', () => {
       execute: jest.fn().mockResolvedValue(undefined),
     };
     const manager = {
+      query: jest.fn().mockResolvedValue([
+        { es_transferencia: false, es_compra: false },
+      ]),
       findOne: jest
         .fn()
         .mockResolvedValueOnce(movement)
@@ -280,9 +289,12 @@ describe('KardexService manual movement annulment', () => {
 
   it('rechaza documentos que no se originaron en Kardex', async () => {
     const manager = {
+      query: jest.fn().mockResolvedValue([
+        { es_transferencia: true, es_compra: false },
+      ]),
       findOne: jest.fn().mockResolvedValue({
         id: 'movimiento-transferencia',
-        origen_documento: 'TRANSFERENCIA_BODEGA',
+        tipo_documento: 'EGRESO_BODEGA',
       }),
     };
     const service = buildService({

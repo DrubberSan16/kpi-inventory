@@ -4,7 +4,6 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
@@ -112,10 +111,7 @@ type InventoryImportJobState = {
 };
 
 @Injectable()
-export class KardexService
-  extends CrudService<Kardex>
-  implements OnModuleInit
-{
+export class KardexService extends CrudService<Kardex> {
   private readonly logger = new Logger(KardexService.name);
   private readonly closedWorkOrderStatuses = [
     'CANCELLED',
@@ -132,8 +128,6 @@ export class KardexService
   ];
   private readonly importJobs = new Map<string, InventoryImportJobState>();
   private readonly importRoot: string;
-  private movementSchemaReady = false;
-  private movementSchemaPromise: Promise<void> | null = null;
   private readonly visibleProductJoinCondition = [
     'producto.id = kardex.producto_id',
     'producto.is_deleted = false',
@@ -172,55 +166,6 @@ export class KardexService
     this.importRoot =
       configuredImportRoot ||
       join(process.cwd(), 'storage', 'inventory-imports');
-  }
-
-  async onModuleInit() {
-    await this.ensureKardexMovementSchema();
-  }
-
-  private async ensureKardexMovementSchema() {
-    if (this.movementSchemaReady) return;
-    if (!this.movementSchemaPromise) {
-      this.movementSchemaPromise = (async () => {
-        await this.dataSource.query(`
-          ALTER TABLE IF EXISTS kpi_inventory.tb_movimiento_inventario
-          ADD COLUMN IF NOT EXISTS origen_documento text
-        `);
-        await this.dataSource.query(`
-          UPDATE kpi_inventory.tb_movimiento_inventario
-          SET origen_documento = 'KARDEX_MANUAL'
-          WHERE is_deleted = false
-            AND NULLIF(BTRIM(COALESCE(origen_documento, '')), '') IS NULL
-            AND UPPER(TRIM(COALESCE(tipo_documento, ''))) IN ('INGRESO_BODEGA', 'EGRESO_BODEGA')
-            AND work_order_id IS NULL
-            AND UPPER(TRIM(COALESCE(referencia, ''))) NOT LIKE 'TB-%'
-            AND UPPER(TRIM(COALESCE(referencia, ''))) NOT LIKE 'OC-%'
-            AND UPPER(TRIM(COALESCE(referencia, ''))) NOT LIKE 'OT-%'
-            AND NOT EXISTS (
-              SELECT 1
-              FROM kpi_inventory.tb_transferencia_bodega transferencia
-              WHERE transferencia.movimiento_salida_id = tb_movimiento_inventario.id
-                 OR transferencia.movimiento_ingreso_id = tb_movimiento_inventario.id
-                 OR UPPER(TRIM(COALESCE(transferencia.codigo, '')))
-                    = UPPER(TRIM(COALESCE(tb_movimiento_inventario.referencia, '')))
-            )
-            AND NOT EXISTS (
-              SELECT 1
-              FROM kpi_inventory.tb_orden_compra orden_compra
-              WHERE UPPER(TRIM(COALESCE(orden_compra.codigo, '')))
-                      = UPPER(TRIM(COALESCE(tb_movimiento_inventario.referencia, '')))
-                 OR UPPER(TRIM(COALESCE(orden_compra.referencia, '')))
-                      = UPPER(TRIM(COALESCE(tb_movimiento_inventario.referencia, '')))
-            )
-        `);
-        this.movementSchemaReady = true;
-      })();
-    }
-    try {
-      await this.movementSchemaPromise;
-    } finally {
-      if (!this.movementSchemaReady) this.movementSchemaPromise = null;
-    }
   }
 
   private isKardexPurgeSuperAdministratorRoleName(roleName?: string): boolean {
@@ -902,7 +847,6 @@ export class KardexService
     tipoMovimiento?: string | null,
     sucursalId?: string | null,
   ) {
-    await this.ensureKardexMovementSchema();
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
       Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
@@ -1013,7 +957,6 @@ export class KardexService
   }
 
   async getMovementDocument(id: string, sucursalId?: string | null) {
-    await this.ensureKardexMovementSchema();
     const movement = await this.movimientoRepo.findOne({
       where: { id, is_deleted: false },
     });
@@ -1040,11 +983,17 @@ export class KardexService
     }
 
     const [hydrated] = await this.hydrateMovementDocuments([movement]);
-    return hydrated ?? null;
+    if (!hydrated) return null;
+    return {
+      ...hydrated,
+      anulable_desde_kardex: await this.isKardexManualMovement(
+        this.dataSource,
+        movement,
+      ),
+    };
   }
 
   async createMovementDocument(payload: MovementDocumentPayload) {
-    await this.ensureKardexMovementSchema();
     const tipo = this.normalizeMovementType(payload.tipo_movimiento);
     const bodegaId = this.toText(payload.bodega_id);
     const detalles = Array.isArray(payload.detalles) ? payload.detalles : [];
@@ -1092,7 +1041,6 @@ export class KardexService
           fecha_movimiento: fechaMovimiento,
           tipo_documento:
             tipo === 'INGRESO' ? 'INGRESO_BODEGA' : 'EGRESO_BODEGA',
-          origen_documento: 'KARDEX_MANUAL',
           numero_documento: numeroDocumento,
           referencia: this.toText(payload.referencia) || null,
           observacion: this.toText(payload.observacion) || null,
@@ -1269,7 +1217,6 @@ export class KardexService
     annulledBy = 'SYSTEM',
     sucursalId?: string | null,
   ) {
-    await this.ensureKardexMovementSchema();
     const changedStockIds = new Set<string>();
     const result = await this.dataSource.transaction(async (manager) => {
       const movement = await manager.findOne(MovimientoInventario, {
@@ -1277,7 +1224,7 @@ export class KardexService
         lock: { mode: 'pessimistic_write' },
       });
       if (!movement) throw new NotFoundException('El documento de bodega no existe.');
-      if (this.toText(movement.origen_documento).toUpperCase() !== 'KARDEX_MANUAL') {
+      if (!(await this.isKardexManualMovement(manager, movement))) {
         throw new BadRequestException('Solo se pueden anular documentos registrados desde el módulo de Kardex.');
       }
       const warehouseId = this.toText(
@@ -1334,6 +1281,52 @@ export class KardexService
     });
     await this.notifyMaintenanceRecalculationForStocks([...changedStockIds], 'document-annulment', { actorUsername: annulledBy });
     return result;
+  }
+
+  private async isKardexManualMovement(
+    queryExecutor: {
+      query(query: string, parameters?: unknown[]): Promise<unknown>;
+    },
+    movement: MovimientoInventario,
+  ) {
+    const documentType = this.toText(movement.tipo_documento).toUpperCase();
+    const reference = this.toText(movement.referencia).toUpperCase();
+    if (
+      !['INGRESO_BODEGA', 'EGRESO_BODEGA'].includes(documentType) ||
+      this.toText(movement.work_order_id) ||
+      reference.startsWith('TB-') ||
+      reference.startsWith('OC-') ||
+      reference.startsWith('OT-')
+    ) {
+      return false;
+    }
+
+    const rows = (await queryExecutor.query(
+      `
+        SELECT
+          EXISTS (
+            SELECT 1
+            FROM kpi_inventory.tb_transferencia_bodega transferencia
+            WHERE transferencia.movimiento_salida_id = $1
+               OR transferencia.movimiento_ingreso_id = $1
+               OR UPPER(TRIM(COALESCE(transferencia.codigo, '')))
+                  = UPPER(TRIM(COALESCE($2, '')))
+          ) AS es_transferencia,
+          EXISTS (
+            SELECT 1
+            FROM kpi_inventory.tb_orden_compra orden_compra
+            WHERE UPPER(TRIM(COALESCE(orden_compra.codigo, '')))
+                    = UPPER(TRIM(COALESCE($2, '')))
+               OR UPPER(TRIM(COALESCE(orden_compra.referencia, '')))
+                    = UPPER(TRIM(COALESCE($2, '')))
+          ) AS es_compra
+      `,
+      [movement.id, movement.referencia ?? ''],
+    )) as Array<Record<string, unknown>>;
+    const relation = rows?.[0] ?? {};
+    const isExternal = (value: unknown) =>
+      value === true || ['true', 't', '1'].includes(this.toText(value).toLowerCase());
+    return !isExternal(relation.es_transferencia) && !isExternal(relation.es_compra);
   }
 
   private applyVisibleKardexTransactionFilter(qb: SelectQueryBuilder<Kardex>) {
