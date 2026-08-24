@@ -1593,11 +1593,20 @@ export class TransferenciaBodegaService {
       where: {
         bodega_id: args.bodegaId,
         producto_id: args.productoId,
-        is_deleted: false,
       },
       lock: { mode: 'pessimistic_write' },
     });
-    if (existing) return existing;
+    if (existing) {
+      if (existing.is_deleted) {
+        existing.is_deleted = false;
+        existing.status = 'ACTIVE';
+        existing.deleted_at = null;
+        existing.deleted_by = null;
+        existing.updated_by = args.userName;
+        return manager.save(StockBodega, existing);
+      }
+      return existing;
+    }
 
     return manager.save(
       StockBodega,
