@@ -127,11 +127,17 @@ export class TransferenciaBodegaService {
     ).trim();
   }
 
+  /** Endpoint publicado por el controlador; se guarda en el log transaccional. */
+  private readonly logEndpoint = '/kpi_inventory/transferencias-bodega';
+
   private queueTransactionLog(payload: {
     traceId: string;
     description: string;
     createdBy?: string | null;
     status?: string;
+    requestMethod?: string | null;
+    requestUrl?: string | null;
+    requestPayload?: unknown;
   }) {
     void this.writeTransactionLog(payload);
   }
@@ -141,6 +147,9 @@ export class TransferenciaBodegaService {
     description: string;
     createdBy?: string | null;
     status?: string;
+    requestMethod?: string | null;
+    requestUrl?: string | null;
+    requestPayload?: unknown;
   }) {
     if (!this.securityServiceUrl) return;
     try {
@@ -159,6 +168,9 @@ export class TransferenciaBodegaService {
           typeLog: 'WAREHOUSE_TRANSFER_FLOW',
           description: `[TRACE:${payload.traceId}] ${payload.description}`,
           createdBy: payload.createdBy ?? null,
+          requestMethod: payload.requestMethod ?? null,
+          requestUrl: payload.requestUrl ?? null,
+          requestPayload: payload.requestPayload ?? null,
         }),
       });
       if (!response.ok) {
@@ -836,6 +848,9 @@ export class TransferenciaBodegaService {
         traceId,
         createdBy,
         status: 'ERROR',
+        requestMethod: 'POST',
+        requestUrl: this.logEndpoint,
+        requestPayload: dto,
         description: `Fallo al registrar transferencia de bodega: ${error?.message ?? 'desconocido'}`,
       });
       throw error;
@@ -1197,6 +1212,9 @@ export class TransferenciaBodegaService {
         traceId,
         createdBy: annulledBy,
         status: 'ERROR',
+        requestMethod: 'PATCH',
+        requestUrl: `${this.logEndpoint}/${id}/anular`,
+        requestPayload: { id, annulledBy },
         description: `Fallo al anular transferencia ${id}: ${error?.message ?? 'desconocido'}`,
       });
       throw error;

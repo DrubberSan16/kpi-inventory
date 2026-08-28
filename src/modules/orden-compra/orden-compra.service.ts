@@ -87,12 +87,18 @@ export class OrdenCompraService {
     ).trim();
   }
 
+  /** Endpoint publicado por el controlador; se guarda en el log transaccional. */
+  private readonly logEndpoint = '/kpi_inventory/ordenes-compra';
+
   private queueTransactionLog(payload: {
     traceId: string;
     typeLog: string;
     description: string;
     createdBy?: string | null;
     status?: string;
+    requestMethod?: string | null;
+    requestUrl?: string | null;
+    requestPayload?: unknown;
   }) {
     void this.writeTransactionLog(payload);
   }
@@ -103,6 +109,9 @@ export class OrdenCompraService {
     description: string;
     createdBy?: string | null;
     status?: string;
+    requestMethod?: string | null;
+    requestUrl?: string | null;
+    requestPayload?: unknown;
   }) {
     if (!this.securityServiceUrl) return;
     try {
@@ -121,6 +130,9 @@ export class OrdenCompraService {
           typeLog: payload.typeLog,
           description: `[TRACE:${payload.traceId}] ${payload.description}`,
           createdBy: payload.createdBy ?? null,
+          requestMethod: payload.requestMethod ?? null,
+          requestUrl: payload.requestUrl ?? null,
+          requestPayload: payload.requestPayload ?? null,
         }),
       });
       if (!response.ok) {
@@ -277,6 +289,9 @@ export class OrdenCompraService {
         typeLog: 'PURCHASE_ORDER_FLOW',
         createdBy,
         status: 'ERROR',
+        requestMethod: 'POST',
+        requestUrl: this.logEndpoint,
+        requestPayload: dto,
         description: `Fallo al registrar orden de compra: ${error?.message ?? 'desconocido'}`,
       });
       throw error;
@@ -340,6 +355,9 @@ export class OrdenCompraService {
         typeLog: 'PURCHASE_ORDER_FLOW',
         createdBy,
         status: 'ERROR',
+        requestMethod: 'PATCH',
+        requestUrl: `${this.logEndpoint}/${id}`,
+        requestPayload: dto,
         description: `Fallo al actualizar orden de compra ${id}: ${error?.message ?? 'desconocido'}`,
       });
       throw error;
@@ -404,6 +422,9 @@ export class OrdenCompraService {
         typeLog: 'PURCHASE_ORDER_FLOW',
         createdBy: annulledBy,
         status: 'ERROR',
+        requestMethod: 'PATCH',
+        requestUrl: `${this.logEndpoint}/${id}/anular`,
+        requestPayload: { id, annulledBy },
         description: `Fallo al anular orden de compra ${id}: ${error?.message ?? 'desconocido'}`,
       });
       throw error;

@@ -88,11 +88,17 @@ export class OrdenServicioService implements OnModuleInit {
     ).trim();
   }
 
+  /** Endpoint publicado por el controlador; se guarda en el log transaccional. */
+  private readonly logEndpoint = '/kpi_inventory/ordenes-servicio';
+
   private queueTransactionLog(payload: {
     traceId: string;
     description: string;
     createdBy?: string | null;
     status?: string;
+    requestMethod?: string | null;
+    requestUrl?: string | null;
+    requestPayload?: unknown;
   }) {
     void this.writeTransactionLog(payload);
   }
@@ -102,6 +108,9 @@ export class OrdenServicioService implements OnModuleInit {
     description: string;
     createdBy?: string | null;
     status?: string;
+    requestMethod?: string | null;
+    requestUrl?: string | null;
+    requestPayload?: unknown;
   }) {
     if (!this.securityServiceUrl) return;
     try {
@@ -120,6 +129,9 @@ export class OrdenServicioService implements OnModuleInit {
           typeLog: 'SERVICE_ORDER_FLOW',
           description: `[TRACE:${payload.traceId}] ${payload.description}`,
           createdBy: payload.createdBy ?? null,
+          requestMethod: payload.requestMethod ?? null,
+          requestUrl: payload.requestUrl ?? null,
+          requestPayload: payload.requestPayload ?? null,
         }),
       });
       if (!response.ok) {
@@ -240,6 +252,9 @@ export class OrdenServicioService implements OnModuleInit {
         traceId,
         createdBy,
         status: 'ERROR',
+        requestMethod: 'POST',
+        requestUrl: this.logEndpoint,
+        requestPayload: dto,
         description: `Fallo al registrar orden de servicio: ${error?.message ?? 'desconocido'}`,
       });
       throw error;
@@ -307,6 +322,9 @@ export class OrdenServicioService implements OnModuleInit {
         traceId,
         createdBy,
         status: 'ERROR',
+        requestMethod: 'PATCH',
+        requestUrl: `${this.logEndpoint}/${id}`,
+        requestPayload: dto,
         description: `Fallo al actualizar orden de servicio ${id}: ${error?.message ?? 'desconocido'}`,
       });
       throw error;
