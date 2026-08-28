@@ -26,6 +26,7 @@ import {
   UpdateOrdenServicioDto,
 } from './orden-servicio.dto';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
+import { buildSecurityServiceHeaders } from '../../common/http/internal-service.util';
 
 type Totals = {
   subtotal: number;
@@ -81,6 +82,12 @@ export class OrdenServicioService implements OnModuleInit {
       .replace(/\/$/, '');
   }
 
+  private get internalServiceToken() {
+    return String(
+      this.configService.get('INTERNAL_SERVICE_TOKEN') || '',
+    ).trim();
+  }
+
   private queueTransactionLog(payload: {
     traceId: string;
     description: string;
@@ -98,9 +105,15 @@ export class OrdenServicioService implements OnModuleInit {
   }) {
     if (!this.securityServiceUrl) return;
     try {
-      await fetch(`${this.securityServiceUrl}/log-transacts`, {
+      const url = `${this.securityServiceUrl}/log-transacts`;
+      const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildSecurityServiceHeaders({
+          url,
+          securityServiceUrl: this.securityServiceUrl,
+          internalServiceToken: this.internalServiceToken,
+          json: true,
+        }),
         body: JSON.stringify({
           moduleMicroservice: 'kpi_inventory',
           status: payload.status ?? 'SUCCESS',
@@ -109,6 +122,9 @@ export class OrdenServicioService implements OnModuleInit {
           createdBy: payload.createdBy ?? null,
         }),
       });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+      }
     } catch (error: any) {
       this.logger.warn(
         `No se pudo registrar log transaccional de orden de servicio: ${error?.message ?? 'desconocido'}`,
