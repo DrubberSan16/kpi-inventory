@@ -24,6 +24,7 @@ import {
 } from './orden-compra.dto';
 import { TransferenciaBodega } from '../entities/transferencia-bodega.entity';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
+import { buildAnnulmentInfo } from '../../common/http/annulled-records.util';
 import { buildSecurityServiceHeaders } from '../../common/http/internal-service.util';
 
 type Totals = {
@@ -154,7 +155,11 @@ export class OrdenCompraService {
     return rows.map((item) => item.id);
   }
 
-  async findAll(query: OrdenCompraQueryDto, sucursalId?: string | null) {
+  async findAll(
+    query: OrdenCompraQueryDto,
+    sucursalId?: string | null,
+    includeAnnulled = false,
+  ) {
     const page = Number(query.page || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
     const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
@@ -167,6 +172,12 @@ export class OrdenCompraService {
     const qb = this.ordenRepo
       .createQueryBuilder('orden')
       .where('orden.is_deleted = false');
+
+    if (!includeAnnulled) {
+      qb.andWhere(
+        "UPPER(TRIM(COALESCE(orden.estado, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')",
+      );
+    }
 
     if (warehouseIds) {
       qb.andWhere('orden.bodega_destino_id IN (:...warehouseIds)', {
@@ -211,8 +222,9 @@ export class OrdenCompraService {
     }
 
     const [rows, total] = await qb
-      .orderBy('orden.fecha_emision', 'DESC')
-      .addOrderBy('orden.created_at', 'DESC')
+      .orderBy('orden.created_at', 'DESC')
+      .addOrderBy('orden.fecha_emision', 'DESC')
+      .addOrderBy('orden.id', 'DESC')
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
@@ -235,7 +247,7 @@ export class OrdenCompraService {
 
     const rows = await this.ordenRepo.find({
       where,
-      order: { fecha_emision: 'DESC', created_at: 'DESC' },
+      order: { created_at: 'DESC', fecha_emision: 'DESC' },
     });
     const activeTransfers = await this.transferenciaRepo.find({
       where: { is_deleted: false, estado: Not('ANULADA') },
@@ -681,6 +693,7 @@ export class OrdenCompraService {
       const transfer = transferMap.get(item.id);
       return {
         ...item,
+        ...buildAnnulmentInfo(item),
         proveedor_label: item.proveedor_nombre || 'Sin proveedor',
         bodega_label: warehouse
           ? `${warehouse.codigo || ''} - ${warehouse.nombre || ''}`.trim()
@@ -751,6 +764,7 @@ export class OrdenCompraService {
       const transfer = transferMap.get(item.id);
       return {
         ...item,
+        ...buildAnnulmentInfo(item),
         proveedor_label: item.proveedor_nombre || 'Sin proveedor',
         bodega_label: warehouse
           ? `${warehouse.codigo || ''} - ${warehouse.nombre || ''}`.trim()

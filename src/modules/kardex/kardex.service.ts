@@ -9,6 +9,11 @@ import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { CrudService } from '../../common/crud/crud.service';
+import {
+  ANNULLED_STATES,
+  buildAnnulmentInfo,
+  isAnnulledState,
+} from '../../common/http/annulled-records.util';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import {
@@ -282,6 +287,7 @@ export class KardexService extends CrudService<Kardex> {
     limit = 10,
     search?: string,
     sucursalId?: string | null,
+    includeAnnulled = false,
   ) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
@@ -295,10 +301,9 @@ export class KardexService extends CrudService<Kardex> {
         'bodega',
         'bodega.id = kardex.bodega_id AND bodega.is_deleted = false',
       )
-      .innerJoin(Producto, 'producto', this.visibleProductJoinCondition)
-      .where('kardex.is_deleted = false');
+      .innerJoin(Producto, 'producto', this.visibleProductJoinCondition);
 
-    this.applyVisibleKardexTransactionFilter(qb);
+    this.applyKardexRecordVisibility(qb, includeAnnulled);
 
     if (sucursalId) {
       qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
@@ -331,8 +336,9 @@ export class KardexService extends CrudService<Kardex> {
     }
 
     const [data, total] = await qb
-      .orderBy('kardex.fecha', 'DESC')
-      .addOrderBy('kardex.created_at', 'DESC')
+      .orderBy('kardex.created_at', 'DESC')
+      .addOrderBy('kardex.fecha', 'DESC')
+      .addOrderBy('kardex.id', 'DESC')
       .skip((safePage - 1) * safeLimit)
       .take(safeLimit)
       .getManyAndCount();
@@ -360,6 +366,7 @@ export class KardexService extends CrudService<Kardex> {
       tipo_movimiento?: string | null;
       page?: number | null;
       limit?: number | null;
+      include_annulled?: boolean;
     },
     sucursalId?: string | null,
   ) {
@@ -416,13 +423,15 @@ export class KardexService extends CrudService<Kardex> {
         'transferencia',
         'transferencia.id = transfer_det.transferencia_bodega_id AND transferencia.is_deleted = false',
       )
-      .where('kardex.is_deleted = false')
-      .andWhere('kardex.fecha BETWEEN :fromDate AND :toDate', {
+      .where('kardex.fecha BETWEEN :fromDate AND :toDate', {
         fromDate: range.from,
         toDate: range.to,
       });
 
-    this.applyVisibleKardexTransactionFilter(baseQb);
+    this.applyKardexRecordVisibility(
+      baseQb,
+      params?.include_annulled === true,
+    );
 
     if (sucursalId) {
       baseQb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
@@ -454,8 +463,14 @@ export class KardexService extends CrudService<Kardex> {
       .clone()
       .select('COUNT(DISTINCT kardex.producto_id)', 'materiales')
       .addSelect('COUNT(kardex.id)', 'movimientos')
-      .addSelect('COALESCE(SUM(kardex.entrada_cantidad), 0)', 'entradas')
-      .addSelect('COALESCE(SUM(kardex.salida_cantidad), 0)', 'salidas')
+      .addSelect(
+        'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.entrada_cantidad ELSE 0 END), 0)',
+        'entradas',
+      )
+      .addSelect(
+        'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.salida_cantidad ELSE 0 END), 0)',
+        'salidas',
+      )
       .getRawOne<Record<string, unknown>>();
 
     const groupedQb = baseQb
@@ -468,8 +483,8 @@ export class KardexService extends CrudService<Kardex> {
         'linea.nombre AS linea_nombre',
         'categoria.nombre AS categoria_nombre',
         'unidad.nombre AS unidad_nombre',
-        'COALESCE(SUM(kardex.entrada_cantidad), 0) AS entradas',
-        'COALESCE(SUM(kardex.salida_cantidad), 0) AS salidas',
+        'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.entrada_cantidad ELSE 0 END), 0) AS entradas',
+        'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.salida_cantidad ELSE 0 END), 0) AS salidas',
         'COUNT(kardex.id) AS movimientos_count',
       ])
       .groupBy('kardex.producto_id')
@@ -598,6 +613,7 @@ export class KardexService extends CrudService<Kardex> {
       search?: string | null;
       bodega_id?: string | null;
       tipo_movimiento?: string | null;
+      include_annulled?: boolean;
     },
     sucursalId?: string | null,
   ) {
@@ -609,6 +625,7 @@ export class KardexService extends CrudService<Kardex> {
     const range = this.resolveSummaryRange(params?.desde, params?.hasta);
     const search = this.toText(params?.search);
     const warehouseId = this.toText(params?.bodega_id);
+    const includeAnnulled = params?.include_annulled === true;
 
     const qb = this.repository
       .createQueryBuilder('kardex')
@@ -636,20 +653,25 @@ export class KardexService extends CrudService<Kardex> {
       .leftJoin(
         MovimientoInventario,
         'movimiento',
-        'movimiento.id = kardex.movimiento_id AND movimiento.is_deleted = false',
+        includeAnnulled
+          ? 'movimiento.id = kardex.movimiento_id'
+          : 'movimiento.id = kardex.movimiento_id AND movimiento.is_deleted = false',
       )
       .leftJoin(
         TransferenciaBodegaDet,
         'transfer_det',
-        '(transfer_det.kardex_ingreso_id = kardex.id OR transfer_det.kardex_salida_id = kardex.id) AND transfer_det.is_deleted = false',
+        includeAnnulled
+          ? '(transfer_det.kardex_ingreso_id = kardex.id OR transfer_det.kardex_salida_id = kardex.id)'
+          : '(transfer_det.kardex_ingreso_id = kardex.id OR transfer_det.kardex_salida_id = kardex.id) AND transfer_det.is_deleted = false',
       )
       .leftJoin(
         TransferenciaBodega,
         'transferencia',
-        'transferencia.id = transfer_det.transferencia_bodega_id AND transferencia.is_deleted = false',
+        includeAnnulled
+          ? 'transferencia.id = transfer_det.transferencia_bodega_id'
+          : 'transferencia.id = transfer_det.transferencia_bodega_id AND transferencia.is_deleted = false',
       )
-      .where('kardex.is_deleted = false')
-      .andWhere('kardex.producto_id = :productoId', {
+      .where('kardex.producto_id = :productoId', {
         productoId: normalizedProductId,
       })
       .andWhere('kardex.fecha BETWEEN :fromDate AND :toDate', {
@@ -657,7 +679,7 @@ export class KardexService extends CrudService<Kardex> {
         toDate: range.to,
       });
 
-    this.applyVisibleKardexTransactionFilter(qb);
+    this.applyKardexRecordVisibility(qb, includeAnnulled);
 
     if (sucursalId) {
       qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
@@ -690,6 +712,9 @@ export class KardexService extends CrudService<Kardex> {
         'kardex.created_by AS kardex_created_by',
         'kardex.updated_by AS kardex_updated_by',
         'kardex.updated_at AS kardex_updated_at',
+        'kardex.is_deleted AS kardex_is_deleted',
+        'kardex.deleted_by AS kardex_deleted_by',
+        'kardex.deleted_at AS kardex_deleted_at',
         'producto.codigo AS producto_codigo',
         'producto.nombre AS producto_nombre',
         'linea.codigo AS linea_codigo',
@@ -707,10 +732,20 @@ export class KardexService extends CrudService<Kardex> {
         'movimiento.created_by AS movimiento_created_by',
         'movimiento.updated_by AS movimiento_updated_by',
         'movimiento.updated_at AS movimiento_updated_at',
+        'movimiento.is_deleted AS movimiento_is_deleted',
+        'movimiento.estado AS movimiento_estado',
+        'movimiento.deleted_by AS movimiento_deleted_by',
+        'movimiento.deleted_at AS movimiento_deleted_at',
         'transferencia.codigo AS transferencia_codigo',
+        'transferencia.estado AS transferencia_estado',
+        'transferencia.deleted_by AS transferencia_deleted_by',
+        'transferencia.deleted_at AS transferencia_deleted_at',
+        'transferencia.updated_by AS transferencia_updated_by',
+        'transferencia.updated_at AS transferencia_updated_at',
       ])
-      .orderBy('kardex.fecha', 'ASC')
-      .addOrderBy('kardex.created_at', 'ASC')
+      .orderBy('kardex.created_at', 'DESC')
+      .addOrderBy('kardex.fecha', 'DESC')
+      .addOrderBy('kardex.id', 'DESC')
       .getRawMany<Record<string, unknown>>();
 
     if (!rows.length) {
@@ -743,8 +778,17 @@ export class KardexService extends CrudService<Kardex> {
     const movements = rows.map((row) => {
       const entrada = this.toNumber(row.entrada_cantidad, 0);
       const salida = this.toNumber(row.salida_cantidad, 0);
-      totalEntradas += entrada;
-      totalSalidas += salida;
+      const annulled =
+        row.kardex_is_deleted === true ||
+        ['true', 't', '1'].includes(
+          this.toText(row.kardex_is_deleted).toLowerCase(),
+        ) ||
+        isAnnulledState(row.movimiento_estado) ||
+        isAnnulledState(row.transferencia_estado);
+      if (!annulled) {
+        totalEntradas += entrada;
+        totalSalidas += salida;
+      }
 
       const movementUpdatedAt = new Date(
         this.toText(row.movimiento_updated_at),
@@ -774,6 +818,26 @@ export class KardexService extends CrudService<Kardex> {
 
       return {
         id: this.toText(row.kardex_id),
+        anulado: annulled,
+        anulado_por: annulled
+          ? this.toText(row.kardex_deleted_by) ||
+            this.toText(row.movimiento_deleted_by) ||
+            this.toText(row.transferencia_deleted_by) ||
+            this.toText(row.movimiento_updated_by) ||
+            this.toText(row.transferencia_updated_by) ||
+            this.toText(row.kardex_updated_by) ||
+            'SYSTEM'
+          : null,
+        anulado_at: annulled
+          ? this.formatDateTimeForClient(
+              row.kardex_deleted_at ||
+                row.movimiento_deleted_at ||
+                row.transferencia_deleted_at ||
+                row.movimiento_updated_at ||
+                row.transferencia_updated_at ||
+                row.kardex_updated_at,
+            )
+          : null,
         documento_id: this.toText(row.movimiento_id) || null,
         fecha_emision: this.formatDateTimeForClient(row.fecha),
         fecha_creacion: this.formatDateTimeForClient(row.created_at),
@@ -846,6 +910,7 @@ export class KardexService extends CrudService<Kardex> {
     search?: string | null,
     tipoMovimiento?: string | null,
     sucursalId?: string | null,
+    includeAnnulled = false,
   ) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
@@ -865,15 +930,23 @@ export class KardexService extends CrudService<Kardex> {
         'bodega_destino',
         'bodega_destino.id = movimiento.bodega_destino_id AND bodega_destino.is_deleted = false',
       )
-      .where('movimiento.is_deleted = false')
-      .andWhere('movimiento.tipo_movimiento IN (:...movementTypes)', {
+      .where('movimiento.tipo_movimiento IN (:...movementTypes)', {
         movementTypes: ['INGRESO', 'SALIDA'],
       })
       .andWhere(
         "(COALESCE(movimiento.numero_documento, '') <> '' OR COALESCE(movimiento.referencia, '') <> '')",
       );
 
-    this.applyVisibleMovementDocumentFilter(qb);
+    if (includeAnnulled) {
+      // El contra-documento que genera una anulacion no es un movimiento del
+      // usuario, se sigue ocultando aunque se pidan los anulados.
+      qb.andWhere(
+        "UPPER(TRIM(COALESCE(movimiento.tipo_documento, ''))) NOT LIKE 'ANULACION_TRANSFERENCIA%'",
+      );
+    } else {
+      qb.andWhere('movimiento.is_deleted = false');
+      this.applyVisibleMovementDocumentFilter(qb);
+    }
 
     if (sucursalId) {
       qb.andWhere(
@@ -939,8 +1012,9 @@ export class KardexService extends CrudService<Kardex> {
     }
 
     const [rows, total] = await qb
-      .orderBy('movimiento.fecha_movimiento', 'DESC')
-      .addOrderBy('movimiento.created_at', 'DESC')
+      .orderBy('movimiento.created_at', 'DESC')
+      .addOrderBy('movimiento.fecha_movimiento', 'DESC')
+      .addOrderBy('movimiento.id', 'DESC')
       .skip((safePage - 1) * safeLimit)
       .take(safeLimit)
       .getManyAndCount();
@@ -956,9 +1030,13 @@ export class KardexService extends CrudService<Kardex> {
     };
   }
 
-  async getMovementDocument(id: string, sucursalId?: string | null) {
+  async getMovementDocument(
+    id: string,
+    sucursalId?: string | null,
+    includeAnnulled = false,
+  ) {
     const movement = await this.movimientoRepo.findOne({
-      where: { id, is_deleted: false },
+      where: includeAnnulled ? { id } : { id, is_deleted: false },
     });
     if (!movement) {
       throw new NotFoundException('El documento de bodega no existe.');
@@ -1329,6 +1407,32 @@ export class KardexService extends CrudService<Kardex> {
     return !isExternal(relation.es_transferencia) && !isExternal(relation.es_compra);
   }
 
+  /**
+   * Oculta los movimientos anulados salvo que un perfil administrativo haya
+   * activado el filtro para verlos.
+   */
+  private applyKardexRecordVisibility(
+    qb: SelectQueryBuilder<Kardex>,
+    includeAnnulled = false,
+  ) {
+    if (includeAnnulled) {
+      // El contra-movimiento que genera una anulacion nunca se lista: el
+      // movimiento original ya aparece marcado como anulado y contarlo dos
+      // veces descuadraria entradas y salidas.
+      qb.andWhere(`
+        NOT EXISTS (
+          SELECT 1
+          FROM kpi_inventory.tb_movimiento_inventario movimiento_reverso
+          WHERE movimiento_reverso.id = kardex.movimiento_id
+            AND UPPER(TRIM(COALESCE(movimiento_reverso.tipo_documento, ''))) LIKE 'ANULACION_TRANSFERENCIA%'
+        )
+      `);
+      return;
+    }
+    qb.andWhere('kardex.is_deleted = false');
+    this.applyVisibleKardexTransactionFilter(qb);
+  }
+
   private applyVisibleKardexTransactionFilter(qb: SelectQueryBuilder<Kardex>) {
     qb.andWhere(`
       NOT EXISTS (
@@ -1642,6 +1746,8 @@ export class KardexService extends CrudService<Kardex> {
       },
       {} as Record<string, MovimientoInventarioDet[]>,
     );
+    const annulledTransferMap =
+      await this.getAnnulledTransfersByMovement(movementIds);
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
     const productMap = new Map(products.map((item) => [item.id, item]));
     const unitMap = new Map(units.map((item) => [item.id, item]));
@@ -1676,6 +1782,7 @@ export class KardexService extends CrudService<Kardex> {
       });
       return {
         ...item,
+        ...this.resolveDocumentAnnulment(item, annulledTransferMap),
         fecha_movimiento: this.formatDateTimeForClient(item.fecha_movimiento),
         created_at: this.formatDateTimeForClient(item.created_at),
         updated_at: this.formatDateTimeForClient(item.updated_at),
@@ -1693,6 +1800,52 @@ export class KardexService extends CrudService<Kardex> {
         detalles: detailRows,
       };
     });
+  }
+
+  /**
+   * Un documento de bodega tambien queda anulado cuando se anula la
+   * transferencia que lo genero, aunque su propio registro siga activo.
+   */
+  private async getAnnulledTransfersByMovement(movementIds: string[]) {
+    const map = new Map<string, TransferenciaBodega>();
+    if (!movementIds.length) return map;
+
+    const transfers = await this.dataSource
+      .getRepository(TransferenciaBodega)
+      .createQueryBuilder('transferencia')
+      .where(
+        '(transferencia.movimiento_salida_id IN (:...movementIds) OR transferencia.movimiento_ingreso_id IN (:...movementIds))',
+        { movementIds },
+      )
+      .andWhere(
+        `(
+          transferencia.is_deleted = true
+          OR UPPER(TRIM(COALESCE(transferencia.estado, ''))) IN (:...annulledStates)
+        )`,
+        { annulledStates: ANNULLED_STATES },
+      )
+      .getMany();
+
+    for (const transfer of transfers) {
+      for (const movementId of [
+        transfer.movimiento_salida_id,
+        transfer.movimiento_ingreso_id,
+      ]) {
+        if (movementId) map.set(movementId, transfer);
+      }
+    }
+
+    return map;
+  }
+
+  private resolveDocumentAnnulment(
+    item: MovimientoInventario,
+    annulledTransferMap: Map<string, TransferenciaBodega>,
+  ) {
+    const own = buildAnnulmentInfo(item);
+    if (own.anulado) return own;
+    const transfer = annulledTransferMap.get(item.id);
+    return transfer ? buildAnnulmentInfo(transfer) : own;
   }
 
   private resolveDocumentTypeLabel(item: MovimientoInventario) {

@@ -11,6 +11,7 @@ import {
   Req,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { shouldIncludeAnnulledRecords } from '../../common/http/annulled-records.util';
 import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import {
   CreateOrdenCompraDto,
@@ -55,7 +56,11 @@ export class OrdenCompraController {
   @Get()
   @ApiOperation({ summary: 'Listar ordenes de compra' })
   findAll(@Query() query: OrdenCompraQueryDto, @Req() req?: any) {
-    return this.service.findAll(query, getSucursalScopeId(req));
+    return this.service.findAll(
+      query,
+      getSucursalScopeId(req),
+      shouldIncludeAnnulledRecords(req, query.include_annulled),
+    );
   }
 
   @Get('pendientes-transferencia')

@@ -28,6 +28,7 @@ import {
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
+import { buildAnnulmentInfo } from '../../common/http/annulled-records.util';
 import { buildSecurityServiceHeaders } from '../../common/http/internal-service.util';
 
 type PreparedTransferDetail = {
@@ -192,7 +193,11 @@ export class TransferenciaBodegaService {
     return rows.map((item) => item.id);
   }
 
-  async findAll(query: TransferenciaBodegaQueryDto, sucursalId?: string | null) {
+  async findAll(
+    query: TransferenciaBodegaQueryDto,
+    sucursalId?: string | null,
+    includeAnnulled = false,
+  ) {
     const page = Number(query.page || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
     const search = this.toText(query.search);
@@ -213,6 +218,12 @@ export class TransferenciaBodegaService {
     const qb = this.transferenciaRepo
       .createQueryBuilder('transferencia')
       .where('transferencia.is_deleted = false');
+
+    if (!includeAnnulled) {
+      qb.andWhere(
+        "UPPER(TRIM(COALESCE(transferencia.estado, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')",
+      );
+    }
 
     if (warehouseIds) {
       qb.andWhere(
@@ -270,8 +281,9 @@ export class TransferenciaBodegaService {
     }
 
     const [rows, total] = await qb
-      .orderBy('transferencia.fecha_transferencia', 'DESC')
-      .addOrderBy('transferencia.created_at', 'DESC')
+      .orderBy('transferencia.created_at', 'DESC')
+      .addOrderBy('transferencia.fecha_transferencia', 'DESC')
+      .addOrderBy('transferencia.id', 'DESC')
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
@@ -1353,6 +1365,7 @@ export class TransferenciaBodegaService {
       const guide = guideMap.get(item.id) || null;
       return {
         ...item,
+        ...buildAnnulmentInfo(item),
         orden_compra_codigo: order?.codigo ?? null,
         orden_compra_proveedor: order?.proveedor_nombre ?? null,
         bodega_origen_label: source
@@ -1463,6 +1476,7 @@ export class TransferenciaBodegaService {
       const guide = guideMap.get(item.id) || null;
       return {
         ...item,
+        ...buildAnnulmentInfo(item),
         orden_compra_codigo: order?.codigo ?? null,
         orden_compra_proveedor: order?.proveedor_nombre ?? null,
         bodega_origen_label: source

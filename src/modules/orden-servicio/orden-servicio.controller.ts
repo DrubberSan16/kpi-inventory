@@ -11,6 +11,7 @@ import {
   Req,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { shouldIncludeAnnulledRecords } from '../../common/http/annulled-records.util';
 import {
   CreateOrdenServicioDto,
   MarkOrdenServicioRealizadoDto,
@@ -36,8 +37,11 @@ export class OrdenServicioController {
 
   @Get()
   @ApiOperation({ summary: 'Listar ordenes de servicio' })
-  findAll(@Query() query: OrdenServicioQueryDto) {
-    return this.service.findAll(query);
+  findAll(@Query() query: OrdenServicioQueryDto, @Req() req?: any) {
+    return this.service.findAll(
+      query,
+      shouldIncludeAnnulledRecords(req, query.include_annulled),
+    );
   }
 
   @Get(':id')

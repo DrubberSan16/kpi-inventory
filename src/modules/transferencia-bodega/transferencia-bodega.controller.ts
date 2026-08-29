@@ -7,6 +7,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { shouldIncludeAnnulledRecords } from '../../common/http/annulled-records.util';
 import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import {
   AnnulTransferenciaBodegaQueryDto,
@@ -59,7 +60,11 @@ export class TransferenciaBodegaController {
   @ApiQuery({ name: 'desde', required: false, type: String })
   @ApiQuery({ name: 'hasta', required: false, type: String })
   findAll(@Query() query: TransferenciaBodegaQueryDto, @Req() req?: any) {
-    return this.service.findAll(query, getSucursalScopeId(req));
+    return this.service.findAll(
+      query,
+      getSucursalScopeId(req),
+      shouldIncludeAnnulledRecords(req, query.include_annulled),
+    );
   }
 
   @Get(':id')

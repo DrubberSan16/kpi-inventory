@@ -26,6 +26,7 @@ import {
 import { CrudController } from '../../common/crud/crud.controller';
 import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { shouldIncludeAnnulledRecords } from '../../common/http/annulled-records.util';
 import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import { Kardex } from '../entities/kardex.entity';
 import { KardexService } from './kardex.service';
@@ -62,6 +63,7 @@ export class KardexController extends CrudController<Kardex> {
       query.limit,
       query.search,
       getSucursalScopeId(req),
+      shouldIncludeAnnulledRecords(req, query.include_annulled),
     );
   }
 
@@ -105,6 +107,10 @@ export class KardexController extends CrudController<Kardex> {
           tipo_movimiento: tipoMovimiento,
           page: query.page,
           limit: query.limit,
+          include_annulled: shouldIncludeAnnulledRecords(
+            req,
+            query.include_annulled,
+          ),
         },
         getSucursalScopeId(req),
       ),
@@ -132,13 +138,24 @@ export class KardexController extends CrudController<Kardex> {
     @Query('search') search?: string,
     @Query('bodega_id') bodegaId?: string,
     @Query('tipo_movimiento') tipoMovimiento?: string,
+    @Query('include_annulled') includeAnnulled?: string,
     @Req() req?: any,
   ) {
     return {
       message: 'Detalle de kardex por material obtenido correctamente.',
       data: await this.service.getMaterialMovements(
         productoId,
-        { desde, hasta, search, bodega_id: bodegaId, tipo_movimiento: tipoMovimiento },
+        {
+          desde,
+          hasta,
+          search,
+          bodega_id: bodegaId,
+          tipo_movimiento: tipoMovimiento,
+          include_annulled: shouldIncludeAnnulledRecords(
+            req,
+            includeAnnulled,
+          ),
+        },
         getSucursalScopeId(req),
       ),
     };
@@ -170,6 +187,7 @@ export class KardexController extends CrudController<Kardex> {
         query.search,
         tipoMovimiento,
         getSucursalScopeId(req),
+        shouldIncludeAnnulledRecords(req, query.include_annulled),
       ),
     };
   }
@@ -183,10 +201,18 @@ export class KardexController extends CrudController<Kardex> {
     type: String,
     description: 'UUID del documento de bodega',
   })
-  async getMovementDocument(@Param('id') id: string, @Req() req?: any) {
+  async getMovementDocument(
+    @Param('id') id: string,
+    @Query('include_annulled') includeAnnulled?: string,
+    @Req() req?: any,
+  ) {
     return {
       message: 'Documento de bodega obtenido correctamente.',
-      data: await this.service.getMovementDocument(id, getSucursalScopeId(req)),
+      data: await this.service.getMovementDocument(
+        id,
+        getSucursalScopeId(req),
+        shouldIncludeAnnulledRecords(req, includeAnnulled),
+      ),
     };
   }
 

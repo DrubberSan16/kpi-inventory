@@ -1,6 +1,13 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  IsBoolean,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 
 export class PaginationQueryDto {
   @ApiPropertyOptional({
@@ -34,4 +41,20 @@ export class PaginationQueryDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Incluye registros anulados. Solo se aplica a Administrador y Super Administrador.',
+    type: Boolean,
+    default: false,
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    return ['true', '1', 'yes', 'si', 'sí'].includes(
+      String(value).trim().toLowerCase(),
+    );
+  })
+  @IsBoolean()
+  include_annulled?: boolean;
 }

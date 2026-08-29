@@ -26,6 +26,7 @@ import {
   UpdateOrdenServicioDto,
 } from './orden-servicio.dto';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
+import { buildAnnulmentInfo } from '../../common/http/annulled-records.util';
 import { buildSecurityServiceHeaders } from '../../common/http/internal-service.util';
 
 type Totals = {
@@ -148,12 +149,18 @@ export class OrdenServicioService implements OnModuleInit {
     await this.ensureSchema();
   }
 
-  async findAll(query: OrdenServicioQueryDto) {
+  async findAll(query: OrdenServicioQueryDto, includeAnnulled = false) {
     const page = Number(query.page || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
     const qb = this.ordenRepo
       .createQueryBuilder('orden')
       .where('orden.is_deleted = false');
+
+    if (!includeAnnulled) {
+      qb.andWhere(
+        "UPPER(TRIM(COALESCE(orden.estado, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')",
+      );
+    }
 
     if (query.estado) {
       qb.andWhere("UPPER(TRIM(COALESCE(orden.estado, ''))) = :estado", {
@@ -201,8 +208,9 @@ export class OrdenServicioService implements OnModuleInit {
     }
 
     const [rows, total] = await qb
-      .orderBy('orden.fecha_emision', 'DESC')
-      .addOrderBy('orden.created_at', 'DESC')
+      .orderBy('orden.created_at', 'DESC')
+      .addOrderBy('orden.fecha_emision', 'DESC')
+      .addOrderBy('orden.id', 'DESC')
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
@@ -710,6 +718,7 @@ export class OrdenServicioService implements OnModuleInit {
 
     return rows.map((item) => ({
       ...item,
+      ...buildAnnulmentInfo(item),
       proveedor_label: item.proveedor_nombre || 'Sin destinatario',
       emitido_por_label: item.emitido_por_nombre || 'Sin emisor',
       equipos: equipmentMap[item.id] ?? [],
@@ -748,6 +757,7 @@ export class OrdenServicioService implements OnModuleInit {
 
     return rows.map((item) => ({
       ...item,
+      ...buildAnnulmentInfo(item),
       proveedor_label: item.proveedor_nombre || 'Sin destinatario',
       emitido_por_label: item.emitido_por_nombre || 'Sin emisor',
       equipos: equipmentMap[item.id] ?? [],
