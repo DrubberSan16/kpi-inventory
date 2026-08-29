@@ -1067,10 +1067,10 @@ export class KardexService extends CrudService<Kardex> {
     if (!hydrated) return null;
     return {
       ...hydrated,
-      anulable_desde_kardex: await this.isKardexManualMovement(
-        this.dataSource,
-        movement,
-      ),
+      // Un documento ya anulado no vuelve a anularse.
+      anulable_desde_kardex:
+        hydrated.anulado !== true &&
+        (await this.isKardexManualMovement(this.dataSource, movement)),
     };
   }
 
