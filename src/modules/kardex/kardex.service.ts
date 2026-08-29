@@ -1020,7 +1020,7 @@ export class KardexService extends CrudService<Kardex> {
       .getManyAndCount();
 
     return {
-      data: await this.hydrateMovementDocuments(rows),
+      data: await this.hydrateMovementDocuments(rows, includeAnnulled),
       pagination: {
         page: safePage,
         limit: safeLimit,
@@ -1060,7 +1060,10 @@ export class KardexService extends CrudService<Kardex> {
       }
     }
 
-    const [hydrated] = await this.hydrateMovementDocuments([movement]);
+    const [hydrated] = await this.hydrateMovementDocuments(
+      [movement],
+      includeAnnulled,
+    );
     if (!hydrated) return null;
     return {
       ...hydrated,
@@ -1689,7 +1692,15 @@ export class KardexService extends CrudService<Kardex> {
     return out;
   }
 
-  private async hydrateMovementDocuments(rows: MovimientoInventario[]) {
+  /**
+   * Al consultar un documento anulado, sus lineas y los catalogos que
+   * referencia tambien quedaron marcados como borrados: si se filtraran, el
+   * documento se abriria vacio.
+   */
+  private async hydrateMovementDocuments(
+    rows: MovimientoInventario[],
+    includeAnnulled = false,
+  ) {
     if (!rows.length) return [];
 
     const movementIds = rows.map((item) => item.id);
@@ -1703,15 +1714,18 @@ export class KardexService extends CrudService<Kardex> {
 
     const [details, warehouses] = await Promise.all([
       this.movimientoDetRepo.find({
-        where: movementIds.map((movimientoId) => ({
-          movimiento_id: movimientoId,
-          is_deleted: false,
-        })),
+        where: movementIds.map((movimientoId) =>
+          includeAnnulled
+            ? { movimiento_id: movimientoId }
+            : { movimiento_id: movimientoId, is_deleted: false },
+        ),
         order: { created_at: 'ASC' },
       }),
       warehouseIds.length
         ? this.bodegaRepo.find({
-            where: warehouseIds.map((id) => ({ id, is_deleted: false })),
+            where: warehouseIds.map((id) =>
+              includeAnnulled ? { id } : { id, is_deleted: false },
+            ),
           })
         : Promise.resolve([] as Bodega[]),
     ]);
@@ -1729,12 +1743,16 @@ export class KardexService extends CrudService<Kardex> {
     const [products, units] = await Promise.all([
       productIds.length
         ? this.productoRepo.find({
-            where: productIds.map((id) => ({ id, is_deleted: false })),
+            where: productIds.map((id) =>
+              includeAnnulled ? { id } : { id, is_deleted: false },
+            ),
           })
         : Promise.resolve([] as Producto[]),
       unitIds.length
         ? this.unidadRepo.find({
-            where: unitIds.map((id) => ({ id, is_deleted: false })),
+            where: unitIds.map((id) =>
+              includeAnnulled ? { id } : { id, is_deleted: false },
+            ),
           })
         : Promise.resolve([] as UnidadMedida[]),
     ]);
