@@ -22,19 +22,18 @@ jobs:
       - name: Configure SSH
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           set -Eeuo pipefail
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
           chmod 600 "$HOME/.ssh/deploy_key"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          printf '%s\n' '149.56.135.76 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO6tjfcXxtksI9t5K8p2t9I92I/7s5oeBCvMB3U3+E/Q' > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
 
       - name: Deploy exact commit
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: 149.56.135.76
+          DEPLOY_USER: github-deploy
           COMPONENT: kpi-inventory
         run: |
           set -Eeuo pipefail
