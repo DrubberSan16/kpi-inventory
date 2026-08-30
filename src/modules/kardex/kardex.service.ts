@@ -1150,9 +1150,11 @@ export class KardexService extends CrudService<Kardex> {
           );
         }
 
-        const producto = await manager.findOne(Producto, {
-          where: { id: productoId, is_deleted: false },
-        });
+        const producto = await this.getOrReactivateMovementProduct(
+          manager,
+          productoId,
+          userName,
+        );
         if (!producto) {
           throw new NotFoundException('Uno de los materiales no existe.');
         }
@@ -2808,11 +2810,24 @@ export class KardexService extends CrudService<Kardex> {
       where: {
         bodega_id: args.bodegaId,
         producto_id: args.productoId,
-        is_deleted: false,
       },
+      lock: { mode: 'pessimistic_write' },
     });
 
-    if (existing) return existing;
+    if (existing) {
+      if (
+        existing.is_deleted ||
+        this.toText(existing.status).toUpperCase() !== 'ACTIVE'
+      ) {
+        existing.is_deleted = false;
+        existing.status = 'ACTIVE';
+        existing.deleted_at = null;
+        existing.deleted_by = null;
+        existing.updated_by = args.userName;
+        return manager.save(StockBodega, existing);
+      }
+      return existing;
+    }
 
     return manager.create(StockBodega, {
       status: 'ACTIVE',
@@ -2831,6 +2846,32 @@ export class KardexService extends CrudService<Kardex> {
       created_by: args.userName,
       updated_by: args.userName,
     });
+  }
+
+  private async getOrReactivateMovementProduct(
+    manager: EntityManager,
+    productId: string,
+    userName: string,
+  ) {
+    const product = await manager.findOne(Producto, {
+      where: { id: productId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!product) return null;
+
+    if (
+      product.is_deleted ||
+      this.toText(product.status).toUpperCase() !== 'ACTIVE'
+    ) {
+      product.is_deleted = false;
+      product.status = 'ACTIVE';
+      product.deleted_at = null;
+      product.deleted_by = null;
+      product.updated_by = userName;
+      return manager.save(Producto, product);
+    }
+
+    return product;
   }
 
   private getStockNuevoAmount(stockRow: StockBodega) {

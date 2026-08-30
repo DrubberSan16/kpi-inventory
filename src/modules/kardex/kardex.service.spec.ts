@@ -46,6 +46,11 @@ type ImportLocationResolver = {
       userName: string;
     },
   ): Promise<StockBodega>;
+  getOrReactivateMovementProduct(
+    manager: EntityManager,
+    productId: string,
+    userName: string,
+  ): Promise<Producto | null>;
   applyInventoryImportStockTarget(
     stockRow: StockBodega,
     target: {
@@ -451,6 +456,94 @@ describe('KardexService inventory import locations', () => {
     expect(bodega).toBe(savedBodega);
     expect(saveSucursal).toHaveBeenCalledTimes(1);
     expect(saveBodega).toHaveBeenCalledTimes(1);
+  });
+
+  it('reactiva la fila de stock eliminada y conserva el saldo antes de sumar el ingreso', async () => {
+    const existingStock = {
+      id: 'stock-existente',
+      bodega_id: 'bodega-tpta',
+      producto_id: 'producto-1',
+      stock_actual: '40.000000',
+      stock_nuevo: '40.000000',
+      stock_usado: '0.000000',
+      stock_critico: '0.000000',
+      stock_fisico: '40.000000',
+      status: 'INACTIVE',
+      is_deleted: true,
+      deleted_at: new Date('2026-08-24T23:00:48.058Z'),
+      deleted_by: 'USUARIO-ANTERIOR',
+    } as StockBodega;
+    const create = jest.fn();
+    const save = jest.fn(async (_entity: unknown, row: StockBodega) => row);
+    const findOne = jest.fn().mockResolvedValue(existingStock);
+    const manager = { findOne, create, save } as unknown as EntityManager;
+    const service = buildService();
+
+    const result = await asImportLocationResolver(
+      service,
+    ).getOrCreateStockRow(manager, {
+      bodegaId: 'bodega-tpta',
+      productoId: 'producto-1',
+      costoPromedio: 0,
+      userName: 'IMPORTADOR',
+    });
+    const total = asCriticalStockResolver(service).applyStockDeltaByCondition(
+      result,
+      40,
+      'NUEVO',
+    );
+
+    expect(findOne).toHaveBeenCalledWith(StockBodega, {
+      where: {
+        bodega_id: 'bodega-tpta',
+        producto_id: 'producto-1',
+      },
+      lock: { mode: 'pessimistic_write' },
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      id: 'stock-existente',
+      status: 'ACTIVE',
+      is_deleted: false,
+      deleted_at: null,
+      deleted_by: null,
+      updated_by: 'IMPORTADOR',
+      stock_actual: '80.000000',
+      stock_nuevo: '80.000000',
+    });
+    expect(total).toBe(80);
+  });
+
+  it('reactiva el producto eliminado cuando vuelve a ingresar stock', async () => {
+    const product = {
+      id: 'producto-1',
+      codigo: 'P00001241',
+      nombre: 'GUANTE MULTIUSOS T9',
+      status: 'INACTIVE',
+      is_deleted: true,
+      deleted_at: new Date('2026-08-30T18:03:20.477Z'),
+      deleted_by: 'USUARIO-ANTERIOR',
+    } as Producto;
+    const save = jest.fn(async (_entity: unknown, row: Producto) => row);
+    const manager = {
+      findOne: jest.fn().mockResolvedValue(product),
+      save,
+    } as unknown as EntityManager;
+
+    const result = await asImportLocationResolver(
+      buildService(),
+    ).getOrReactivateMovementProduct(manager, product.id, 'IMPORTADOR');
+
+    expect(result).toMatchObject({
+      id: 'producto-1',
+      status: 'ACTIVE',
+      is_deleted: false,
+      deleted_at: null,
+      deleted_by: null,
+      updated_by: 'IMPORTADOR',
+    });
+    expect(save).toHaveBeenCalledTimes(1);
   });
 
   it('no persiste un registro de stock nuevo con saldos provisionales en cero', async () => {

@@ -127,6 +127,36 @@ describe('TransferenciaBodegaService getOrCreateStockRow', () => {
     expect(manager.create).not.toHaveBeenCalled();
   });
 
+  it('reactivates an inactive row even when it was not soft-deleted', async () => {
+    const inactiveRow: any = {
+      id: 'stock-inactive',
+      bodega_id: 'bodega-1',
+      producto_id: 'producto-1',
+      stock_actual: '4.000000',
+      is_deleted: false,
+      status: 'INACTIVE',
+      deleted_at: null,
+      deleted_by: null,
+    };
+    const manager = buildManager(inactiveRow);
+
+    const result: any = await (service as any).getOrCreateStockRow(manager, {
+      bodegaId: 'bodega-1',
+      productoId: 'producto-1',
+      costoPromedio: 3,
+      userName: 'actor-1',
+    });
+
+    expect(result).toMatchObject({
+      id: 'stock-inactive',
+      status: 'ACTIVE',
+      is_deleted: false,
+      updated_by: 'actor-1',
+    });
+    expect(manager.save).toHaveBeenCalledTimes(1);
+    expect(manager.create).not.toHaveBeenCalled();
+  });
+
   it('creates a new zero-initialized row only when no physical row exists', async () => {
     const manager = buildManager(null);
 

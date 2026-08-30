@@ -1645,7 +1645,10 @@ export class TransferenciaBodegaService {
       lock: { mode: 'pessimistic_write' },
     });
     if (existing) {
-      if (existing.is_deleted) {
+      if (
+        existing.is_deleted ||
+        this.toText(existing.status).toUpperCase() !== 'ACTIVE'
+      ) {
         existing.is_deleted = false;
         existing.status = 'ACTIVE';
         existing.deleted_at = null;
