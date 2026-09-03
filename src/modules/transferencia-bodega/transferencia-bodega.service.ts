@@ -102,9 +102,14 @@ export class TransferenciaBodegaService {
   private assertCanForceAuthorizedGuideAnnul(
     actor?: DocumentAnnulmentActor | null,
   ) {
-    if (this.isSuperAdministratorRoleName(actor?.roleName || undefined)) return;
+    if (
+      this.isAdministratorRoleName(actor?.roleName || undefined) ||
+      this.isSuperAdministratorRoleName(actor?.roleName || undefined)
+    ) {
+      return;
+    }
     throw new ForbiddenException(
-      'Solo el Super Administrador puede forzar la anulacion de una transferencia con guia autorizada.',
+      'Solo el Administrador o Super Administrador puede forzar la anulacion de una transferencia con guia autorizada.',
     );
   }
 
@@ -1245,6 +1250,17 @@ export class TransferenciaBodegaService {
       'SUPER_ADMINISTRADOR',
       'SUPER ADMIN',
     ].includes(normalized);
+  }
+
+  private isAdministratorRoleName(roleName?: string): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return ['ADMINISTRADOR', 'ADMINISTRADOR DEL SISTEMA', 'ADMIN'].includes(
+      normalized,
+    );
   }
 
   private assertCanPurge(roleName?: string) {

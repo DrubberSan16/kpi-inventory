@@ -6,21 +6,39 @@ describe('TransferenciaBodegaService forced annulment guard', () => {
     TransferenciaBodegaService.prototype,
   ) as TransferenciaBodegaService;
 
-  it('allows a Super Administrator to force an authorized-guide annulment', () => {
-    expect(() =>
-      (service as any).assertCanForceAuthorizedGuideAnnul({
-        roleName: 'Super Administrador',
-      }),
-    ).not.toThrow();
-  });
+  it.each([
+    'Super Administrador',
+    'SUPERADMINISTRADOR',
+    'SUPER_ADMINISTRADOR',
+    'SUPER ADMIN',
+  ])(
+    'allows the Super Administrator role variant %s to force an authorized-guide annulment',
+    (roleName) => {
+      expect(() =>
+        (service as any).assertCanForceAuthorizedGuideAnnul({ roleName }),
+      ).not.toThrow();
+    },
+  );
 
-  it('rejects an Administrator forcing an authorized-guide annulment', () => {
-    expect(() =>
-      (service as any).assertCanForceAuthorizedGuideAnnul({
-        roleName: 'Administrador',
-      }),
-    ).toThrow(ForbiddenException);
-  });
+  it.each(['Administrador', 'ADMINISTRADOR DEL SISTEMA', 'ADMIN'])(
+    'allows the Administrator role variant %s to force an authorized-guide annulment',
+    (roleName) => {
+      expect(() =>
+        (service as any).assertCanForceAuthorizedGuideAnnul({ roleName }),
+      ).not.toThrow();
+    },
+  );
+
+  it.each(['Gerente General', 'Mecánico', undefined])(
+    'rejects the unauthorized role %s forcing an authorized-guide annulment',
+    (roleName) => {
+      expect(() =>
+        (service as any).assertCanForceAuthorizedGuideAnnul({
+          roleName,
+        }),
+      ).toThrow(ForbiddenException);
+    },
+  );
 });
 
 describe('TransferenciaBodegaService getOrCreateStockRow', () => {
