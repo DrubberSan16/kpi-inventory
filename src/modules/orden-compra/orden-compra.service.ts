@@ -639,6 +639,40 @@ export class OrdenCompraService {
     return hydrated;
   }
 
+  /**
+   * Descripcion del material por producto.
+   *
+   * El detalle guarda solo `nombre_producto`, y la orden de compra se presenta
+   * como `nombre (descripcion)`: sin este mapa la pantalla y el PDF tendrian
+   * que adivinar la descripcion o dejarla fuera.
+   */
+  private async buildDetailDescriptionMap(
+    finder: {
+      find(
+        entity: typeof Producto,
+        options: Record<string, unknown>,
+      ): Promise<Producto[]>;
+    } | null,
+    details: OrdenCompraDet[],
+  ) {
+    const productIds = [
+      ...new Set(details.map((item) => item.producto_id).filter(Boolean)),
+    ];
+    if (!productIds.length) return new Map<string, string | null>();
+    const products = finder
+      ? await finder.find(Producto, {
+          where: productIds.map((id) => ({ id })),
+          select: { id: true, descripcion: true },
+        })
+      : await this.productoRepo.find({
+          where: productIds.map((id) => ({ id })),
+          select: { id: true, descripcion: true },
+        });
+    return new Map(
+      products.map((item) => [item.id, item.descripcion ?? null] as const),
+    );
+  }
+
   private async hydrateOrders(rows: OrdenCompra[], includeDetails = false) {
     if (!rows.length) return [];
     const ids = rows.map((item) => item.id);
@@ -662,6 +696,10 @@ export class OrdenCompraService {
       }),
     ]);
 
+    const descriptionMap = includeDetails
+      ? await this.buildDetailDescriptionMap(null, details)
+      : new Map<string, string | null>();
+
     const detailMap = details.reduce((acc, item) => {
       const cantidadPreaprobada = this.toNumber(
         item.cantidad_preaprobada,
@@ -674,6 +712,7 @@ export class OrdenCompraService {
       );
       (acc[item.orden_compra_id] ??= []).push({
         ...item,
+        descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
         cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
         cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
         cantidad_preaprobada_disponible: this.toFixedText(
@@ -733,6 +772,10 @@ export class OrdenCompraService {
       }),
     ]);
 
+    const descriptionMap = includeDetails
+      ? await this.buildDetailDescriptionMap(manager, details)
+      : new Map<string, string | null>();
+
     const detailMap = details.reduce((acc, item) => {
       const cantidadPreaprobada = this.toNumber(
         item.cantidad_preaprobada,
@@ -745,6 +788,7 @@ export class OrdenCompraService {
       );
       (acc[item.orden_compra_id] ??= []).push({
         ...item,
+        descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
         cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
         cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
         cantidad_preaprobada_disponible: this.toFixedText(

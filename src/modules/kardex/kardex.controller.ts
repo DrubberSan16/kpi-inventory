@@ -80,6 +80,13 @@ export class KardexController extends CrudController<Kardex> {
   @ApiQuery({ name: 'producto_id', required: false, type: String })
   @ApiQuery({ name: 'linea_id', required: false, type: String })
   @ApiQuery({ name: 'categoria_id', required: false, type: String })
+  @ApiQuery({
+    name: 'equipment_id',
+    required: false,
+    type: String,
+    description:
+      'Limita el kardex a los movimientos originados por ordenes de trabajo del equipo indicado.',
+  })
   @ApiQuery({ name: 'tipo_movimiento', required: false, type: String, example: 'INGRESO' })
   async getMaterialSummary(
     @Query() query: PaginationQueryDto,
@@ -90,6 +97,7 @@ export class KardexController extends CrudController<Kardex> {
     @Query('producto_id') productoId?: string,
     @Query('linea_id') lineaId?: string,
     @Query('categoria_id') categoriaId?: string,
+    @Query('equipment_id') equipmentId?: string,
     @Query('tipo_movimiento') tipoMovimiento?: string,
     @Req() req?: any,
   ) {
@@ -104,6 +112,7 @@ export class KardexController extends CrudController<Kardex> {
           producto_id: productoId,
           linea_id: lineaId,
           categoria_id: categoriaId,
+          equipment_id: equipmentId,
           tipo_movimiento: tipoMovimiento,
           page: query.page,
           limit: query.limit,
@@ -130,6 +139,7 @@ export class KardexController extends CrudController<Kardex> {
   @ApiQuery({ name: 'hasta', required: false, type: String, example: '2026-04-15' })
   @ApiQuery({ name: 'search', required: false, type: String })
   @ApiQuery({ name: 'bodega_id', required: false, type: String })
+  @ApiQuery({ name: 'equipment_id', required: false, type: String })
   @ApiQuery({ name: 'tipo_movimiento', required: false, type: String, example: 'INGRESO' })
   async getMaterialMovements(
     @Param('productoId') productoId: string,
@@ -137,6 +147,7 @@ export class KardexController extends CrudController<Kardex> {
     @Query('hasta') hasta?: string,
     @Query('search') search?: string,
     @Query('bodega_id') bodegaId?: string,
+    @Query('equipment_id') equipmentId?: string,
     @Query('tipo_movimiento') tipoMovimiento?: string,
     @Query('include_annulled') includeAnnulled?: string,
     @Req() req?: any,
@@ -150,6 +161,7 @@ export class KardexController extends CrudController<Kardex> {
           hasta,
           search,
           bodega_id: bodegaId,
+          equipment_id: equipmentId,
           tipo_movimiento: tipoMovimiento,
           include_annulled: shouldIncludeAnnulledRecords(
             req,

@@ -363,6 +363,7 @@ export class KardexService extends CrudService<Kardex> {
       producto_id?: string | null;
       linea_id?: string | null;
       categoria_id?: string | null;
+      equipment_id?: string | null;
       tipo_movimiento?: string | null;
       page?: number | null;
       limit?: number | null;
@@ -449,6 +450,7 @@ export class KardexService extends CrudService<Kardex> {
     if (categoryId) {
       baseQb.andWhere('producto.categoria_id = :categoryId', { categoryId });
     }
+    this.applyEquipmentWorkOrderFilter(baseQb, params?.equipment_id);
 
     const normalizedType = this.normalizeMovementType(params?.tipo_movimiento);
     if (normalizedType) {
@@ -612,6 +614,7 @@ export class KardexService extends CrudService<Kardex> {
       hasta?: string | null;
       search?: string | null;
       bodega_id?: string | null;
+      equipment_id?: string | null;
       tipo_movimiento?: string | null;
       include_annulled?: boolean;
     },
@@ -688,6 +691,7 @@ export class KardexService extends CrudService<Kardex> {
     if (warehouseId) {
       qb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
     }
+    this.applyEquipmentWorkOrderFilter(qb, params?.equipment_id);
 
     const normalizedType = this.normalizeMovementType(params?.tipo_movimiento);
     if (normalizedType) {
@@ -1500,6 +1504,46 @@ export class KardexService extends CrudService<Kardex> {
           )
       )
     `);
+  }
+
+  /**
+   * Deja solo los movimientos originados por ordenes de trabajo de un equipo.
+   *
+   * El vinculo fuerte es `movimiento.work_order_id`, pero los egresos mas
+   * antiguos solo dejaron el codigo de la OT en `referencia`, asi que se
+   * aceptan ambos: filtrar unicamente por el identificador escondia kardex que
+   * si pertenece al equipo.
+   */
+  private applyEquipmentWorkOrderFilter(
+    qb: SelectQueryBuilder<Kardex>,
+    equipmentId?: string | null,
+  ) {
+    const normalizedEquipmentId = this.toText(equipmentId);
+    if (!normalizedEquipmentId) return;
+    qb.andWhere(
+      new Brackets((equipmentQb) => {
+        equipmentQb
+          .where(
+            `movimiento.work_order_id IN (
+              SELECT wo.id
+              FROM kpi_process.tb_work_order wo
+              WHERE wo.equipment_id = :equipmentWorkOrderId
+                AND COALESCE(wo.is_deleted, false) = false
+            )`,
+            { equipmentWorkOrderId: normalizedEquipmentId },
+          )
+          .orWhere(
+            `UPPER(TRIM(COALESCE(movimiento.referencia, ''))) IN (
+              SELECT UPPER(TRIM(wo.code))
+              FROM kpi_process.tb_work_order wo
+              WHERE wo.equipment_id = :equipmentWorkOrderId
+                AND COALESCE(wo.is_deleted, false) = false
+                AND COALESCE(wo.code, '') <> ''
+            )`,
+            { equipmentWorkOrderId: normalizedEquipmentId },
+          );
+      }),
+    );
   }
 
   private applyMaterialSearchFilter(
