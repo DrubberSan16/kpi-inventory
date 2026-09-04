@@ -101,6 +101,17 @@ export class TransferenciaBodegaController {
     );
   }
 
+  @Patch(':id/reversar-anulacion')
+  @ApiOperation({
+    summary:
+      'Reversar la anulacion de una transferencia y reaplicar stock, movimientos y kardex (solo Super Administrador)',
+  })
+  @ApiParam({ name: 'id', type: String, description: 'UUID de la transferencia' })
+  @ApiResponse({ status: 200, description: 'Anulacion reversada correctamente' })
+  reverseAnnulment(@Param('id') id: string, @Req() req?: any) {
+    return this.service.reverseAnnulment(id, getRequestActor(req));
+  }
+
   @Delete('purge-all')
   @ApiOperation({ summary: 'Eliminar fisicamente todas las transferencias de bodega' })
   purgeAll(@Headers('x-role-name') roleName?: string) {

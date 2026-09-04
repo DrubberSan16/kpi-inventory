@@ -28,7 +28,10 @@ import {
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
-import { buildAnnulmentInfo } from '../../common/http/annulled-records.util';
+import {
+  buildAnnulmentInfo,
+  isAnnulledState,
+} from '../../common/http/annulled-records.util';
 import { buildSecurityServiceHeaders } from '../../common/http/internal-service.util';
 
 type PreparedTransferDetail = {
@@ -1233,6 +1236,254 @@ export class TransferenciaBodegaService {
         requestUrl: `${this.logEndpoint}/${id}/anular`,
         requestPayload: { id, annulledBy },
         description: `Fallo al anular transferencia ${id}: ${error?.message ?? 'desconocido'}`,
+      });
+      throw error;
+    }
+  }
+
+  private assertCanReverseAnnulment(actor?: DocumentAnnulmentActor | null) {
+    if (this.isSuperAdministratorRoleName(actor?.roleName || undefined)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede reversar la anulacion de una transferencia.',
+    );
+  }
+
+  /**
+   * Estado al que vuelve la guia cuando se reversa la anulacion.
+   *
+   * La anulacion escribio 'ANULADA' encima del estado real y no guardo cual
+   * era, asi que se reconstruye desde los artefactos de la propia guia: si
+   * tiene autorizacion esta autorizada, si tiene XML firmado quedo firmada y si
+   * no, apenas generada. El operador siempre puede volver a consultar al SRI
+   * para refrescarlo contra la fuente de verdad.
+   */
+  private resolveGuideStateAfterReversal(guide: GuiaRemisionElectronica) {
+    if (this.toText(guide.numero_autorizacion) || guide.fecha_autorizacion) {
+      return { estado_emision: 'AUTORIZADA', sri_estado: 'AUTORIZADO' };
+    }
+    if (this.toText(guide.xml_signed)) {
+      return { estado_emision: 'FIRMADA', sri_estado: null };
+    }
+    return { estado_emision: 'GENERADA', sri_estado: null };
+  }
+
+  /**
+   * Deshace una anulacion y deja la transferencia como estaba antes de anularla.
+   *
+   * Es el inverso exacto de `annul`: lee los mismos detalles y la misma
+   * condicion de material que uso la anulacion y aplica los deltas al reves
+   * (devuelve el stock al destino y lo descuenta del origen), reactiva los dos
+   * movimientos originales con su kardex, y repone lo que la anulacion cambio
+   * en la orden de compra, en la transferencia y en la guia. Los movimientos
+   * que creo la anulacion se quedan anulados: son justo el asiento que este
+   * reverso cancela.
+   *
+   * Puede fallar legitimamente si el material ya se consumio despues de anular:
+   * ahi el stock del origen no alcanza para devolverlo, y detenerse es mejor
+   * que dejar un saldo negativo.
+   */
+  async reverseAnnulment(id: string, actor?: DocumentAnnulmentActor | null) {
+    this.assertCanReverseAnnulment(actor);
+    const reversedBy = this.resolveAnnulmentActorName(actor);
+    const traceId = randomUUID();
+    const changedStockIds = new Set<string>();
+    const decreasedStockIds = new Set<string>();
+    this.queueTransactionLog({
+      traceId,
+      createdBy: reversedBy,
+      description: `Inicio del reverso de anulacion de transferencia ${id}.`,
+    });
+
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
+        const transfer = await manager.findOne(TransferenciaBodega, {
+          where: { id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!transfer) {
+          throw new NotFoundException('La transferencia no existe.');
+        }
+        if (String(transfer.estado || '').trim().toUpperCase() !== 'ANULADA') {
+          throw new BadRequestException(
+            'La transferencia no esta anulada, no hay nada que reversar.',
+          );
+        }
+
+        const details = await manager.find(TransferenciaBodegaDet, {
+          where: { transferencia_bodega_id: transfer.id, is_deleted: false },
+          order: { created_at: 'ASC' },
+        });
+        if (!details.length) {
+          throw new BadRequestException(
+            'La transferencia no tiene detalles para reaplicar.',
+          );
+        }
+
+        // La anulacion solo devolvio stock al origen cuando la transferencia no
+        // venia de una orden de compra (ahi el origen es el proveedor, no una
+        // bodega con saldo). El reverso respeta la misma condicion.
+        const restoresSourceStock = !transfer.orden_compra_id;
+
+        for (const detail of details) {
+          const quantity = this.toNumber(detail.cantidad, 0);
+          const unitCost = this.toNumber(detail.costo_unitario, 0);
+          const originalOutDetail = detail.movimiento_salida_det_id
+            ? await manager.findOne(MovimientoInventarioDet, {
+                where: { id: detail.movimiento_salida_det_id },
+              })
+            : null;
+          const materialCondition = this.normalizePersistedStockCondition(
+            originalOutDetail?.condicion_material,
+          );
+
+          const destinationStock = await this.getOrCreateStockRow(manager, {
+            bodegaId: transfer.bodega_destino_id,
+            productoId: detail.producto_id,
+            costoPromedio: unitCost,
+            userName: reversedBy,
+          });
+          const destinationAfter = this.applyStockDeltaByCondition(
+            destinationStock,
+            quantity,
+            materialCondition,
+          );
+          destinationStock.stock_fisico = this.toFixedText(destinationAfter, 6);
+          destinationStock.updated_by = reversedBy;
+          await manager.save(StockBodega, destinationStock);
+          changedStockIds.add(destinationStock.id);
+
+          if (restoresSourceStock) {
+            const sourceStock = await this.getOrCreateStockRow(manager, {
+              bodegaId: transfer.bodega_origen_id,
+              productoId: detail.producto_id,
+              costoPromedio: unitCost,
+              userName: reversedBy,
+            });
+            const sourceAfter = this.applyStockDeltaByCondition(
+              sourceStock,
+              -quantity,
+              materialCondition,
+            );
+            sourceStock.stock_fisico = this.toFixedText(sourceAfter, 6);
+            sourceStock.updated_by = reversedBy;
+            await manager.save(StockBodega, sourceStock);
+            changedStockIds.add(sourceStock.id);
+            decreasedStockIds.add(sourceStock.id);
+          }
+
+          if (detail.orden_compra_det_id) {
+            const orderDetail = await manager.findOne(OrdenCompraDet, {
+              where: { id: detail.orden_compra_det_id, is_deleted: false },
+            });
+            if (orderDetail) {
+              orderDetail.cantidad_transferida = this.toFixedText(
+                this.toNumber(orderDetail.cantidad_transferida, 0) + quantity,
+                6,
+              );
+              orderDetail.updated_by = reversedBy;
+              await manager.save(OrdenCompraDet, orderDetail);
+            }
+          }
+        }
+
+        const restoredMovementIds = [
+          transfer.movimiento_salida_id,
+          transfer.movimiento_ingreso_id,
+        ].filter((value): value is string => Boolean(value));
+        if (restoredMovementIds.length) {
+          await manager
+            .createQueryBuilder()
+            .update(MovimientoInventario)
+            .set({
+              estado: 'CONFIRMADO',
+              status: 'ACTIVE',
+              updated_by: reversedBy,
+              is_deleted: false,
+              deleted_at: null,
+              deleted_by: null,
+            })
+            .where('id IN (:...restoredMovementIds)', { restoredMovementIds })
+            .execute();
+          await manager
+            .createQueryBuilder()
+            .update(Kardex)
+            .set({
+              status: 'ACTIVE',
+              updated_by: reversedBy,
+              is_deleted: false,
+              deleted_at: null,
+              deleted_by: null,
+            })
+            .where('movimiento_id IN (:...restoredMovementIds)', {
+              restoredMovementIds,
+            })
+            .execute();
+        }
+
+        // 'COMPLETADA' es el unico estado vigente que escribe el alta de una
+        // transferencia, asi que devolverla ahi la deja como estaba.
+        transfer.estado = 'COMPLETADA';
+        transfer.status = 'ACTIVE';
+        transfer.is_deleted = false;
+        transfer.deleted_at = null;
+        transfer.deleted_by = null;
+        transfer.updated_by = reversedBy;
+        await manager.save(TransferenciaBodega, transfer);
+
+        if (transfer.orden_compra_id) {
+          const order = await manager.findOne(OrdenCompra, {
+            where: { id: transfer.orden_compra_id, is_deleted: false },
+          });
+          if (order) {
+            order.estado = 'TRANSFERIDA';
+            order.updated_by = reversedBy;
+            await manager.save(OrdenCompra, order);
+          }
+        }
+
+        const guide = await manager.findOne(GuiaRemisionElectronica, {
+          where: { transferencia_bodega_id: transfer.id, is_deleted: false },
+          order: { created_at: 'DESC' },
+        });
+        if (
+          guide &&
+          (isAnnulledState(guide.estado_emision) ||
+            isAnnulledState(guide.sri_estado))
+        ) {
+          const restoredGuideState = this.resolveGuideStateAfterReversal(guide);
+          guide.estado_emision = restoredGuideState.estado_emision;
+          guide.sri_estado = restoredGuideState.sri_estado;
+          guide.updated_by = reversedBy;
+          await manager.save(GuiaRemisionElectronica, guide);
+        }
+
+        const [hydrated] = await this.hydrateTransfersWithManager(
+          manager,
+          [transfer],
+          true,
+        );
+        return hydrated;
+      });
+      this.queueTransactionLog({
+        traceId,
+        createdBy: reversedBy,
+        description: `Anulacion de la transferencia ${id} reversada: stock, movimientos y kardex reaplicados.`,
+      });
+      await this.notifyMaintenanceRecalculationForStocks(
+        changedStockIds,
+        'transfer-annulment-reversal',
+        { decreasedStockIds, actorUsername: reversedBy },
+      );
+      return result;
+    } catch (error: any) {
+      this.queueTransactionLog({
+        traceId,
+        createdBy: reversedBy,
+        status: 'ERROR',
+        requestMethod: 'PATCH',
+        requestUrl: `${this.logEndpoint}/${id}/reversar-anulacion`,
+        requestPayload: { id, reversedBy },
+        description: `Fallo al reversar la anulacion de la transferencia ${id}: ${error?.message ?? 'desconocido'}`,
       });
       throw error;
     }
