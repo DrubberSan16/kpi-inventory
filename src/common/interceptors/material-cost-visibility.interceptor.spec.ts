@@ -9,8 +9,12 @@ describe('material cost visibility', () => {
     'GERENCIA GENERAL',
     'ADMINISTRADOR',
     'ADMINISTRADOR DEL SISTEMA',
+    'ADMIN',
     'SUPER ADMINISTRADOR',
     'SUPERADMINISTRADOR',
+    'SUPER_ADMINISTRADOR',
+    'SUPER_ADMIN',
+    'SUPER ADMIN',
   ])('permite ver costos al rol %s', (roleName) => {
     expect(canRoleViewMaterialCosts(roleName)).toBe(true);
   });
