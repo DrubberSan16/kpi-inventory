@@ -45,6 +45,44 @@ function getRequestActor(req?: any) {
   ).trim();
 }
 
+function canViewInventoryCosts(req?: any) {
+  const roleName = String(
+    req?.headers?.['x-role-name'] ||
+      req?.user?.role?.nombre ||
+      req?.user?.roleName ||
+      '',
+  )
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+  return (
+    roleName.includes('SUPER ADMIN') ||
+    roleName.includes('SUPERADMIN') ||
+    roleName.includes('ADMINISTRADOR') ||
+    roleName.includes('ADMINISTRATIVO') ||
+    roleName === 'ADMIN' ||
+    roleName.includes('GERENTE GENERAL') ||
+    roleName.includes('GERENCIA GENERAL')
+  );
+}
+
+function omitInventoryCostsForUnauthorized<T>(payload: T, req?: any): T {
+  if (canViewInventoryCosts(req)) return payload;
+  const clean = (value: any): any => {
+    if (Array.isArray(value)) return value.map(clean);
+    if (value && typeof value === 'object' && !(value instanceof Date)) {
+      return Object.fromEntries(
+        Object.entries(value)
+          .filter(([key]) => !/costo|precio|subtotal|monto/i.test(key))
+          .map(([key, item]) => [key, clean(item)]),
+      );
+    }
+    return value;
+  };
+  return clean(payload) as T;
+}
+
 @ApiTags('kardex')
 @Controller('kardex')
 export class KardexController extends CrudController<Kardex> {
@@ -101,28 +139,29 @@ export class KardexController extends CrudController<Kardex> {
     @Query('tipo_movimiento') tipoMovimiento?: string,
     @Req() req?: any,
   ) {
+    const summary = await this.service.getMaterialSummary(
+      {
+        desde,
+        hasta,
+        search,
+        bodega_id: bodegaId,
+        producto_id: productoId,
+        linea_id: lineaId,
+        categoria_id: categoriaId,
+        equipment_id: equipmentId,
+        tipo_movimiento: tipoMovimiento,
+        page: query.page,
+        limit: query.limit,
+        include_annulled: shouldIncludeAnnulledRecords(
+          req,
+          query.include_annulled,
+        ),
+      },
+      getSucursalScopeId(req),
+    );
     return {
       message: 'Resumen de kardex obtenido correctamente.',
-      data: await this.service.getMaterialSummary(
-        {
-          desde,
-          hasta,
-          search,
-          bodega_id: bodegaId,
-          producto_id: productoId,
-          linea_id: lineaId,
-          categoria_id: categoriaId,
-          equipment_id: equipmentId,
-          tipo_movimiento: tipoMovimiento,
-          page: query.page,
-          limit: query.limit,
-          include_annulled: shouldIncludeAnnulledRecords(
-            req,
-            query.include_annulled,
-          ),
-        },
-        getSucursalScopeId(req),
-      ),
+      data: omitInventoryCostsForUnauthorized(summary, req),
     };
   }
 

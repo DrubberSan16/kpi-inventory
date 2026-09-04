@@ -166,6 +166,10 @@ describe('KardexService material search filters', () => {
       params,
     );
     expect(orWhere).toHaveBeenCalledWith(
+      "COALESCE(producto.descripcion, '') ILIKE :search",
+      params,
+    );
+    expect(orWhere).toHaveBeenCalledWith(
       "COALESCE(movimiento.numero_documento, '') ILIKE :search",
       params,
     );

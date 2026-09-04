@@ -473,6 +473,20 @@ export class KardexService extends CrudService<Kardex> {
         'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.salida_cantidad ELSE 0 END), 0)',
         'salidas',
       )
+      .addSelect(
+        `COALESCE(SUM(CASE
+          WHEN kardex.is_deleted = false AND kardex.entrada_cantidad > 0
+          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.entrada_cantidad * kardex.costo_unitario))
+          ELSE 0 END), 0)`,
+        'costo_entradas',
+      )
+      .addSelect(
+        `COALESCE(SUM(CASE
+          WHEN kardex.is_deleted = false AND kardex.salida_cantidad > 0
+          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.salida_cantidad * kardex.costo_unitario))
+          ELSE 0 END), 0)`,
+        'costo_salidas',
+      )
       .getRawOne<Record<string, unknown>>();
 
     const groupedQb = baseQb
@@ -481,17 +495,34 @@ export class KardexService extends CrudService<Kardex> {
         'kardex.producto_id AS producto_id',
         'producto.codigo AS producto_codigo',
         'producto.nombre AS producto_nombre',
+        'producto.descripcion AS producto_descripcion',
         'linea.codigo AS linea_codigo',
         'linea.nombre AS linea_nombre',
         'categoria.nombre AS categoria_nombre',
         'unidad.nombre AS unidad_nombre',
         'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.entrada_cantidad ELSE 0 END), 0) AS entradas',
         'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.salida_cantidad ELSE 0 END), 0) AS salidas',
+        `COALESCE(SUM(CASE
+          WHEN kardex.is_deleted = false AND kardex.entrada_cantidad > 0
+          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.entrada_cantidad * kardex.costo_unitario))
+          ELSE 0 END), 0) AS costo_entradas`,
+        `COALESCE(SUM(CASE
+          WHEN kardex.is_deleted = false AND kardex.salida_cantidad > 0
+          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.salida_cantidad * kardex.costo_unitario))
+          ELSE 0 END), 0) AS costo_salidas`,
+        `COALESCE(
+          SUM(CASE WHEN kardex.is_deleted = false
+            THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS((kardex.entrada_cantidad + kardex.salida_cantidad) * kardex.costo_unitario))
+            ELSE 0 END)
+          / NULLIF(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.entrada_cantidad + kardex.salida_cantidad ELSE 0 END), 0),
+          0
+        ) AS costo_unitario_promedio`,
         'COUNT(kardex.id) AS movimientos_count',
       ])
       .groupBy('kardex.producto_id')
       .addGroupBy('producto.codigo')
       .addGroupBy('producto.nombre')
+      .addGroupBy('producto.descripcion')
       .addGroupBy('linea.codigo')
       .addGroupBy('linea.nombre')
       .addGroupBy('categoria.nombre')
@@ -518,6 +549,8 @@ export class KardexService extends CrudService<Kardex> {
     const totalSalidas = this.toNumber(totalsRow?.salidas, 0);
     const totalMovimientos = this.toNumber(totalsRow?.movimientos, 0);
     const totalMateriales = this.toNumber(totalsRow?.materiales, 0);
+    const totalCostoEntradas = this.toNumber(totalsRow?.costo_entradas, 0);
+    const totalCostoSalidas = this.toNumber(totalsRow?.costo_salidas, 0);
 
     if (!rows.length) {
       return {
@@ -530,6 +563,9 @@ export class KardexService extends CrudService<Kardex> {
           movimientos: totalMovimientos,
           entradas: totalEntradas,
           salidas: totalSalidas,
+          costo_entradas: totalCostoEntradas,
+          costo_salidas: totalCostoSalidas,
+          costo_total: totalCostoEntradas + totalCostoSalidas,
         },
         groups: [],
         pagination: {
@@ -565,6 +601,7 @@ export class KardexService extends CrudService<Kardex> {
           producto_id: productoId,
           producto_codigo: this.toText(row.producto_codigo),
           producto_nombre: this.toText(row.producto_nombre),
+          producto_descripcion: this.toText(row.producto_descripcion),
           linea_label: [
             this.toText(row.linea_codigo),
             this.toText(row.linea_nombre),
@@ -577,6 +614,12 @@ export class KardexService extends CrudService<Kardex> {
           entradas,
           salidas,
           stock_final: stockInicial + entradas - salidas,
+          costo_unitario: this.toNumber(row.costo_unitario_promedio, 0),
+          costo_entradas: this.toNumber(row.costo_entradas, 0),
+          costo_salidas: this.toNumber(row.costo_salidas, 0),
+          costo_total:
+            this.toNumber(row.costo_entradas, 0) +
+            this.toNumber(row.costo_salidas, 0),
           movimientos_count: movimientosCount,
         };
       })
@@ -596,6 +639,9 @@ export class KardexService extends CrudService<Kardex> {
         movimientos: totalMovimientos,
         entradas: totalEntradas,
         salidas: totalSalidas,
+        costo_entradas: totalCostoEntradas,
+        costo_salidas: totalCostoSalidas,
+        costo_total: totalCostoEntradas + totalCostoSalidas,
       },
       groups,
       pagination: {
@@ -1559,6 +1605,9 @@ export class KardexService extends CrudService<Kardex> {
             search: `%${normalizedSearch}%`,
           })
           .orWhere('producto.codigo ILIKE :search', {
+            search: `%${normalizedSearch}%`,
+          })
+          .orWhere("COALESCE(producto.descripcion, '') ILIKE :search", {
             search: `%${normalizedSearch}%`,
           })
           .orWhere("COALESCE(bodega.nombre, '') ILIKE :search", {
