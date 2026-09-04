@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 import { TimezoneInterceptor } from './common/interceptors/timezone.interceptor';
+import { MaterialCostVisibilityInterceptor } from './common/interceptors/material-cost-visibility.interceptor';
 
 process.env.TZ =
   String(process.env.APP_TIMEZONE || '').trim() || 'America/Guayaquil';
@@ -47,7 +48,10 @@ async function bootstrap() {
       res.send(document);
     },
   );
-  app.useGlobalInterceptors(new TimezoneInterceptor());
+  app.useGlobalInterceptors(
+    new TimezoneInterceptor(),
+    new MaterialCostVisibilityInterceptor(),
+  );
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   await app.listen(port, '127.0.0.1');
 }

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   Patch,
@@ -28,6 +29,7 @@ import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { shouldIncludeAnnulledRecords } from '../../common/http/annulled-records.util';
 import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
+import { canRoleViewMaterialCosts } from '../../common/interceptors/material-cost-visibility.interceptor';
 import { Kardex } from '../entities/kardex.entity';
 import { KardexService } from './kardex.service';
 
@@ -43,44 +45,6 @@ function getRequestActor(req?: any) {
       req?.user?.username ||
       'SYSTEM',
   ).trim();
-}
-
-function canViewInventoryCosts(req?: any) {
-  const roleName = String(
-    req?.headers?.['x-role-name'] ||
-      req?.user?.role?.nombre ||
-      req?.user?.roleName ||
-      '',
-  )
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toUpperCase();
-  return (
-    roleName.includes('SUPER ADMIN') ||
-    roleName.includes('SUPERADMIN') ||
-    roleName.includes('ADMINISTRADOR') ||
-    roleName.includes('ADMINISTRATIVO') ||
-    roleName === 'ADMIN' ||
-    roleName.includes('GERENTE GENERAL') ||
-    roleName.includes('GERENCIA GENERAL')
-  );
-}
-
-function omitInventoryCostsForUnauthorized<T>(payload: T, req?: any): T {
-  if (canViewInventoryCosts(req)) return payload;
-  const clean = (value: any): any => {
-    if (Array.isArray(value)) return value.map(clean);
-    if (value && typeof value === 'object' && !(value instanceof Date)) {
-      return Object.fromEntries(
-        Object.entries(value)
-          .filter(([key]) => !/costo|precio|subtotal|monto/i.test(key))
-          .map(([key, item]) => [key, clean(item)]),
-      );
-    }
-    return value;
-  };
-  return clean(payload) as T;
 }
 
 @ApiTags('kardex')
@@ -161,7 +125,7 @@ export class KardexController extends CrudController<Kardex> {
     );
     return {
       message: 'Resumen de kardex obtenido correctamente.',
-      data: omitInventoryCostsForUnauthorized(summary, req),
+      data: summary,
     };
   }
 
@@ -403,7 +367,13 @@ export class KardexController extends CrudController<Kardex> {
       mimetype?: string;
     },
     @Body('requested_by') requestedBy?: string,
+    @Req() req?: any,
   ) {
+    if (!canRoleViewMaterialCosts(req?.headers?.['x-role-name'])) {
+      throw new ForbiddenException(
+        'Solo gerencia general y administradores pueden cargar inventario valorizado.',
+      );
+    }
     if (!file?.buffer?.length) {
       throw new BadRequestException(
         'Debes adjuntar un archivo CSV o Excel válido.',
@@ -450,7 +420,12 @@ export class KardexController extends CrudController<Kardex> {
 
   @Post('import/template')
   @ApiOperation({ summary: 'Descargar formato de Excel para carga de inventario' })
-  async downloadTemplate(@Res() res: Response) {
+  async downloadTemplate(@Req() req: any, @Res() res: Response) {
+    if (!canRoleViewMaterialCosts(req?.headers?.['x-role-name'])) {
+      throw new ForbiddenException(
+        'Solo gerencia general y administradores pueden descargar el formato valorizado.',
+      );
+    }
     const buffer = this.service.getImportTemplateBuffer();
     res.setHeader(
       'Content-Type',
