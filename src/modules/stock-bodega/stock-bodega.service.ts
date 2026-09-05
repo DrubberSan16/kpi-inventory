@@ -621,12 +621,23 @@ export class StockBodegaService
   ) {
     const stockCost = this.toNumeric(stock.costo_promedio_bodega, 0);
     if (stockCost > 0) return stockCost;
+    return this.resolveMaterialDefaultCost(producto);
+  }
 
-    const productCost = this.toNumeric(
-      producto?.costo_promedio ?? producto?.ultimo_costo,
-      0,
-    );
-    return productCost > 0 ? productCost : 0;
+  /**
+   * Precio por defecto del material: el que se le asigno al crearlo. Es lo que
+   * usa una bodega que todavia no tiene precio propio.
+   *
+   * Se miran los dos campos porque un material puede traer el importe en
+   * cualquiera de ellos y el otro en cero; encadenarlos con ?? dejaba que un
+   * cero tapara al valor bueno.
+   */
+  private resolveMaterialDefaultCost(producto?: Producto | null) {
+    const averageCost = this.toNumeric(producto?.costo_promedio, 0);
+    if (averageCost > 0) return averageCost;
+
+    const lastCost = this.toNumeric(producto?.ultimo_costo, 0);
+    return lastCost > 0 ? lastCost : 0;
   }
 
   private async generateMovementDocumentCode(

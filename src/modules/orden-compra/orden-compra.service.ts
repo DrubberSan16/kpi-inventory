@@ -863,7 +863,10 @@ export class OrdenCompraService {
 
       const costoUnitario = this.toNumber(
         detail.costo_unitario,
-        this.toNumber(product.costo_promedio ?? product.ultimo_costo, 0),
+        // La orden se cotiza antes de saber en que bodega entrara, asi que el
+        // respaldo solo puede ser el precio del material.
+        this.toNumber(product.costo_promedio, 0) ||
+          this.toNumber(product.ultimo_costo, 0),
       );
       const descuento = this.toNumber(detail.descuento, 0);
       const porcentajeDescuento = this.toNumber(detail.porcentaje_descuento, 0);

@@ -1227,10 +1227,7 @@ export class KardexService extends CrudService<Kardex> {
         const stockRow = await this.getOrCreateStockRow(manager, {
           bodegaId: bodega.id,
           productoId: producto.id,
-          costoPromedio: this.toNumber(
-            producto.costo_promedio ?? producto.ultimo_costo,
-            0,
-          ),
+          costoPromedio: this.resolveMaterialDefaultCost(producto),
           userName,
         });
         const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
@@ -2536,9 +2533,24 @@ export class KardexService extends CrudService<Kardex> {
   }
 
   /**
+   * Precio por defecto del material: el que se le asigno al crearlo. Es lo que
+   * usa una bodega que todavia no tiene precio propio.
+   *
+   * Se miran los dos campos porque un material puede traer el importe en
+   * cualquiera de ellos y el otro en cero; encadenarlos con ?? dejaba que un
+   * cero tapara al valor bueno.
+   */
+  private resolveMaterialDefaultCost(producto?: Producto | null) {
+    const averageCost = this.toNumber(producto?.costo_promedio, 0);
+    if (averageCost > 0) return averageCost;
+
+    const lastCost = this.toNumber(producto?.ultimo_costo, 0);
+    return lastCost > 0 ? lastCost : 0;
+  }
+
+  /**
    * El mismo material puede costar distinto en cada bodega, asi que manda el
-   * costo de la bodega. El del material es el valor por defecto: lo que usa una
-   * bodega que todavia no le ha fijado precio propio.
+   * costo de la bodega y el del material queda de respaldo.
    */
   private resolveWarehouseUnitCost(
     producto: Producto,
@@ -2546,17 +2558,7 @@ export class KardexService extends CrudService<Kardex> {
   ) {
     const stockCost = this.toNumber(stock?.costo_promedio_bodega, 0);
     if (stockCost > 0) return stockCost;
-
-    // Un material puede traer el precio en cualquiera de los dos campos, y el
-    // otro en cero: vale el primero que sea un importe de verdad. Encadenarlos
-    // con ?? dejaba el cero de costo_promedio tapando a ultimo_costo.
-    const averageCost = this.toNumber(producto.costo_promedio, 0);
-    if (averageCost > 0) return averageCost;
-
-    const lastCost = this.toNumber(producto.ultimo_costo, 0);
-    if (lastCost > 0) return lastCost;
-
-    return 0;
+    return this.resolveMaterialDefaultCost(producto);
   }
 
   private normalizeHeader(value: string) {

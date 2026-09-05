@@ -1860,10 +1860,7 @@ export class TransferenciaBodegaService {
         observacion: this.toText(detail.observacion) || null,
         codigoProducto: product.codigo || null,
         nombreProducto: product.nombre,
-        orderUnitCost: this.toNumber(
-          product.costo_promedio ?? product.ultimo_costo,
-          0,
-        ),
+        orderUnitCost: this.resolveMaterialDefaultCost(product),
         requestedCondition: detail.condicion_material
           ? this.normalizeRequestedStockCondition(detail.condicion_material)
           : null,
@@ -1881,8 +1878,23 @@ export class TransferenciaBodegaService {
     if (stockCost > 0) return stockCost;
     const orderCost = this.toNumber(orderDetail?.costo_unitario, 0);
     if (orderCost > 0) return orderCost;
-    const productCost = this.toNumber(product.costo_promedio ?? product.ultimo_costo, 0);
-    return productCost > 0 ? productCost : 0;
+    return this.resolveMaterialDefaultCost(product);
+  }
+
+  /**
+   * Precio por defecto del material: el que se le asigno al crearlo. Es lo que
+   * usa una bodega que todavia no tiene precio propio.
+   *
+   * Se miran los dos campos porque un material puede traer el importe en
+   * cualquiera de ellos y el otro en cero; encadenarlos con ?? dejaba que un
+   * cero tapara al valor bueno.
+   */
+  private resolveMaterialDefaultCost(product?: Producto | null) {
+    const averageCost = this.toNumber(product?.costo_promedio, 0);
+    if (averageCost > 0) return averageCost;
+
+    const lastCost = this.toNumber(product?.ultimo_costo, 0);
+    return lastCost > 0 ? lastCost : 0;
   }
 
   private getApprovedAvailableQuantity(orderDetail: OrdenCompraDet | null) {
