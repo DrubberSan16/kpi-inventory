@@ -269,7 +269,7 @@ export class KardexController extends CrudController<Kardex> {
                 type: 'number',
                 nullable: true,
                 description:
-                  'Precio unitario de entrada. Solo se acepta en INGRESO y desde el rol Bodega; en cualquier otro caso se ignora y el costo se toma del material.',
+                  'Precio unitario de entrada para esta bodega. Solo se acepta en INGRESO y desde el rol Bodega; queda en costo_promedio_bodega y no altera el costo del material. Si se omite se usa el costo de la bodega y, a falta de este, el del material.',
               },
               observacion: { type: 'string', nullable: true },
             },

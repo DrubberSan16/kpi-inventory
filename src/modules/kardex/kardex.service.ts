@@ -1261,20 +1261,15 @@ export class KardexService extends CrudService<Kardex> {
           }
         }
 
+        // El precio que teclea bodega es el de esta bodega y no toca el del
+        // material: el mismo repuesto puede costar distinto en cada una. Se
+        // guarda mas abajo en costo_promedio_bodega, que es de donde saldra la
+        // valorizacion de los siguientes movimientos de esta bodega.
         const precioIngresado = acceptsUnitCost
           ? this.resolveIncomeUnitCost(detail?.costo_unitario)
           : null;
         const costoUnitario =
-          precioIngresado ?? this.resolveProductoUnitCost(producto, stockRow);
-        // El precio con el que entra la mercaderia pasa a ser el del material:
-        // si solo quedara en la linea, el siguiente movimiento volveria a
-        // valorizar con el costo viejo.
-        if (precioIngresado !== null) {
-          producto.ultimo_costo = this.toFixedText(precioIngresado, 4);
-          producto.costo_promedio = this.toFixedText(precioIngresado, 4);
-          producto.updated_by = userName;
-          await manager.save(Producto, producto);
-        }
+          precioIngresado ?? this.resolveWarehouseUnitCost(producto, stockRow);
         const subtotal = cantidad * costoUnitario;
         const stockAdjustment = {
           total: this.applyStockDeltaByCondition(
@@ -2540,18 +2535,26 @@ export class KardexService extends CrudService<Kardex> {
     return parsed;
   }
 
-  private resolveProductoUnitCost(
+  /**
+   * El mismo material puede costar distinto en cada bodega, asi que manda el
+   * costo de la bodega. El del material es el valor por defecto: lo que usa una
+   * bodega que todavia no le ha fijado precio propio.
+   */
+  private resolveWarehouseUnitCost(
     producto: Producto,
     stock?: StockBodega | null,
   ) {
-    const productCost = this.toNumber(
-      producto.costo_promedio ?? producto.ultimo_costo,
-      0,
-    );
-    if (productCost > 0) return productCost;
-
     const stockCost = this.toNumber(stock?.costo_promedio_bodega, 0);
     if (stockCost > 0) return stockCost;
+
+    // Un material puede traer el precio en cualquiera de los dos campos, y el
+    // otro en cero: vale el primero que sea un importe de verdad. Encadenarlos
+    // con ?? dejaba el cero de costo_promedio tapando a ultimo_costo.
+    const averageCost = this.toNumber(producto.costo_promedio, 0);
+    if (averageCost > 0) return averageCost;
+
+    const lastCost = this.toNumber(producto.ultimo_costo, 0);
+    if (lastCost > 0) return lastCost;
 
     return 0;
   }
