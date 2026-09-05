@@ -56,6 +56,8 @@ type MovementDocumentDetailPayload = {
   producto_id?: string;
   cantidad?: string | number;
   condicion_material?: string | null;
+  /** Precio de entrada tecleado por bodega. Solo se honra en INGRESO. */
+  costo_unitario?: string | number | null;
   observacion?: string | null;
 };
 
@@ -1124,7 +1126,16 @@ export class KardexService extends CrudService<Kardex> {
     };
   }
 
-  async createMovementDocument(payload: MovementDocumentPayload) {
+  /**
+   * `options.canSetUnitCost` lo decide el controlador a partir del rol: bodega
+   * recibe la mercaderia y sabe a que precio entro, asi que puede fijarlo. Para
+   * cualquier otro rol el costo se sigue tomando del material, aunque el cuerpo
+   * de la peticion traiga uno.
+   */
+  async createMovementDocument(
+    payload: MovementDocumentPayload,
+    options?: { canSetUnitCost?: boolean },
+  ) {
     const tipo = this.normalizeMovementType(payload.tipo_movimiento);
     const bodegaId = this.toText(payload.bodega_id);
     const detalles = Array.isArray(payload.detalles) ? payload.detalles : [];
@@ -1150,6 +1161,10 @@ export class KardexService extends CrudService<Kardex> {
     const fechaMovimiento =
       this.parseDateBoundary(this.toText(payload.fecha_movimiento), 'start') ??
       new Date();
+    // El precio de entrada solo tiene sentido cuando entra mercaderia: en un
+    // egreso el costo lo manda el inventario, no quien lo saca.
+    const acceptsUnitCost =
+      tipo === 'INGRESO' && options?.canSetUnitCost === true;
 
     const changedStockIds = new Set<string>();
     const result = await this.dataSource.transaction(async (manager) => {
@@ -1246,7 +1261,20 @@ export class KardexService extends CrudService<Kardex> {
           }
         }
 
-        const costoUnitario = this.resolveProductoUnitCost(producto, stockRow);
+        const precioIngresado = acceptsUnitCost
+          ? this.resolveIncomeUnitCost(detail?.costo_unitario)
+          : null;
+        const costoUnitario =
+          precioIngresado ?? this.resolveProductoUnitCost(producto, stockRow);
+        // El precio con el que entra la mercaderia pasa a ser el del material:
+        // si solo quedara en la linea, el siguiente movimiento volveria a
+        // valorizar con el costo viejo.
+        if (precioIngresado !== null) {
+          producto.ultimo_costo = this.toFixedText(precioIngresado, 4);
+          producto.costo_promedio = this.toFixedText(precioIngresado, 4);
+          producto.updated_by = userName;
+          await manager.save(Producto, producto);
+        }
         const subtotal = cantidad * costoUnitario;
         const stockAdjustment = {
           total: this.applyStockDeltaByCondition(
@@ -2499,6 +2527,17 @@ export class KardexService extends CrudService<Kardex> {
 
   private toFixedText(value: number, decimals: number) {
     return Number.isFinite(value) ? value.toFixed(decimals) : '0';
+  }
+
+  /**
+   * Precio de entrada valido: un numero positivo. Vacio, cero o basura significa
+   * "no lo fijo", y el costo se sigue resolviendo desde el material.
+   */
+  private resolveIncomeUnitCost(value: unknown): number | null {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = this.toNumber(value, NaN);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return parsed;
   }
 
   private resolveProductoUnitCost(

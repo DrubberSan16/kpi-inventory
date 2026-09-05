@@ -29,7 +29,10 @@ import { buildCrudRequestDtos } from '../../common/dto/crud-request.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { shouldIncludeAnnulledRecords } from '../../common/http/annulled-records.util';
 import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
-import { canRoleViewMaterialCosts } from '../../common/interceptors/material-cost-visibility.interceptor';
+import {
+  canRoleSetIncomeUnitCost,
+  canRoleViewMaterialCosts,
+} from '../../common/interceptors/material-cost-visibility.interceptor';
 import { Kardex } from '../entities/kardex.entity';
 import { KardexService } from './kardex.service';
 
@@ -262,6 +265,12 @@ export class KardexController extends CrudController<Kardex> {
                 description:
                   'Condicion del stock. En ingresos, si se omite se usa NUEVO. En egresos con stock usado habilitado debe indicarse.',
               },
+              costo_unitario: {
+                type: 'number',
+                nullable: true,
+                description:
+                  'Precio unitario de entrada. Solo se acepta en INGRESO y desde el rol Bodega; en cualquier otro caso se ignora y el costo se toma del material.',
+              },
               observacion: { type: 'string', nullable: true },
             },
           },
@@ -269,10 +278,19 @@ export class KardexController extends CrudController<Kardex> {
       },
     },
   })
-  async createMovementDocument(@Body() payload: Record<string, unknown>) {
+  async createMovementDocument(
+    @Body() payload: Record<string, unknown>,
+    @Req() req?: any,
+  ) {
     return {
       message: 'Documento de bodega registrado correctamente.',
-      data: await this.service.createMovementDocument(payload),
+      data: await this.service.createMovementDocument(payload, {
+        // El precio de entrada solo lo puede fijar bodega; el servicio necesita
+        // saber quien pide para no aceptarlo de cualquiera.
+        canSetUnitCost: canRoleSetIncomeUnitCost(
+          req?.headers?.['x-role-name'],
+        ),
+      }),
     };
   }
 

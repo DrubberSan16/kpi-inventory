@@ -37,6 +37,17 @@ export function canRoleViewMaterialCosts(value: unknown): boolean {
   return AUTHORIZED_COST_ROLES.has(normalizeMaterialCostRole(value));
 }
 
+/**
+ * Bodega no ve importes, pero es quien recibe la mercaderia y sabe a que precio
+ * entro: puede fijar el costo unitario al registrar un ingreso de bodega. Es lo
+ * unico que puede hacer con los importes, y solo en ese documento.
+ */
+const UNIT_COST_ON_INCOME_ROLES = new Set(['BODEGA', 'BODEGUERO']);
+
+export function canRoleSetIncomeUnitCost(value: unknown): boolean {
+  return UNIT_COST_ON_INCOME_ROLES.has(normalizeMaterialCostRole(value));
+}
+
 export function stripMaterialCosts<T>(payload: T): T {
   const seen = new WeakMap<object, unknown>();
 
