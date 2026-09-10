@@ -42,6 +42,23 @@ import { TransferenciaBodegaDet } from '../entities/transferencia-bodega-det.ent
 
 type MovementType = 'INGRESO' | 'SALIDA';
 
+/** De donde nace un documento de bodega. Ver `normalizeMovementOrigin`. */
+type MovementOrigin =
+  | 'MANUAL'
+  | 'ORDEN_COMPRA'
+  | 'TRANSFERENCIA_BODEGA'
+  | 'ORDEN_TRABAJO';
+
+export type MovementDocumentFilters = {
+  desde?: string | null;
+  hasta?: string | null;
+  bodega_id?: string | null;
+  producto_id?: string | null;
+  equipo_tipo_id?: string | null;
+  equipment_id?: string | null;
+  origen?: string | null;
+};
+
 type ManualMovementPayload = {
   tipo_movimiento?: string;
   bodega_id?: string;
@@ -939,12 +956,20 @@ export class KardexService extends CrudService<Kardex> {
     tipoMovimiento?: string | null,
     sucursalId?: string | null,
     includeAnnulled = false,
+    filters?: MovementDocumentFilters,
   ) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
       Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
     const normalizedSearch = this.toText(search);
     const normalizedType = this.normalizeMovementType(tipoMovimiento);
+    const fromDate = this.parseDateBoundary(filters?.desde, 'start');
+    const toDate = this.parseDateBoundary(filters?.hasta, 'end');
+    const warehouseId = this.toText(filters?.bodega_id);
+    const productId = this.toText(filters?.producto_id);
+    const equipmentTypeId = this.toText(filters?.equipo_tipo_id);
+    const equipmentId = this.toText(filters?.equipment_id);
+    const origin = this.normalizeMovementOrigin(filters?.origen);
 
     const qb = this.movimientoRepo
       .createQueryBuilder('movimiento')
@@ -994,6 +1019,48 @@ export class KardexService extends CrudService<Kardex> {
       });
     }
 
+    if (fromDate) {
+      qb.andWhere('movimiento.fecha_movimiento >= :movementFrom', {
+        movementFrom: fromDate,
+      });
+    }
+    if (toDate) {
+      qb.andWhere('movimiento.fecha_movimiento <= :movementTo', {
+        movementTo: toDate,
+      });
+    }
+
+    if (warehouseId) {
+      // Un ingreso llega a la bodega destino y un egreso sale de la origen:
+      // filtrar por una sola de las dos dejaria fuera la mitad de la lista.
+      qb.andWhere(
+        new Brackets((warehouseQb) => {
+          warehouseQb
+            .where('movimiento.bodega_origen_id = :movementWarehouseId', {
+              movementWarehouseId: warehouseId,
+            })
+            .orWhere('movimiento.bodega_destino_id = :movementWarehouseId', {
+              movementWarehouseId: warehouseId,
+            });
+        }),
+      );
+    }
+
+    if (productId) {
+      qb.andWhere(
+        `EXISTS (
+          SELECT 1
+          FROM kpi_inventory.tb_movimiento_inventario_det det_producto
+          WHERE det_producto.movimiento_id = movimiento.id
+            AND det_producto.producto_id = :movementProductId
+        )`,
+        { movementProductId: productId },
+      );
+    }
+
+    this.applyMovementOriginFilter(qb, origin);
+    this.applyMovementEquipmentFilter(qb, equipmentTypeId, equipmentId);
+
     if (normalizedSearch) {
       qb.andWhere(
         new Brackets((searchQb) => {
@@ -1031,6 +1098,7 @@ export class KardexService extends CrudService<Kardex> {
                   AND (
                     COALESCE(prod.nombre, '') ILIKE :search
                     OR COALESCE(prod.codigo, '') ILIKE :search
+                    OR COALESCE(prod.descripcion, '') ILIKE :search
                   )
               )`,
               { search: `%${normalizedSearch}%` },
@@ -1556,6 +1624,112 @@ export class KardexService extends CrudService<Kardex> {
    * aceptan ambos: filtrar unicamente por el identificador escondia kardex que
    * si pertenece al equipo.
    */
+  /**
+   * De donde nace el movimiento. No es una columna: se deduce del documento
+   * que lo respalda, porque un ingreso de bodega y la recepcion de una compra
+   * comparten `tipo_documento` y solo se distinguen por lo que los referencia.
+   */
+  private normalizeMovementOrigin(value: unknown): MovementOrigin | null {
+    const raw = this.toText(value).toUpperCase().replace(/[\s-]+/g, '_');
+    if (!raw) return null;
+    if (raw === 'MANUAL') return 'MANUAL';
+    if (raw === 'ORDEN_COMPRA' || raw === 'COMPRA') return 'ORDEN_COMPRA';
+    if (raw === 'TRANSFERENCIA_BODEGA' || raw === 'TRANSFERENCIA') {
+      return 'TRANSFERENCIA_BODEGA';
+    }
+    if (raw === 'ORDEN_TRABAJO' || raw === 'OT') return 'ORDEN_TRABAJO';
+    return null;
+  }
+
+  private applyMovementOriginFilter(
+    qb: SelectQueryBuilder<MovimientoInventario>,
+    origin: MovementOrigin | null,
+  ) {
+    if (!origin) return;
+
+    const transferJoin = `
+      SELECT 1
+      FROM kpi_inventory.tb_transferencia_bodega transferencia_origen
+      WHERE (
+          transferencia_origen.movimiento_ingreso_id = movimiento.id
+          OR transferencia_origen.movimiento_salida_id = movimiento.id
+        )
+        AND transferencia_origen.is_deleted = false
+    `;
+
+    if (origin === 'ORDEN_TRABAJO') {
+      qb.andWhere('movimiento.work_order_id IS NOT NULL');
+      return;
+    }
+    if (origin === 'ORDEN_COMPRA') {
+      qb.andWhere(
+        `EXISTS (${transferJoin} AND transferencia_origen.orden_compra_id IS NOT NULL)`,
+      );
+      return;
+    }
+    if (origin === 'TRANSFERENCIA_BODEGA') {
+      qb.andWhere(
+        `EXISTS (${transferJoin} AND transferencia_origen.orden_compra_id IS NULL)`,
+      );
+      return;
+    }
+    // Manual: lo tecleo bodega y no lo respalda ninguna OT ni transferencia.
+    qb.andWhere('movimiento.work_order_id IS NULL');
+    qb.andWhere(`NOT EXISTS (${transferJoin})`);
+  }
+
+  /**
+   * Movimientos que nacieron de una OT de cierto equipo o de cierto tipo de
+   * equipo. El vinculo puede venir por identificador o por el codigo de la OT
+   * en la referencia, asi que se miran los dos.
+   */
+  private applyMovementEquipmentFilter(
+    qb: SelectQueryBuilder<MovimientoInventario>,
+    equipmentTypeId?: string | null,
+    equipmentId?: string | null,
+  ) {
+    const normalizedType = this.toText(equipmentTypeId);
+    const normalizedEquipment = this.toText(equipmentId);
+    if (!normalizedType && !normalizedEquipment) return;
+
+    const conditions: string[] = ['COALESCE(wo.is_deleted, false) = false'];
+    const params: Record<string, unknown> = {};
+
+    if (normalizedEquipment) {
+      conditions.push('wo.equipment_id = :movementEquipmentId');
+      params.movementEquipmentId = normalizedEquipment;
+    } else {
+      conditions.push(`wo.equipment_id IN (
+        SELECT equipo.id
+        FROM kpi_maintenance.tb_equipo equipo
+        WHERE equipo.equipo_tipo_id = :movementEquipmentTypeId
+          AND COALESCE(equipo.is_deleted, false) = false
+      )`);
+      params.movementEquipmentTypeId = normalizedType;
+    }
+
+    const where = conditions.join(' AND ');
+    qb.andWhere(
+      new Brackets((equipmentQb) => {
+        equipmentQb
+          .where(
+            `movimiento.work_order_id IN (
+              SELECT wo.id FROM kpi_process.tb_work_order wo WHERE ${where}
+            )`,
+            params,
+          )
+          .orWhere(
+            `UPPER(TRIM(COALESCE(movimiento.referencia, ''))) IN (
+              SELECT UPPER(TRIM(wo.code))
+              FROM kpi_process.tb_work_order wo
+              WHERE ${where} AND COALESCE(wo.code, '') <> ''
+            )`,
+            params,
+          );
+      }),
+    );
+  }
+
   private applyEquipmentWorkOrderFilter(
     qb: SelectQueryBuilder<Kardex>,
     equipmentId?: string | null,

@@ -192,9 +192,29 @@ export class KardexController extends CrudController<Kardex> {
     type: String,
     example: 'INGRESO',
   })
+  @ApiQuery({ name: 'desde', required: false, type: String })
+  @ApiQuery({ name: 'hasta', required: false, type: String })
+  @ApiQuery({ name: 'bodega_id', required: false, type: String })
+  @ApiQuery({ name: 'producto_id', required: false, type: String })
+  @ApiQuery({ name: 'equipo_tipo_id', required: false, type: String })
+  @ApiQuery({ name: 'equipment_id', required: false, type: String })
+  @ApiQuery({
+    name: 'origen',
+    required: false,
+    type: String,
+    description:
+      'MANUAL, ORDEN_COMPRA, TRANSFERENCIA_BODEGA u ORDEN_TRABAJO: de donde nace el documento.',
+  })
   async getMovementDocuments(
     @Query() query: PaginationQueryDto,
     @Query('tipo_movimiento') tipoMovimiento?: string,
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+    @Query('bodega_id') bodegaId?: string,
+    @Query('producto_id') productoId?: string,
+    @Query('equipo_tipo_id') equipoTipoId?: string,
+    @Query('equipment_id') equipmentId?: string,
+    @Query('origen') origen?: string,
     @Req() req?: any,
   ) {
     return {
@@ -206,6 +226,15 @@ export class KardexController extends CrudController<Kardex> {
         tipoMovimiento,
         getSucursalScopeId(req),
         shouldIncludeAnnulledRecords(req, query.include_annulled),
+        {
+          desde,
+          hasta,
+          bodega_id: bodegaId,
+          producto_id: productoId,
+          equipo_tipo_id: equipoTipoId,
+          equipment_id: equipmentId,
+          origen,
+        },
       ),
     };
   }
