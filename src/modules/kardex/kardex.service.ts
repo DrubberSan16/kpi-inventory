@@ -14,6 +14,7 @@ import {
   buildAnnulmentInfo,
   isAnnulledState,
 } from '../../common/http/annulled-records.util';
+import { MaterialPriceTimeline } from '../../common/pricing/material-price-history.util';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import {
@@ -475,21 +476,12 @@ export class KardexService extends CrudService<Kardex> {
         'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.salida_cantidad ELSE 0 END), 0)',
         'salidas',
       )
-      .addSelect(
-        `COALESCE(SUM(CASE
-          WHEN kardex.is_deleted = false AND kardex.entrada_cantidad > 0
-          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.entrada_cantidad * kardex.costo_unitario))
-          ELSE 0 END), 0)`,
-        'costo_entradas',
-      )
-      .addSelect(
-        `COALESCE(SUM(CASE
-          WHEN kardex.is_deleted = false AND kardex.salida_cantidad > 0
-          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.salida_cantidad * kardex.costo_unitario))
-          ELSE 0 END), 0)`,
-        'costo_salidas',
-      )
       .getRawOne<Record<string, unknown>>();
+
+    // Los importes no se suman en SQL: cada movimiento se valoriza con el
+    // precio que regia en SU fecha, y ese precio vive en la linea de tiempo
+    // de compras e ingresos, no en la fila del kardex.
+    const valuation = await this.valueKardexMovements(baseQb.clone());
 
     const groupedQb = baseQb
       .clone()
@@ -504,21 +496,6 @@ export class KardexService extends CrudService<Kardex> {
         'unidad.nombre AS unidad_nombre',
         'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.entrada_cantidad ELSE 0 END), 0) AS entradas',
         'COALESCE(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.salida_cantidad ELSE 0 END), 0) AS salidas',
-        `COALESCE(SUM(CASE
-          WHEN kardex.is_deleted = false AND kardex.entrada_cantidad > 0
-          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.entrada_cantidad * kardex.costo_unitario))
-          ELSE 0 END), 0) AS costo_entradas`,
-        `COALESCE(SUM(CASE
-          WHEN kardex.is_deleted = false AND kardex.salida_cantidad > 0
-          THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS(kardex.salida_cantidad * kardex.costo_unitario))
-          ELSE 0 END), 0) AS costo_salidas`,
-        `COALESCE(
-          SUM(CASE WHEN kardex.is_deleted = false
-            THEN COALESCE(NULLIF(ABS(kardex.costo_total), 0), ABS((kardex.entrada_cantidad + kardex.salida_cantidad) * kardex.costo_unitario))
-            ELSE 0 END)
-          / NULLIF(SUM(CASE WHEN kardex.is_deleted = false THEN kardex.entrada_cantidad + kardex.salida_cantidad ELSE 0 END), 0),
-          0
-        ) AS costo_unitario_promedio`,
         'COUNT(kardex.id) AS movimientos_count',
       ])
       .groupBy('kardex.producto_id')
@@ -551,8 +528,8 @@ export class KardexService extends CrudService<Kardex> {
     const totalSalidas = this.toNumber(totalsRow?.salidas, 0);
     const totalMovimientos = this.toNumber(totalsRow?.movimientos, 0);
     const totalMateriales = this.toNumber(totalsRow?.materiales, 0);
-    const totalCostoEntradas = this.toNumber(totalsRow?.costo_entradas, 0);
-    const totalCostoSalidas = this.toNumber(totalsRow?.costo_salidas, 0);
+    const totalCostoEntradas = valuation.totals.costoEntradas;
+    const totalCostoSalidas = valuation.totals.costoSalidas;
 
     if (!rows.length) {
       return {
@@ -598,6 +575,7 @@ export class KardexService extends CrudService<Kardex> {
         const salidas = this.toNumber(row.salidas, 0);
         const stockInicial = initialStockByProduct.get(productoId) ?? 0;
         const movimientosCount = this.toNumber(row.movimientos_count, 0);
+        const costeo = valuation.byProduct.get(productoId);
 
         return {
           producto_id: productoId,
@@ -616,12 +594,10 @@ export class KardexService extends CrudService<Kardex> {
           entradas,
           salidas,
           stock_final: stockInicial + entradas - salidas,
-          costo_unitario: this.toNumber(row.costo_unitario_promedio, 0),
-          costo_entradas: this.toNumber(row.costo_entradas, 0),
-          costo_salidas: this.toNumber(row.costo_salidas, 0),
-          costo_total:
-            this.toNumber(row.costo_entradas, 0) +
-            this.toNumber(row.costo_salidas, 0),
+          costo_unitario: costeo?.costoUnitario ?? 0,
+          costo_entradas: costeo?.costoEntradas ?? 0,
+          costo_salidas: costeo?.costoSalidas ?? 0,
+          costo_total: (costeo?.costoEntradas ?? 0) + (costeo?.costoSalidas ?? 0),
           movimientos_count: movimientosCount,
         };
       })
@@ -1751,6 +1727,101 @@ export class KardexService extends CrudService<Kardex> {
       .format(value)
       .replace('T', ' ')
       .replace(',', '');
+  }
+
+  /**
+   * Valoriza los movimientos de un filtro ya armado con el precio vigente en
+   * la fecha de cada uno.
+   *
+   * El importe guardado en el kardex se queda como respaldo para el material
+   * que todavia no aparece en ninguna compra ni ingreso; en cuanto aparece,
+   * manda la linea de tiempo para que la misma salida valga lo mismo en la
+   * pantalla, en el PDF y en el Excel.
+   */
+  private async valueKardexMovements(qb: SelectQueryBuilder<Kardex>) {
+    const rows = await qb
+      .select([
+        'kardex.producto_id AS producto_id',
+        'kardex.bodega_id AS bodega_id',
+        'kardex.fecha AS fecha',
+        'kardex.entrada_cantidad AS entrada_cantidad',
+        'kardex.salida_cantidad AS salida_cantidad',
+        'kardex.costo_unitario AS costo_unitario',
+        'kardex.costo_total AS costo_total',
+        'kardex.is_deleted AS is_deleted',
+      ])
+      .getRawMany<Record<string, unknown>>();
+
+    const byProduct = new Map<
+      string,
+      {
+        costoEntradas: number;
+        costoSalidas: number;
+        cantidad: number;
+        importe: number;
+        costoUnitario: number;
+      }
+    >();
+    const totals = { costoEntradas: 0, costoSalidas: 0 };
+
+    if (!rows.length) return { byProduct, totals };
+
+    const productIds = [
+      ...new Set(rows.map((row) => this.toText(row.producto_id)).filter(Boolean)),
+    ];
+    const timeline = await MaterialPriceTimeline.load(
+      this.dataSource,
+      productIds,
+    );
+
+    for (const row of rows) {
+      const productoId = this.toText(row.producto_id);
+      if (!productoId) continue;
+      const annulled =
+        row.is_deleted === true ||
+        ['true', 't', '1'].includes(this.toText(row.is_deleted).toLowerCase());
+      if (annulled) continue;
+
+      const entrada = this.toNumber(row.entrada_cantidad, 0);
+      const salida = this.toNumber(row.salida_cantidad, 0);
+      const cantidad = entrada + salida;
+      if (cantidad <= 0) continue;
+
+      const historico = timeline.priceAt(
+        productoId,
+        row.fecha as Date,
+        this.toText(row.bodega_id) || null,
+      );
+      const almacenado = this.toNumber(row.costo_unitario, 0);
+      const totalAlmacenado = Math.abs(this.toNumber(row.costo_total, 0));
+      const respaldo =
+        almacenado > 0
+          ? almacenado
+          : cantidad > 0 && totalAlmacenado > 0
+            ? totalAlmacenado / cantidad
+            : 0;
+      const precio = historico ?? respaldo;
+
+      const bucket = byProduct.get(productoId) ?? {
+        costoEntradas: 0,
+        costoSalidas: 0,
+        cantidad: 0,
+        importe: 0,
+        costoUnitario: 0,
+      };
+      bucket.costoEntradas += entrada * precio;
+      bucket.costoSalidas += salida * precio;
+      bucket.cantidad += cantidad;
+      bucket.importe += cantidad * precio;
+      bucket.costoUnitario =
+        bucket.cantidad > 0 ? bucket.importe / bucket.cantidad : precio;
+      byProduct.set(productoId, bucket);
+
+      totals.costoEntradas += entrada * precio;
+      totals.costoSalidas += salida * precio;
+    }
+
+    return { byProduct, totals };
   }
 
   private async getInitialStockByProduct(

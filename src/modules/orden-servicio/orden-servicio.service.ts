@@ -28,6 +28,7 @@ import {
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
 import { buildAnnulmentInfo } from '../../common/http/annulled-records.util';
 import { buildSecurityServiceHeaders } from '../../common/http/internal-service.util';
+import { MaterialPriceTimeline } from '../../common/pricing/material-price-history.util';
 
 type Totals = {
   subtotal: number;
@@ -575,7 +576,18 @@ export class OrdenServicioService implements OnModuleInit {
       throw new BadRequestException('Debes seleccionar quién emite la orden de servicio.');
     }
 
-    const preparedDetails = await this.prepareDetails(manager, details);
+    // La fecha se resuelve antes de armar el detalle porque el precio de
+    // respaldo de cada linea es el que regia ese dia, no el del catalogo.
+    const fechaEmision =
+      this.normalizeDateOnly(dto.fecha_emision) ||
+      this.normalizeDateOnly(current?.fecha_emision) ||
+      this.currentAppDateString();
+
+    const preparedDetails = await this.prepareDetails(
+      manager,
+      details,
+      fechaEmision,
+    );
     const linkedEquipments = await this.prepareLinkedEquipments(
       manager,
       requestedEquipmentIds,
@@ -598,10 +610,7 @@ export class OrdenServicioService implements OnModuleInit {
     if (current) {
       entity.codigo = this.toText(dto.codigo) || entity.codigo;
     }
-    entity.fecha_emision =
-      this.normalizeDateOnly(dto.fecha_emision) ||
-      this.normalizeDateOnly(current?.fecha_emision) ||
-      this.currentAppDateString();
+    entity.fecha_emision = fechaEmision;
     entity.proveedor_id = supplier.id;
     entity.proveedor_identificacion = supplier.identificacion ?? null;
     entity.proveedor_nombre =
@@ -771,7 +780,16 @@ export class OrdenServicioService implements OnModuleInit {
   private async prepareDetails(
     manager: EntityManager,
     details: OrdenServicioDetalleDto[],
+    fechaEmision?: string | null,
   ) {
+    // Precio vigente el dia de la orden segun compras e ingresos. Solo se usa
+    // como respaldo: si el emisor teclea un importe, ese manda, porque la
+    // orden de servicio es lo que se acordo pagar.
+    const timeline = await MaterialPriceTimeline.load(
+      manager,
+      details.map((detail) => this.toText(detail.producto_id)).filter(Boolean),
+      { hasta: fechaEmision ?? null },
+    );
     const out: Array<{
       producto: Producto;
       cantidad: number;
@@ -809,9 +827,11 @@ export class OrdenServicioService implements OnModuleInit {
 
       const costoUnitario = this.toNumber(
         detail.costo_unitario,
-        // El servicio no entra a bodega: el respaldo es el precio del material.
-        this.toNumber(product.costo_promedio, 0) ||
-          this.toNumber(product.ultimo_costo, 0),
+        // El servicio no entra a bodega: manda el precio que regia ese dia y,
+        // si nunca se compro, el del catalogo.
+        timeline.priceAt(product.id, fechaEmision ?? null) ??
+          (this.toNumber(product.costo_promedio, 0) ||
+            this.toNumber(product.ultimo_costo, 0)),
       );
       const descuento = this.toNumber(detail.descuento, 0);
       const porcentajeDescuento = this.toNumber(detail.porcentaje_descuento, 0);
