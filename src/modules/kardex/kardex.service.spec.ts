@@ -100,6 +100,10 @@ type MaterialSearchFilterResolver = {
   applyMaterialSearchFilter(qb: any, search?: string | null): void;
 };
 
+type MovementOriginFilterResolver = {
+  applyMovementOriginFilter(qb: any, origin: string | null): void;
+};
+
 type CriticalStockResolver = {
   resolveManualMovementCondition(
     stock: StockBodega,
@@ -141,6 +145,11 @@ const asMaterialSearchFilterResolver = (service: KardexService) =>
 const asCriticalStockResolver = (service: KardexService) =>
   service as unknown as CriticalStockResolver;
 
+const asMovementOriginFilterResolver = (service: KardexService) =>
+  service as unknown as MovementOriginFilterResolver;
+
+const squash = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+
 describe('KardexService material search filters', () => {
   it('aplica los mismos criterios de material y documento al resumen y al detalle', () => {
     const andWhere = jest.fn();
@@ -177,6 +186,57 @@ describe('KardexService material search filters', () => {
       "COALESCE(kardex.observacion, '') ILIKE :search",
       params,
     );
+  });
+});
+
+describe('KardexService movement origin filter', () => {
+  it('cuenta como orden de compra tanto la transferencia enlazada como la OC citada a mano', () => {
+    const andWhere = jest.fn();
+    asMovementOriginFilterResolver(buildService()).applyMovementOriginFilter(
+      { andWhere },
+      'ORDEN_COMPRA',
+    );
+
+    expect(andWhere).toHaveBeenCalledTimes(1);
+    const calls = andWhere.mock.calls as unknown as Array<[Brackets]>;
+    const where = jest.fn().mockReturnThis();
+    const orWhere = jest.fn().mockReturnThis();
+    calls[0][0].whereFactory({
+      where,
+      orWhere,
+    } as unknown as WhereExpressionBuilder);
+
+    expect(squash(where.mock.calls[0][0] as string)).toContain(
+      'transferencia_origen.orden_compra_id IS NOT NULL',
+    );
+    // Bodega recibe la mercaderia y teclea el codigo de la OC en la
+    // referencia sin pasar por la transferencia: sigue siendo una compra.
+    expect(squash(orWhere.mock.calls[0][0] as string)).toContain(
+      "UPPER(TRIM(oc_referida.codigo)) = UPPER(TRIM(COALESCE(movimiento.referencia, '')))",
+    );
+  });
+
+  it('deja fuera de los manuales lo que cita una orden de compra', () => {
+    const andWhere = jest.fn();
+    asMovementOriginFilterResolver(buildService()).applyMovementOriginFilter(
+      { andWhere },
+      'MANUAL',
+    );
+
+    const conditions = andWhere.mock.calls.map((call) =>
+      squash(String(call[0])),
+    );
+    expect(conditions).toContain('movimiento.work_order_id IS NULL');
+    expect(
+      conditions.some((condition) =>
+        condition.startsWith('NOT EXISTS ( SELECT 1 FROM kpi_inventory.tb_transferencia_bodega'),
+      ),
+    ).toBe(true);
+    expect(
+      conditions.some((condition) =>
+        condition.startsWith('NOT EXISTS ( SELECT 1 FROM kpi_inventory.tb_orden_compra'),
+      ),
+    ).toBe(true);
   });
 });
 

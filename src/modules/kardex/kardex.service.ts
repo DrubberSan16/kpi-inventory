@@ -1663,9 +1663,28 @@ export class KardexService extends CrudService<Kardex> {
       qb.andWhere('movimiento.work_order_id IS NOT NULL');
       return;
     }
+    // Una orden de compra tambien puede quedar citada a mano: bodega recibe la
+    // mercaderia y teclea el codigo de la OC en la referencia sin pasar por la
+    // transferencia. Para quien filtra siguen siendo ingresos por orden de
+    // compra, asi que valen los dos caminos.
+    const referencedPurchaseOrder = `
+      EXISTS (
+        SELECT 1
+        FROM kpi_inventory.tb_orden_compra oc_referida
+        WHERE oc_referida.is_deleted = false
+          AND UPPER(TRIM(oc_referida.codigo)) = UPPER(TRIM(COALESCE(movimiento.referencia, '')))
+      )
+    `;
+
     if (origin === 'ORDEN_COMPRA') {
       qb.andWhere(
-        `EXISTS (${transferJoin} AND transferencia_origen.orden_compra_id IS NOT NULL)`,
+        new Brackets((originQb) => {
+          originQb
+            .where(
+              `EXISTS (${transferJoin} AND transferencia_origen.orden_compra_id IS NOT NULL)`,
+            )
+            .orWhere(referencedPurchaseOrder);
+        }),
       );
       return;
     }
@@ -1675,9 +1694,11 @@ export class KardexService extends CrudService<Kardex> {
       );
       return;
     }
-    // Manual: lo tecleo bodega y no lo respalda ninguna OT ni transferencia.
+    // Manual: lo tecleo bodega y no lo respalda ninguna OT, ninguna
+    // transferencia y ninguna orden de compra citada en la referencia.
     qb.andWhere('movimiento.work_order_id IS NULL');
     qb.andWhere(`NOT EXISTS (${transferJoin})`);
+    qb.andWhere(`NOT ${referencedPurchaseOrder}`);
   }
 
   /**
