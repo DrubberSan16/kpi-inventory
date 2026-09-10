@@ -312,6 +312,12 @@ export class KardexController extends CrudController<Kardex> {
                 description:
                   'Descuento en porcentaje (0 a 100), para no calcular el importe a mano. Solo se usa cuando no viene descuento.',
               },
+              iva_porcentaje: {
+                type: 'number',
+                nullable: true,
+                description:
+                  'IVA de la linea en porcentaje (0 a 100). Se calcula sobre el neto de descuento y NO entra al costo del inventario: es credito tributario, no lo que costo el material.',
+              },
               observacion: { type: 'string', nullable: true },
             },
           },

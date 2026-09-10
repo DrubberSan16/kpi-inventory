@@ -34,9 +34,21 @@ export class MovimientoInventarioDet extends BaseAuditEntity {
 
   @Column({ type: 'numeric', precision: 18, scale: 4, default: 0 })
   @ApiProperty({
-    description: 'total neto de la linea: cantidad * costo_unitario - descuento',
+    description:
+      'costo de la mercaderia: cantidad * costo_unitario - descuento, sin IVA. Es el valor que entra al inventario.',
   })
   subtotal_costo: string;
+
+  @Column({ type: 'numeric', precision: 8, scale: 4, default: 0 })
+  @ApiProperty({ description: 'porcentaje de IVA de la linea' })
+  iva_porcentaje: string;
+
+  @Column({ type: 'numeric', precision: 18, scale: 4, default: 0 })
+  @ApiProperty({
+    description:
+      'IVA de la linea. No forma parte del costo del inventario: es credito tributario.',
+  })
+  iva_total: string;
 
   @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
   @ApiProperty({ description: 'condicion del material: NUEVO, USADO o CRITICO' })

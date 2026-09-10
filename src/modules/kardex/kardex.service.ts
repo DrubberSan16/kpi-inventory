@@ -80,16 +80,23 @@ type MovementDocumentDetailPayload = {
   descuento?: string | number | null;
   /** Descuento en porcentaje, para no obligar a calcular el importe a mano. */
   porcentaje_descuento?: string | number | null;
+  /** IVA de la linea en porcentaje. No entra al costo del inventario. */
+  iva_porcentaje?: string | number | null;
   observacion?: string | null;
 };
 
-/** Lo que cuesta una linea del documento una vez aplicado su descuento. */
+/** Desglose economico de una linea, con el mismo orden que una orden de compra. */
 type MovementLineAmounts = {
   costoUnitarioBruto: number;
   descuento: number;
   porcentajeDescuento: number;
+  /** Costo de la mercaderia, neto de descuento y SIN IVA. */
   subtotal: number;
   costoUnitarioNeto: number;
+  ivaPorcentaje: number;
+  iva: number;
+  /** Lo que se paga por la linea: subtotal + IVA. */
+  total: number;
 };
 
 type MovementDocumentPayload = {
@@ -1374,6 +1381,8 @@ export class KardexService extends CrudService<Kardex> {
             descuento: this.toFixedText(linea.descuento, 4),
             porcentaje_descuento: this.toFixedText(linea.porcentajeDescuento, 4),
             subtotal_costo: this.toFixedText(subtotal, 4),
+            iva_porcentaje: this.toFixedText(linea.ivaPorcentaje, 4),
+            iva_total: this.toFixedText(linea.iva, 4),
             condicion_material: stockAdjustment.condition,
             observacion: this.toText(detail?.observacion) || null,
             created_by: userName,
@@ -2270,6 +2279,11 @@ export class KardexService extends CrudService<Kardex> {
           descuento: this.toNumber(detail.descuento, 0),
           porcentaje_descuento: this.toNumber(detail.porcentaje_descuento, 0),
           subtotal_costo: this.toNumber(detail.subtotal_costo, 0),
+          iva_porcentaje: this.toNumber(detail.iva_porcentaje, 0),
+          iva_total: this.toNumber(detail.iva_total, 0),
+          total_linea:
+            this.toNumber(detail.subtotal_costo, 0) +
+            this.toNumber(detail.iva_total, 0),
           // El neto se calcula aqui para que la pantalla y el PDF no tengan
           // que repetir la division cada uno por su lado.
           costo_unitario_neto:
@@ -2304,6 +2318,9 @@ export class KardexService extends CrudService<Kardex> {
         // Pie del documento, con el mismo desglose que una orden de compra. Se
         // suma desde el detalle en vez de guardarse en la cabecera: son la
         // misma cifra y una copia acaba desviandose de la otra.
+        //
+        // `subtotal_neto` es lo que vale la mercaderia y es lo que cuadra con
+        // `total_costos`; `total_documento` es lo que se paga, IVA incluido.
         subtotal_bruto: detailRows.reduce(
           (sum, detail) =>
             sum + this.toNumber(detail.subtotal_costo, 0) + this.toNumber(detail.descuento, 0),
@@ -2313,8 +2330,16 @@ export class KardexService extends CrudService<Kardex> {
           (sum, detail) => sum + this.toNumber(detail.descuento, 0),
           0,
         ),
-        total_neto: detailRows.reduce(
+        subtotal_neto: detailRows.reduce(
           (sum, detail) => sum + this.toNumber(detail.subtotal_costo, 0),
+          0,
+        ),
+        iva_total: detailRows.reduce(
+          (sum, detail) => sum + this.toNumber(detail.iva_total, 0),
+          0,
+        ),
+        total_documento: detailRows.reduce(
+          (sum, detail) => sum + this.toNumber(detail.total_linea, 0),
           0,
         ),
         detalles: detailRows,
@@ -2950,6 +2975,10 @@ export class KardexService extends CrudService<Kardex> {
         : (bruto * porcentajeSolicitado) / 100;
     const descuento = Math.min(Math.max(descuentoCalculado, 0), bruto);
     const subtotal = Math.max(bruto - descuento, 0);
+    const ivaPorcentaje = acceptsDiscount
+      ? Math.min(Math.max(this.toNumber(detail?.iva_porcentaje, 0), 0), 100)
+      : 0;
+    const iva = (subtotal * ivaPorcentaje) / 100;
 
     return {
       costoUnitarioBruto,
@@ -2960,6 +2989,9 @@ export class KardexService extends CrudService<Kardex> {
       porcentajeDescuento: bruto > 0 ? (descuento / bruto) * 100 : 0,
       subtotal,
       costoUnitarioNeto: cantidad > 0 ? subtotal / cantidad : 0,
+      ivaPorcentaje,
+      iva,
+      total: subtotal + iva,
     };
   }
 

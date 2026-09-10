@@ -201,6 +201,9 @@ type MovementLineAmountsResolver = {
     porcentajeDescuento: number;
     subtotal: number;
     costoUnitarioNeto: number;
+    ivaPorcentaje: number;
+    iva: number;
+    total: number;
   };
 };
 
@@ -270,6 +273,33 @@ describe('KardexService ingreso de bodega con descuento', () => {
     expect(linea.subtotal).toBe(21);
     expect(linea.costoUnitarioNeto).toBe(7);
     expect(linea.porcentajeDescuento).toBe(0);
+  });
+
+  it('el IVA se calcula sobre el neto y NO entra al costo del inventario', () => {
+    const linea = resolve(10, 20, { descuento: 50, iva_porcentaje: 15 });
+
+    expect(linea.subtotal).toBe(150);
+    expect(linea.iva).toBe(22.5);
+    // Lo que se paga.
+    expect(linea.total).toBe(172.5);
+    // Lo que vale la mercaderia: el impuesto es credito tributario, no costo.
+    expect(linea.costoUnitarioNeto).toBe(15);
+  });
+
+  it('sin IVA el total de la linea es su subtotal', () => {
+    const linea = resolve(2, 30, { iva_porcentaje: 0 });
+
+    expect(linea.iva).toBe(0);
+    expect(linea.total).toBe(60);
+    expect(linea.subtotal).toBe(60);
+  });
+
+  it('sin permiso para tocar importes tampoco se aplica IVA', () => {
+    const linea = resolve(2, 30, { iva_porcentaje: 15 }, false);
+
+    expect(linea.ivaPorcentaje).toBe(0);
+    expect(linea.iva).toBe(0);
+    expect(linea.total).toBe(60);
   });
 });
 
