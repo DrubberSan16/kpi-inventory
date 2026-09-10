@@ -189,6 +189,90 @@ describe('KardexService material search filters', () => {
   });
 });
 
+type MovementLineAmountsResolver = {
+  resolveMovementLineAmounts(
+    cantidad: number,
+    costoUnitarioBruto: number,
+    detail: Record<string, unknown> | null,
+    acceptsDiscount: boolean,
+  ): {
+    costoUnitarioBruto: number;
+    descuento: number;
+    porcentajeDescuento: number;
+    subtotal: number;
+    costoUnitarioNeto: number;
+  };
+};
+
+const asMovementLineAmountsResolver = (service: KardexService) =>
+  service as unknown as MovementLineAmountsResolver;
+
+describe('KardexService ingreso de bodega con descuento', () => {
+  const resolve = (
+    cantidad: number,
+    bruto: number,
+    detail: Record<string, unknown> | null,
+    acceptsDiscount = true,
+  ) =>
+    asMovementLineAmountsResolver(buildService()).resolveMovementLineAmounts(
+      cantidad,
+      bruto,
+      detail,
+      acceptsDiscount,
+    );
+
+  it('descuenta el importe y baja el costo unitario que entra al inventario', () => {
+    const linea = resolve(10, 20, { descuento: 50 });
+
+    expect(linea.subtotal).toBe(150);
+    expect(linea.descuento).toBe(50);
+    expect(linea.costoUnitarioBruto).toBe(20);
+    // Lo que se valoriza es lo que se pago, no el precio de lista.
+    expect(linea.costoUnitarioNeto).toBe(15);
+    expect(linea.porcentajeDescuento).toBeCloseTo(25, 6);
+  });
+
+  it('acepta el descuento en porcentaje cuando no se da el importe', () => {
+    const linea = resolve(4, 25, { porcentaje_descuento: 10 });
+
+    expect(linea.descuento).toBe(10);
+    expect(linea.subtotal).toBe(90);
+    expect(linea.costoUnitarioNeto).toBe(22.5);
+  });
+
+  it('el importe manda sobre el porcentaje, igual que en la orden de compra', () => {
+    const linea = resolve(2, 100, { descuento: 30, porcentaje_descuento: 90 });
+
+    expect(linea.descuento).toBe(30);
+    expect(linea.subtotal).toBe(170);
+  });
+
+  it('un descuento mayor que la linea la deja en cero, nunca en negativo', () => {
+    const linea = resolve(2, 10, { descuento: 999 });
+
+    expect(linea.descuento).toBe(20);
+    expect(linea.subtotal).toBe(0);
+    expect(linea.costoUnitarioNeto).toBe(0);
+  });
+
+  it('sin permiso para tocar importes el descuento se ignora', () => {
+    const linea = resolve(5, 10, { descuento: 20, porcentaje_descuento: 50 }, false);
+
+    expect(linea.descuento).toBe(0);
+    expect(linea.subtotal).toBe(50);
+    expect(linea.costoUnitarioNeto).toBe(10);
+  });
+
+  it('sin descuento el neto es el bruto', () => {
+    const linea = resolve(3, 7, null);
+
+    expect(linea.descuento).toBe(0);
+    expect(linea.subtotal).toBe(21);
+    expect(linea.costoUnitarioNeto).toBe(7);
+    expect(linea.porcentajeDescuento).toBe(0);
+  });
+});
+
 describe('KardexService movement origin filter', () => {
   it('cuenta como orden de compra tanto la transferencia enlazada como la OC citada a mano', () => {
     const andWhere = jest.fn();

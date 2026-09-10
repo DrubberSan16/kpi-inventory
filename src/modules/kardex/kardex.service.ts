@@ -76,7 +76,20 @@ type MovementDocumentDetailPayload = {
   condicion_material?: string | null;
   /** Precio de entrada tecleado por bodega. Solo se honra en INGRESO. */
   costo_unitario?: string | number | null;
+  /** Importe de descuento de la linea. Manda sobre el porcentaje. */
+  descuento?: string | number | null;
+  /** Descuento en porcentaje, para no obligar a calcular el importe a mano. */
+  porcentaje_descuento?: string | number | null;
   observacion?: string | null;
+};
+
+/** Lo que cuesta una linea del documento una vez aplicado su descuento. */
+type MovementLineAmounts = {
+  costoUnitarioBruto: number;
+  descuento: number;
+  porcentajeDescuento: number;
+  subtotal: number;
+  costoUnitarioNeto: number;
 };
 
 type MovementDocumentPayload = {
@@ -1311,9 +1324,19 @@ export class KardexService extends CrudService<Kardex> {
         const precioIngresado = acceptsUnitCost
           ? this.resolveIncomeUnitCost(detail?.costo_unitario)
           : null;
-        const costoUnitario =
+        const costoUnitarioBruto =
           precioIngresado ?? this.resolveWarehouseUnitCost(producto, stockRow);
-        const subtotal = cantidad * costoUnitario;
+        const linea = this.resolveMovementLineAmounts(
+          cantidad,
+          costoUnitarioBruto,
+          detail,
+          acceptsUnitCost,
+        );
+        // Lo que entra al inventario es el NETO: valorizar la salida de dentro
+        // de seis meses con el precio de lista de hoy, descuento incluido,
+        // daria un costo que nadie pago.
+        const costoUnitario = linea.costoUnitarioNeto;
+        const subtotal = linea.subtotal;
         const stockAdjustment = {
           total: this.applyStockDeltaByCondition(
             stockRow,
@@ -1345,7 +1368,11 @@ export class KardexService extends CrudService<Kardex> {
             producto_id: producto.id,
             unidad_medida_id: producto.unidad_medida_id ?? null,
             cantidad: this.toFixedText(cantidad, 6),
-            costo_unitario: this.toFixedText(costoUnitario, 4),
+            // En el detalle queda el bruto tecleado y su descuento, como en la
+            // orden de compra; `subtotal_costo` es ya el neto de la linea.
+            costo_unitario: this.toFixedText(linea.costoUnitarioBruto, 4),
+            descuento: this.toFixedText(linea.descuento, 4),
+            porcentaje_descuento: this.toFixedText(linea.porcentajeDescuento, 4),
             subtotal_costo: this.toFixedText(subtotal, 4),
             condicion_material: stockAdjustment.condition,
             observacion: this.toText(detail?.observacion) || null,
@@ -2240,7 +2267,16 @@ export class KardexService extends CrudService<Kardex> {
           unidad_label: this.toText(unit?.nombre),
           cantidad: this.toNumber(detail.cantidad, 0),
           costo_unitario: this.toNumber(detail.costo_unitario, 0),
+          descuento: this.toNumber(detail.descuento, 0),
+          porcentaje_descuento: this.toNumber(detail.porcentaje_descuento, 0),
           subtotal_costo: this.toNumber(detail.subtotal_costo, 0),
+          // El neto se calcula aqui para que la pantalla y el PDF no tengan
+          // que repetir la division cada uno por su lado.
+          costo_unitario_neto:
+            this.toNumber(detail.cantidad, 0) > 0
+              ? this.toNumber(detail.subtotal_costo, 0) /
+                this.toNumber(detail.cantidad, 0)
+              : 0,
           condicion_material: this.toText(detail.condicion_material) || 'NUEVO',
           lote: this.toText(detail.lote) || null,
           serie: this.toText(detail.serie) || null,
@@ -2263,6 +2299,22 @@ export class KardexService extends CrudService<Kardex> {
         total_items: detailRows.length,
         total_cantidad: detailRows.reduce(
           (sum, detail) => sum + this.toNumber(detail.cantidad, 0),
+          0,
+        ),
+        // Pie del documento, con el mismo desglose que una orden de compra. Se
+        // suma desde el detalle en vez de guardarse en la cabecera: son la
+        // misma cifra y una copia acaba desviandose de la otra.
+        subtotal_bruto: detailRows.reduce(
+          (sum, detail) =>
+            sum + this.toNumber(detail.subtotal_costo, 0) + this.toNumber(detail.descuento, 0),
+          0,
+        ),
+        descuento_total: detailRows.reduce(
+          (sum, detail) => sum + this.toNumber(detail.descuento, 0),
+          0,
+        ),
+        total_neto: detailRows.reduce(
+          (sum, detail) => sum + this.toNumber(detail.subtotal_costo, 0),
           0,
         ),
         detalles: detailRows,
@@ -2865,6 +2917,50 @@ export class KardexService extends CrudService<Kardex> {
     const parsed = this.toNumber(value, NaN);
     if (!Number.isFinite(parsed) || parsed <= 0) return null;
     return parsed;
+  }
+
+  /**
+   * Economia de una linea del documento, con el mismo desglose que una orden
+   * de compra: precio unitario por cantidad, menos el descuento.
+   *
+   * El descuento se puede dar como importe o como porcentaje; si vienen los
+   * dos manda el importe, igual que en la OC. Nunca puede pasarse del bruto:
+   * una linea regalada vale cero, no menos.
+   *
+   * El NETO es lo que de verdad costo la mercaderia, asi que es el que va al
+   * kardex y al costo promedio de la bodega; el bruto se conserva en el
+   * detalle porque es lo que tecleo quien recibio.
+   */
+  private resolveMovementLineAmounts(
+    cantidad: number,
+    costoUnitarioBruto: number,
+    detail: MovementDocumentDetailPayload | null | undefined,
+    acceptsDiscount: boolean,
+  ): MovementLineAmounts {
+    const bruto = cantidad * costoUnitarioBruto;
+    const importeSolicitado = acceptsDiscount
+      ? Math.max(this.toNumber(detail?.descuento, 0), 0)
+      : 0;
+    const porcentajeSolicitado = acceptsDiscount
+      ? Math.min(Math.max(this.toNumber(detail?.porcentaje_descuento, 0), 0), 100)
+      : 0;
+    const descuentoCalculado =
+      importeSolicitado > 0
+        ? importeSolicitado
+        : (bruto * porcentajeSolicitado) / 100;
+    const descuento = Math.min(Math.max(descuentoCalculado, 0), bruto);
+    const subtotal = Math.max(bruto - descuento, 0);
+
+    return {
+      costoUnitarioBruto,
+      descuento,
+      // Se guarda el porcentaje que corresponde al descuento realmente
+      // aplicado: si llego un importe, el porcentaje que representa; si llego
+      // un porcentaje y hubo que recortarlo contra el bruto, el recortado.
+      porcentajeDescuento: bruto > 0 ? (descuento / bruto) * 100 : 0,
+      subtotal,
+      costoUnitarioNeto: cantidad > 0 ? subtotal / cantidad : 0,
+    };
   }
 
   /**

@@ -21,11 +21,21 @@ export class MovimientoInventarioDet extends BaseAuditEntity {
   unidad_medida_id?: string | null;
 
   @Column({ type: 'numeric', precision: 14, scale: 4, default: 0 })
-  @ApiProperty({ description: 'costo unitario' })
+  @ApiProperty({ description: 'costo unitario BRUTO, antes del descuento' })
   costo_unitario: string;
 
   @Column({ type: 'numeric', precision: 18, scale: 4, default: 0 })
-  @ApiProperty({ description: 'subtotal costo' })
+  @ApiProperty({ description: 'importe de descuento de la linea' })
+  descuento: string;
+
+  @Column({ type: 'numeric', precision: 8, scale: 4, default: 0 })
+  @ApiProperty({ description: 'porcentaje de descuento de la linea' })
+  porcentaje_descuento: string;
+
+  @Column({ type: 'numeric', precision: 18, scale: 4, default: 0 })
+  @ApiProperty({
+    description: 'total neto de la linea: cantidad * costo_unitario - descuento',
+  })
   subtotal_costo: string;
 
   @Column({ type: 'varchar', length: 12, default: 'NUEVO' })

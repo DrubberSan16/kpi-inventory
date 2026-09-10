@@ -300,6 +300,18 @@ export class KardexController extends CrudController<Kardex> {
                 description:
                   'Precio unitario de entrada para esta bodega. Solo se acepta en INGRESO y desde Bodega, Administrador, Super Administrador o Gerente General; queda en costo_promedio_bodega y no altera el costo del material. Si se omite se usa el costo de la bodega y, a falta de este, el del material.',
               },
+              descuento: {
+                type: 'number',
+                nullable: true,
+                description:
+                  'Importe de descuento de la linea. Mismas reglas de permiso que costo_unitario; si viene junto a porcentaje_descuento manda el importe. Nunca puede pasarse del bruto de la linea.',
+              },
+              porcentaje_descuento: {
+                type: 'number',
+                nullable: true,
+                description:
+                  'Descuento en porcentaje (0 a 100), para no calcular el importe a mano. Solo se usa cuando no viene descuento.',
+              },
               observacion: { type: 'string', nullable: true },
             },
           },
