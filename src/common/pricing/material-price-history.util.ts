@@ -131,7 +131,7 @@ export class MaterialPriceTimeline {
       '       k.fecha AS fecha,',
       '       k.costo_unitario AS costo,',
       "       'INGRESO' AS fuente,",
-      '       mov.codigo AS documento',
+      '       mov.numero_documento AS documento',
       '  FROM kpi_inventory.tb_kardex k',
       '  JOIN kpi_inventory.tb_movimiento_inventario mov ON mov.id = k.movimiento_id',
       ' WHERE k.is_deleted = false',
