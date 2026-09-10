@@ -775,3 +775,134 @@ describe('KardexService inventory import locations', () => {
     expect(save).toHaveBeenCalledTimes(1);
   });
 });
+
+type InitialStockResolver = {
+  getInitialStockByProduct(
+    productIds: string[],
+    fromDate: Date,
+    sucursalId?: string | null,
+    warehouseId?: string | null,
+  ): Promise<Map<string, number>>;
+};
+
+/**
+ * Constructor de consultas de mentira: encadena todo y devuelve las filas
+ * pedidas al llegar a `getRawMany`.
+ */
+const stubQueryBuilder = (rows: Record<string, unknown>[]) => {
+  const builder: Record<string, any> = {
+    getRawMany: jest.fn().mockResolvedValue(rows),
+  };
+  for (const method of [
+    'leftJoin',
+    'where',
+    'andWhere',
+    'select',
+    'groupBy',
+    'orderBy',
+    'addOrderBy',
+  ]) {
+    builder[method] = jest.fn().mockReturnValue(builder);
+  }
+  return builder;
+};
+
+describe('KardexService stock inicial del rango', () => {
+  const PRODUCT = 'producto-perno';
+
+  const buildResolver = (
+    stockRows: Record<string, unknown>[],
+    movementRows: Record<string, unknown>[],
+  ) => {
+    const kardexRepo = {
+      createQueryBuilder: jest.fn(() => stubQueryBuilder(movementRows)),
+    } as unknown as Repository<Kardex>;
+    const stockRepo = {
+      createQueryBuilder: jest.fn(() => stubQueryBuilder(stockRows)),
+    } as unknown as Repository<StockBodega>;
+
+    const service = new KardexService(
+      kardexRepo,
+      stockRepo,
+      emptyRepository<MovimientoInventario>(),
+      emptyRepository<MovimientoInventarioDet>(),
+      emptyRepository<Producto>(),
+      emptyRepository<Bodega>(),
+      emptyRepository<Sucursal>(),
+      emptyRepository<Linea>(),
+      emptyRepository<Categoria>(),
+      emptyRepository<UnidadMedida>(),
+      { get: jest.fn().mockReturnValue('') } as unknown as ConfigService,
+      {} as DataSource,
+    );
+    return service as unknown as InitialStockResolver;
+  };
+
+  it('reconstruye el saldo previo desde el stock real de la bodega', async () => {
+    // El caso que rompia: un material sin kardex anterior al rango, con 5 en
+    // bodega y una sola salida dentro del rango. Antes arrancaba en cero y el
+    // reporte mostraba -1.
+    const resolver = buildResolver(
+      [{ producto_id: PRODUCT, stock_actual: '5' }],
+      [{ producto_id: PRODUCT, entradas: '0', salidas: '1' }],
+    );
+
+    const result = await resolver.getInitialStockByProduct(
+      [PRODUCT],
+      new Date('2026-09-01T00:00:00'),
+    );
+
+    expect(result.get(PRODUCT)).toBe(6);
+  });
+
+  it('deshace tambien los ingresos posteriores al corte', async () => {
+    const resolver = buildResolver(
+      [{ producto_id: PRODUCT, stock_actual: '20' }],
+      [{ producto_id: PRODUCT, entradas: '15', salidas: '3' }],
+    );
+
+    const result = await resolver.getInitialStockByProduct(
+      [PRODUCT],
+      new Date('2026-09-01T00:00:00'),
+    );
+
+    expect(result.get(PRODUCT)).toBe(8);
+  });
+
+  it('nunca devuelve una existencia negativa', async () => {
+    const resolver = buildResolver(
+      [{ producto_id: PRODUCT, stock_actual: '0' }],
+      [{ producto_id: PRODUCT, entradas: '10', salidas: '0' }],
+    );
+
+    const result = await resolver.getInitialStockByProduct(
+      [PRODUCT],
+      new Date('2026-09-01T00:00:00'),
+    );
+
+    expect(result.get(PRODUCT)).toBe(0);
+  });
+
+  it('resuelve el material que ya no tiene fila de stock en la bodega', async () => {
+    const resolver = buildResolver(
+      [],
+      [{ producto_id: PRODUCT, entradas: '0', salidas: '4' }],
+    );
+
+    const result = await resolver.getInitialStockByProduct(
+      [PRODUCT],
+      new Date('2026-09-01T00:00:00'),
+    );
+
+    expect(result.get(PRODUCT)).toBe(4);
+  });
+
+  it('no consulta nada cuando no hay materiales', async () => {
+    const resolver = buildResolver([], []);
+    const result = await resolver.getInitialStockByProduct(
+      [],
+      new Date('2026-09-01T00:00:00'),
+    );
+    expect(result.size).toBe(0);
+  });
+});

@@ -610,7 +610,9 @@ export class KardexService extends CrudService<Kardex> {
           stock_inicial: stockInicial,
           entradas,
           salidas,
-          stock_final: stockInicial + entradas - salidas,
+          // El saldo del rango no puede quedar bajo cero: el stock inicial
+          // ya sale del stock real de la bodega, no de un contador en cero.
+          stock_final: Math.max(stockInicial + entradas - salidas, 0),
           costo_unitario: costeo?.costoUnitario ?? 0,
           costo_entradas: costeo?.costoEntradas ?? 0,
           costo_salidas: costeo?.costoSalidas ?? 0,
@@ -942,7 +944,7 @@ export class KardexService extends CrudService<Kardex> {
         stock_inicial: stockInicial,
         entradas: totalEntradas,
         salidas: totalSalidas,
-        stock_final: stockInicial + totalEntradas - totalSalidas,
+        stock_final: Math.max(stockInicial + totalEntradas - totalSalidas, 0),
         movimientos_count: movements.length,
       },
       movements,
@@ -1998,6 +2000,22 @@ export class KardexService extends CrudService<Kardex> {
     return { byProduct, totals };
   }
 
+  /**
+   * Stock que tenia cada material justo antes del rango consultado.
+   *
+   * Antes se leia el `saldo_cantidad` del ultimo kardex anterior a la fecha.
+   * Un material sin kardex previo -- porque su existencia se cargo por
+   * inventario inicial o porque su historia empieza dentro del rango --
+   * arrancaba en cero, y una sola salida lo dejaba en -1 mientras la bodega
+   * seguia mostrando 5. El reporte contradecia al stock, y el que estaba bien
+   * era el stock.
+   *
+   * Ahora se cuenta al reves: se parte del stock REAL de la bodega, que es el
+   * dato autoritativo, y se deshacen los movimientos ocurridos desde la fecha
+   * de corte hasta hoy. Da igual si el kardex tiene historia anterior o no.
+   *
+   *   stock_inicial = stock_hoy - entradas(desde la fecha) + salidas(desde la fecha)
+   */
   private async getInitialStockByProduct(
     productIds: string[],
     fromDate: Date,
@@ -2007,9 +2025,36 @@ export class KardexService extends CrudService<Kardex> {
     const out = new Map<string, number>();
     if (!productIds.length) return out;
 
-    const qb = this.repository
+    const stockQb = this.stockRepo
+      .createQueryBuilder('stock')
+      .leftJoin(
+        Bodega,
+        'bodega',
+        'bodega.id = stock.bodega_id AND bodega.is_deleted = false',
+      )
+      .where('stock.is_deleted = false')
+      .andWhere('stock.producto_id IN (:...productIds)', { productIds });
+
+    if (sucursalId) {
+      stockQb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+    }
+    if (warehouseId) {
+      stockQb.andWhere('stock.bodega_id = :warehouseId', { warehouseId });
+    }
+
+    const stockRows = await stockQb
+      .select([
+        'stock.producto_id AS producto_id',
+        'COALESCE(SUM(stock.stock_actual), 0) AS stock_actual',
+      ])
+      .groupBy('stock.producto_id')
+      .getRawMany<Record<string, unknown>>();
+
+    // Movimientos desde la fecha de corte hasta HOY, no solo hasta el fin del
+    // rango: el stock de la bodega es de hoy, asi que hay que deshacer todo lo
+    // que paso despues del corte para llegar al saldo de ese dia.
+    const movementQb = this.repository
       .createQueryBuilder('kardex')
-      .distinctOn(['kardex.producto_id', 'kardex.bodega_id'])
       .leftJoin(
         Bodega,
         'bodega',
@@ -2017,38 +2062,62 @@ export class KardexService extends CrudService<Kardex> {
       )
       .where('kardex.is_deleted = false')
       .andWhere('kardex.producto_id IN (:...productIds)', { productIds })
-      .andWhere('kardex.fecha < :fromDate', { fromDate });
+      .andWhere('kardex.fecha >= :fromDate', { fromDate });
 
-    this.applyVisibleKardexTransactionFilter(qb);
+    this.applyVisibleKardexTransactionFilter(movementQb);
 
     if (sucursalId) {
-      qb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
+      movementQb.andWhere('bodega.sucursal_id = :sucursalId', { sucursalId });
     }
-
     if (warehouseId) {
-      qb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
+      movementQb.andWhere('kardex.bodega_id = :warehouseId', { warehouseId });
     }
 
-    const rows = await qb
+    const movementRows = await movementQb
       .select([
         'kardex.producto_id AS producto_id',
-        'kardex.bodega_id AS bodega_id',
-        'kardex.saldo_cantidad AS saldo_cantidad',
+        'COALESCE(SUM(kardex.entrada_cantidad), 0) AS entradas',
+        'COALESCE(SUM(kardex.salida_cantidad), 0) AS salidas',
       ])
-      .orderBy('kardex.producto_id', 'ASC')
-      .addOrderBy('kardex.bodega_id', 'ASC')
-      .addOrderBy('kardex.fecha', 'DESC')
-      .addOrderBy('kardex.created_at', 'DESC')
+      .groupBy('kardex.producto_id')
       .getRawMany<Record<string, unknown>>();
 
-    for (const row of rows) {
+    const movementsByProduct = new Map<
+      string,
+      { entradas: number; salidas: number }
+    >();
+    for (const row of movementRows) {
       const productId = this.toText(row.producto_id);
       if (!productId) continue;
-      out.set(
-        productId,
-        (out.get(productId) ?? 0) + this.toNumber(row.saldo_cantidad, 0),
-      );
+      movementsByProduct.set(productId, {
+        entradas: this.toNumber(row.entradas, 0),
+        salidas: this.toNumber(row.salidas, 0),
+      });
     }
+
+    const productsWithStock = new Set<string>();
+    for (const row of stockRows) {
+      const productId = this.toText(row.producto_id);
+      if (!productId) continue;
+      productsWithStock.add(productId);
+      const movements = movementsByProduct.get(productId);
+      const inicial =
+        this.toNumber(row.stock_actual, 0) -
+        (movements?.entradas ?? 0) +
+        (movements?.salidas ?? 0);
+      // Una existencia no puede ser negativa: si el descuadre sobrevive al
+      // recalculo, se muestra cero antes que un numero imposible.
+      out.set(productId, Math.max(inicial, 0));
+    }
+
+    // Material que ya no tiene fila de stock (se dio de baja en la bodega)
+    // pero si movimientos en el rango: su saldo previo se deduce igual, con
+    // stock actual cero.
+    for (const [productId, movements] of movementsByProduct.entries()) {
+      if (productsWithStock.has(productId)) continue;
+      out.set(productId, Math.max(movements.salidas - movements.entradas, 0));
+    }
+
     return out;
   }
 
