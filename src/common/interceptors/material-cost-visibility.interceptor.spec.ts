@@ -1,4 +1,5 @@
 import {
+  canRoleSetIncomeUnitCost,
   canRoleViewMaterialCosts,
   stripMaterialCosts,
 } from './material-cost-visibility.interceptor';
@@ -43,4 +44,32 @@ describe('material cost visibility', () => {
       paginacion: { total: 25, page: 1 },
     });
   });
+});
+
+describe('precio de entrada en el ingreso de bodega', () => {
+  it.each(['BODEGA', 'BODEGUERO'])(
+    'deja fijar el precio de entrada al rol %s, que es quien recibe',
+    (roleName) => {
+      expect(canRoleSetIncomeUnitCost(roleName)).toBe(true);
+    },
+  );
+
+  it.each([
+    'GERENTE GENERAL',
+    'ADMINISTRADOR',
+    'SUPER ADMINISTRADOR',
+    'Gerencia General',
+  ])(
+    'tambien lo deja al rol %s, que es quien corrige una entrada mal costeada',
+    (roleName) => {
+      expect(canRoleSetIncomeUnitCost(roleName)).toBe(true);
+    },
+  );
+
+  it.each(['OPERADOR', 'SUPERVISOR', '', null, undefined])(
+    'no lo deja al rol %s',
+    (roleName) => {
+      expect(canRoleSetIncomeUnitCost(roleName)).toBe(false);
+    },
+  );
 });

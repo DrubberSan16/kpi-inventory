@@ -38,14 +38,19 @@ export function canRoleViewMaterialCosts(value: unknown): boolean {
 }
 
 /**
- * Bodega no ve importes, pero es quien recibe la mercaderia y sabe a que precio
- * entro: puede fijar el costo unitario al registrar un ingreso de bodega. Es lo
- * unico que puede hacer con los importes, y solo en ese documento.
+ * Quien puede fijar el precio al que entra la mercaderia.
+ *
+ * Bodega no ve importes, pero es quien recibe el material y sabe a que precio
+ * entro: es lo unico que puede hacer con los importes, y solo en ese
+ * documento. Los perfiles que SI ven importes tambien pueden fijarlo -- son
+ * los que corrigen una entrada mal costeada -- asi que la lista es la de
+ * costos mas bodega.
  */
 const UNIT_COST_ON_INCOME_ROLES = new Set(['BODEGA', 'BODEGUERO']);
 
 export function canRoleSetIncomeUnitCost(value: unknown): boolean {
-  return UNIT_COST_ON_INCOME_ROLES.has(normalizeMaterialCostRole(value));
+  const role = normalizeMaterialCostRole(value);
+  return UNIT_COST_ON_INCOME_ROLES.has(role) || AUTHORIZED_COST_ROLES.has(role);
 }
 
 export function stripMaterialCosts<T>(payload: T): T {

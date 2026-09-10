@@ -298,7 +298,7 @@ export class KardexController extends CrudController<Kardex> {
                 type: 'number',
                 nullable: true,
                 description:
-                  'Precio unitario de entrada para esta bodega. Solo se acepta en INGRESO y desde el rol Bodega; queda en costo_promedio_bodega y no altera el costo del material. Si se omite se usa el costo de la bodega y, a falta de este, el del material.',
+                  'Precio unitario de entrada para esta bodega. Solo se acepta en INGRESO y desde Bodega, Administrador, Super Administrador o Gerente General; queda en costo_promedio_bodega y no altera el costo del material. Si se omite se usa el costo de la bodega y, a falta de este, el del material.',
               },
               observacion: { type: 'string', nullable: true },
             },
@@ -314,8 +314,10 @@ export class KardexController extends CrudController<Kardex> {
     return {
       message: 'Documento de bodega registrado correctamente.',
       data: await this.service.createMovementDocument(payload, {
-        // El precio de entrada solo lo puede fijar bodega; el servicio necesita
-        // saber quien pide para no aceptarlo de cualquiera.
+        // El precio de entrada lo fija quien recibe la mercaderia (bodega) o
+        // quien corrige una entrada mal costeada (administracion y gerencia);
+        // el servicio necesita saber quien pide para no aceptarlo de
+        // cualquiera.
         canSetUnitCost: canRoleSetIncomeUnitCost(
           req?.headers?.['x-role-name'],
         ),

@@ -1304,7 +1304,7 @@ export class KardexService extends CrudService<Kardex> {
           }
         }
 
-        // El precio que teclea bodega es el de esta bodega y no toca el del
+        // El precio tecleado es el de esta bodega y no toca el del
         // material: el mismo repuesto puede costar distinto en cada una. Se
         // guarda mas abajo en costo_promedio_bodega, que es de donde saldra la
         // valorizacion de los siguientes movimientos de esta bodega.
