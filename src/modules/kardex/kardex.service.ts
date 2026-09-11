@@ -70,6 +70,14 @@ type ManualMovementPayload = {
   updated_by?: string | null;
 };
 
+/**
+ * Orden que pone el ingreso antes de la salida cuando comparten instante.
+ * Ascendente = ingreso primero (cronologico); descendente = salida primero,
+ * que es como se lee una lista del mas reciente al mas antiguo.
+ */
+const KARDEX_ENTRY_FIRST_ORDER =
+  "CASE WHEN UPPER(TRIM(COALESCE(kardex.tipo_movimiento, ''))) = 'INGRESO' THEN 0 ELSE 1 END";
+
 type MovementDocumentDetailPayload = {
   producto_id?: string;
   cantidad?: string | number;
@@ -378,6 +386,9 @@ export class KardexService extends CrudService<Kardex> {
     const [data, total] = await qb
       .orderBy('kardex.created_at', 'DESC')
       .addOrderBy('kardex.fecha', 'DESC')
+      // Mismo criterio que el detalle por material: a igual instante, primero
+      // el ingreso. Ver KARDEX_ENTRY_FIRST_ORDER.
+      .addOrderBy(KARDEX_ENTRY_FIRST_ORDER, 'DESC')
       .addOrderBy('kardex.id', 'DESC')
       .skip((safePage - 1) * safeLimit)
       .take(safeLimit)
@@ -812,6 +823,17 @@ export class KardexService extends CrudService<Kardex> {
       ])
       .orderBy('kardex.created_at', 'DESC')
       .addOrderBy('kardex.fecha', 'DESC')
+      // Desempate por tipo cuando dos movimientos caen en el MISMO instante.
+      //
+      // Pasa constantemente: el ingreso preaprobado de una orden de compra y
+      // la salida de la transferencia que lo consume se graban en el mismo
+      // segundo. Sin este criterio el desempate quedaba en el `id`, que es un
+      // uuid aleatorio, y la salida podia aparecer antes que su ingreso: un
+      // material con existencia inicial cero abriendo con una salida de 36,
+      // que no puede ser. No se saca lo que todavia no entro, asi que a igual
+      // instante el ingreso va primero; como la lista se muestra del mas
+      // reciente al mas antiguo, aqui se ordena al reves.
+      .addOrderBy(KARDEX_ENTRY_FIRST_ORDER, 'DESC')
       .addOrderBy('kardex.id', 'DESC')
       .getRawMany<Record<string, unknown>>();
 
@@ -937,6 +959,8 @@ export class KardexService extends CrudService<Kardex> {
         stock: this.toNumber(row.saldo_cantidad, 0),
       };
     });
+
+    this.applyRunningBalanceToMovements(movements, stockInicial);
 
     return {
       range: {
@@ -2937,6 +2961,48 @@ export class KardexService extends CrudService<Kardex> {
    * Precio de entrada valido: un numero positivo. Vacio, cero o basura significa
    * "no lo fijo", y el costo se sigue resolviendo desde el material.
    */
+  /**
+   * Saldo antes y despues de cada movimiento.
+   *
+   * `kardex.saldo_cantidad` guarda el saldo que tenia la fila al escribirse,
+   * por bodega y por condicion, asi que no cuadra con lo que se esta mirando
+   * en cuanto la consulta filtra por bodega o por tipo: en pantalla se veia
+   * saltar 36 -> 0 -> 12 -> 0 sin que las cifras se encadenaran.
+   *
+   * Aqui se recorre la lista en orden cronologico partiendo de la existencia
+   * inicial del rango -- la misma que muestra el resumen -- y cada fila se
+   * queda con el saldo con el que llego y con el que salio. Asi la columna
+   * final de una fila es la inicial de la siguiente, que es lo que se espera
+   * de un kardex.
+   *
+   * La lista llega del mas reciente al mas antiguo, por eso se recorre al
+   * reves; el arreglo no se reordena.
+   */
+  private applyRunningBalanceToMovements(
+    movements: Array<Record<string, unknown>>,
+    stockInicial: number,
+  ) {
+    let saldo = this.toNumber(stockInicial, 0);
+    for (let index = movements.length - 1; index >= 0; index -= 1) {
+      const movement = movements[index];
+      if (!movement) continue;
+      const entrada = this.toNumber(movement.entrada, 0);
+      const salida = this.toNumber(movement.salida, 0);
+      // Un movimiento anulado no movio existencias: se muestra con el saldo
+      // intacto en vez de descuadrar todo lo que viene despues.
+      const anulado = movement.anulado === true;
+      const inicial = saldo;
+      const final = anulado ? saldo : saldo + entrada - salida;
+      movement.stock_inicial = inicial;
+      movement.stock_final = final;
+      // `stock` se conserva por compatibilidad y pasa a ser el saldo final,
+      // que es lo que la columna decia representar.
+      movement.stock = final;
+      saldo = final;
+    }
+    return movements;
+  }
+
   private resolveIncomeUnitCost(value: unknown): number | null {
     if (value === null || value === undefined || value === '') return null;
     const parsed = this.toNumber(value, NaN);

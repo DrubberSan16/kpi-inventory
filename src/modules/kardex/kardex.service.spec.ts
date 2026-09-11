@@ -210,6 +210,82 @@ type MovementLineAmountsResolver = {
 const asMovementLineAmountsResolver = (service: KardexService) =>
   service as unknown as MovementLineAmountsResolver;
 
+type RunningBalanceResolver = {
+  applyRunningBalanceToMovements(
+    movements: Array<Record<string, unknown>>,
+    stockInicial: number,
+  ): Array<Record<string, unknown>>;
+};
+
+const asRunningBalanceResolver = (service: KardexService) =>
+  service as unknown as RunningBalanceResolver;
+
+describe('KardexService saldo corrido del detalle', () => {
+  // La lista llega del mas reciente al mas antiguo, como se muestra.
+  const movimientos = () => [
+    { documento: 'EB-595', entrada: 0, salida: 45 },
+    { documento: 'IB-2713', entrada: 45, salida: 0 },
+    { documento: 'EB-161', entrada: 0, salida: 12 },
+    { documento: 'IB-2264', entrada: 12, salida: 0 },
+    { documento: 'EB-160', entrada: 0, salida: 36 },
+    { documento: 'IB-2262', entrada: 36, salida: 0 },
+  ];
+
+  it('encadena el saldo desde la existencia inicial del rango', () => {
+    const rows = movimientos();
+    asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 0);
+
+    expect(
+      rows.map((row) => [row.documento, row.stock_inicial, row.stock_final]),
+    ).toEqual([
+      ['EB-595', 45, 0],
+      ['IB-2713', 0, 45],
+      ['EB-161', 12, 0],
+      ['IB-2264', 0, 12],
+      ['EB-160', 36, 0],
+      ['IB-2262', 0, 36],
+    ]);
+  });
+
+  it('el saldo final de una fila es el inicial de la anterior en la lista', () => {
+    const rows = movimientos();
+    asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 0);
+
+    for (let index = 0; index < rows.length - 1; index += 1) {
+      expect(rows[index]!.stock_inicial).toBe(rows[index + 1]!.stock_final);
+    }
+  });
+
+  it('parte de la existencia previa cuando el rango no empieza en cero', () => {
+    const rows = [
+      { documento: 'EB-2', entrada: 0, salida: 3 },
+      { documento: 'IB-1', entrada: 5, salida: 0 },
+    ];
+    asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 10);
+
+    expect(rows[1]).toMatchObject({ stock_inicial: 10, stock_final: 15 });
+    expect(rows[0]).toMatchObject({ stock_inicial: 15, stock_final: 12 });
+  });
+
+  it('un movimiento anulado no mueve el saldo', () => {
+    const rows = [
+      { documento: 'EB-2', entrada: 0, salida: 4 },
+      { documento: 'EB-1', entrada: 0, salida: 7, anulado: true },
+    ];
+    asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 10);
+
+    expect(rows[1]).toMatchObject({ stock_inicial: 10, stock_final: 10 });
+    expect(rows[0]).toMatchObject({ stock_inicial: 10, stock_final: 6 });
+  });
+
+  it('`stock` queda como el saldo final, que es lo que la columna decia', () => {
+    const rows = [{ documento: 'IB-1', entrada: 8, salida: 0, stock: 999 }];
+    asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 2);
+
+    expect(rows[0]!.stock).toBe(10);
+  });
+});
+
 describe('KardexService ingreso de bodega con descuento', () => {
   const resolve = (
     cantidad: number,
