@@ -220,15 +220,52 @@ type RunningBalanceResolver = {
 const asRunningBalanceResolver = (service: KardexService) =>
   service as unknown as RunningBalanceResolver;
 
+type DescriptionResolver = {
+  stripAggregatedDocumentList(value: unknown): string;
+};
+
+const asDescriptionResolver = (service: KardexService) =>
+  service as unknown as DescriptionResolver;
+
+describe('KardexService descripcion del movimiento', () => {
+  const strip = (value: unknown) =>
+    asDescriptionResolver(buildService()).stripAggregatedDocumentList(value);
+
+  it('quita la lista de documentos agregados y deja la descripcion legible', () => {
+    expect(
+      strip(
+        'Salida de materiales por orden de trabajo OT-A00060 [Incluye EB-00000424, EB-00000425]',
+      ),
+    ).toBe('Salida de materiales por orden de trabajo OT-A00060');
+  });
+
+  it('tambien cuando la lista es larga y el texto trae mas frases', () => {
+    expect(
+      strip(
+        'Salida por OT-A00040. CAMBIO DE ACEITE [Incluye EB-00000382, EB-00000383, EB-00000384]',
+      ),
+    ).toBe('Salida por OT-A00040. CAMBIO DE ACEITE');
+  });
+
+  it('deja intacto el texto que no la trae', () => {
+    expect(strip('Transferencia TB-00000111')).toBe('Transferencia TB-00000111');
+  });
+
+  it('devuelve vacio cuando no hay texto', () => {
+    expect(strip(null)).toBe('');
+    expect(strip('   ')).toBe('');
+  });
+});
+
 describe('KardexService saldo corrido del detalle', () => {
-  // La lista llega del mas reciente al mas antiguo, como se muestra.
+  // La lista llega en orden cronologico, del mas antiguo al mas reciente.
   const movimientos = () => [
-    { documento: 'EB-595', entrada: 0, salida: 45 },
-    { documento: 'IB-2713', entrada: 45, salida: 0 },
-    { documento: 'EB-161', entrada: 0, salida: 12 },
-    { documento: 'IB-2264', entrada: 12, salida: 0 },
-    { documento: 'EB-160', entrada: 0, salida: 36 },
     { documento: 'IB-2262', entrada: 36, salida: 0 },
+    { documento: 'EB-160', entrada: 0, salida: 36 },
+    { documento: 'IB-2264', entrada: 12, salida: 0 },
+    { documento: 'EB-161', entrada: 0, salida: 12 },
+    { documento: 'IB-2713', entrada: 45, salida: 0 },
+    { documento: 'EB-595', entrada: 0, salida: 45 },
   ];
 
   it('encadena el saldo desde la existencia inicial del rango', () => {
@@ -238,44 +275,44 @@ describe('KardexService saldo corrido del detalle', () => {
     expect(
       rows.map((row) => [row.documento, row.stock_inicial, row.stock_final]),
     ).toEqual([
-      ['EB-595', 45, 0],
-      ['IB-2713', 0, 45],
-      ['EB-161', 12, 0],
-      ['IB-2264', 0, 12],
-      ['EB-160', 36, 0],
       ['IB-2262', 0, 36],
+      ['EB-160', 36, 0],
+      ['IB-2264', 0, 12],
+      ['EB-161', 12, 0],
+      ['IB-2713', 0, 45],
+      ['EB-595', 45, 0],
     ]);
   });
 
-  it('el saldo final de una fila es el inicial de la anterior en la lista', () => {
+  it('el saldo final de una fila es el inicial de la siguiente', () => {
     const rows = movimientos();
     asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 0);
 
     for (let index = 0; index < rows.length - 1; index += 1) {
-      expect(rows[index]!.stock_inicial).toBe(rows[index + 1]!.stock_final);
+      expect(rows[index]!.stock_final).toBe(rows[index + 1]!.stock_inicial);
     }
   });
 
   it('parte de la existencia previa cuando el rango no empieza en cero', () => {
     const rows = [
-      { documento: 'EB-2', entrada: 0, salida: 3 },
       { documento: 'IB-1', entrada: 5, salida: 0 },
+      { documento: 'EB-2', entrada: 0, salida: 3 },
     ];
     asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 10);
 
-    expect(rows[1]).toMatchObject({ stock_inicial: 10, stock_final: 15 });
-    expect(rows[0]).toMatchObject({ stock_inicial: 15, stock_final: 12 });
+    expect(rows[0]).toMatchObject({ stock_inicial: 10, stock_final: 15 });
+    expect(rows[1]).toMatchObject({ stock_inicial: 15, stock_final: 12 });
   });
 
   it('un movimiento anulado no mueve el saldo', () => {
     const rows = [
-      { documento: 'EB-2', entrada: 0, salida: 4 },
       { documento: 'EB-1', entrada: 0, salida: 7, anulado: true },
+      { documento: 'EB-2', entrada: 0, salida: 4 },
     ];
     asRunningBalanceResolver(buildService()).applyRunningBalanceToMovements(rows, 10);
 
-    expect(rows[1]).toMatchObject({ stock_inicial: 10, stock_final: 10 });
-    expect(rows[0]).toMatchObject({ stock_inicial: 10, stock_final: 6 });
+    expect(rows[0]).toMatchObject({ stock_inicial: 10, stock_final: 10 });
+    expect(rows[1]).toMatchObject({ stock_inicial: 10, stock_final: 6 });
   });
 
   it('`stock` queda como el saldo final, que es lo que la columna decia', () => {

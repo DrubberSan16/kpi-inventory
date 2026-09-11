@@ -821,8 +821,11 @@ export class KardexService extends CrudService<Kardex> {
         'transferencia.updated_by AS transferencia_updated_by',
         'transferencia.updated_at AS transferencia_updated_at',
       ])
-      .orderBy('kardex.created_at', 'DESC')
-      .addOrderBy('kardex.fecha', 'DESC')
+      // El detalle por material va en orden CRONOLOGICO, del mas antiguo al mas
+      // reciente: es como se lee un kardex, cada linea partiendo del saldo que
+      // dejo la anterior.
+      .orderBy('kardex.created_at', 'ASC')
+      .addOrderBy('kardex.fecha', 'ASC')
       // Desempate por tipo cuando dos movimientos caen en el MISMO instante.
       //
       // Pasa constantemente: el ingreso preaprobado de una orden de compra y
@@ -831,10 +834,9 @@ export class KardexService extends CrudService<Kardex> {
       // uuid aleatorio, y la salida podia aparecer antes que su ingreso: un
       // material con existencia inicial cero abriendo con una salida de 36,
       // que no puede ser. No se saca lo que todavia no entro, asi que a igual
-      // instante el ingreso va primero; como la lista se muestra del mas
-      // reciente al mas antiguo, aqui se ordena al reves.
-      .addOrderBy(KARDEX_ENTRY_FIRST_ORDER, 'DESC')
-      .addOrderBy('kardex.id', 'DESC')
+      // instante el ingreso va primero.
+      .addOrderBy(KARDEX_ENTRY_FIRST_ORDER, 'ASC')
+      .addOrderBy('kardex.id', 'ASC')
       .getRawMany<Record<string, unknown>>();
 
     if (!rows.length) {
@@ -937,7 +939,7 @@ export class KardexService extends CrudService<Kardex> {
           this.toText(row.transferencia_codigo),
         concepto: this.resolveMovementConcept(row),
         descripcion:
-          this.toText(row.movimiento_observacion) ||
+          this.stripAggregatedDocumentList(row.movimiento_observacion) ||
           this.toText(row.kardex_observacion) ||
           bodegaLabel ||
           'Movimiento de inventario',
@@ -2325,6 +2327,9 @@ export class KardexService extends CrudService<Kardex> {
       return {
         ...item,
         ...this.resolveDocumentAnnulment(item, annulledTransferMap),
+        // Misma limpieza que en el detalle del kardex: la lista de documentos
+        // agregados se guarda pero no se muestra.
+        observacion: this.stripAggregatedDocumentList(item.observacion) || null,
         fecha_movimiento: this.formatDateTimeForClient(item.fecha_movimiento),
         created_at: this.formatDateTimeForClient(item.created_at),
         updated_at: this.formatDateTimeForClient(item.updated_at),
@@ -2975,16 +2980,15 @@ export class KardexService extends CrudService<Kardex> {
    * final de una fila es la inicial de la siguiente, que es lo que se espera
    * de un kardex.
    *
-   * La lista llega del mas reciente al mas antiguo, por eso se recorre al
-   * reves; el arreglo no se reordena.
+   * La lista llega en orden cronologico, asi que se recorre de principio a
+   * fin.
    */
   private applyRunningBalanceToMovements(
     movements: Array<Record<string, unknown>>,
     stockInicial: number,
   ) {
     let saldo = this.toNumber(stockInicial, 0);
-    for (let index = movements.length - 1; index >= 0; index -= 1) {
-      const movement = movements[index];
+    for (const movement of movements) {
       if (!movement) continue;
       const entrada = this.toNumber(movement.entrada, 0);
       const salida = this.toNumber(movement.salida, 0);
@@ -3001,6 +3005,24 @@ export class KardexService extends CrudService<Kardex> {
       saldo = final;
     }
     return movements;
+  }
+
+  /**
+   * Quita de un texto la coletilla "[Incluye EB-000..., EB-000...]".
+   *
+   * Cuando una orden de trabajo entrega material en varias tandas, el egreso
+   * principal guarda en su observacion la lista de los demas documentos. Eso
+   * sirve para rastrear, pero en pantalla se come la descripcion: una salida
+   * con diez entregas arrastra diez codigos que nadie lee.
+   *
+   * Solo se recorta al PRESENTAR. El texto completo sigue en
+   * `tb_movimiento_inventario.observacion`, que es donde se consulta cuando
+   * hace falta seguir el rastro.
+   */
+  private stripAggregatedDocumentList(value: unknown): string {
+    return this.toText(value)
+      .replace(/\s*\[\s*Incluye[^\]]*\]/gi, '')
+      .trim();
   }
 
   private resolveIncomeUnitCost(value: unknown): number | null {
