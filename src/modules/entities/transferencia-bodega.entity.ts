@@ -47,4 +47,11 @@ export class TransferenciaBodega extends BaseAuditEntity {
   @Column({ type: 'uuid', nullable: true })
   @ApiPropertyOptional({ description: 'movimiento ingreso id' })
   movimiento_ingreso_id?: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  @ApiPropertyOptional({
+    description:
+      'ingreso que recibio la mercaderia de la orden en la bodega de compras. Sin el, anular no sabria cuanto devolver: lo recibido y lo transferido dejan de ser la misma cifra.',
+  })
+  movimiento_recepcion_id?: string | null;
 }

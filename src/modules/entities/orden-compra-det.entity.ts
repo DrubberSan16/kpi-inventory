@@ -29,7 +29,14 @@ export class OrdenCompraDet extends BaseAuditEntity {
   cantidad_preaprobada: string;
 
   @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
-  @ApiProperty({ description: 'cantidad ya transferida' })
+  @ApiProperty({
+    description:
+      'cantidad que ya entro a la bodega de compras. Lo que falta por recibir se ingresa en la siguiente transferencia de la linea.',
+  })
+  cantidad_recibida: string;
+
+  @Column({ type: 'numeric', precision: 18, scale: 6, default: 0 })
+  @ApiProperty({ description: 'cantidad ya transferida a otra bodega' })
   cantidad_transferida: string;
 
   @Column({ type: 'numeric', precision: 14, scale: 4, default: 0 })

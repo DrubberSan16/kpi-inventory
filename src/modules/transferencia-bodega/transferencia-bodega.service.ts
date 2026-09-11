@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { Brackets, DataSource, EntityManager, Not, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
 import {
   Bodega,
   GuiaRemisionElectronica,
@@ -353,20 +353,9 @@ export class TransferenciaBodegaService {
           'La orden de compra ya fue transferida.',
         );
       }
-      if (order) {
-        const existingTransfer = await manager.findOne(TransferenciaBodega, {
-          where: {
-            orden_compra_id: order.id,
-            is_deleted: false,
-            estado: Not('ANULADA'),
-          },
-        });
-        if (existingTransfer) {
-          throw new BadRequestException(
-            'La orden de compra ya tiene una transferencia registrada.',
-          );
-        }
-      }
+      // Una orden puede transferirse en varias tandas: rara vez llega todo de
+      // una vez. Lo que la cierra es que no quede saldo, no que ya exista un
+      // documento; esa comprobacion es la de mas arriba sobre `estado`.
 
       const sourceWarehouseId = this.toText(order?.bodega_destino_id || dto.bodega_origen_id);
       if (!sourceWarehouseId) {
@@ -552,6 +541,12 @@ export class TransferenciaBodegaService {
           userName,
         });
         let currentSourceStock = this.toNumber(sourceStock.stock_actual, 0);
+        // Lo que a esta linea le falta por entrar a la bodega de compras. La
+        // primera transferencia recibe TODO el saldo del pedido -- es donde la
+        // mercaderia llega de verdad -- y saca solo lo que se transfiere; el
+        // resto queda ahi como existencia real. Las siguientes ya no reciben
+        // nada: mueven lo que quedo.
+        const pendingReceipt = this.getPendingReceiptQuantity(orderDetail);
         const approvedAvailable = this.getApprovedAvailableQuantity(orderDetail);
         if (order && approvedAvailable < quantity) {
           throw new BadRequestException(
@@ -566,6 +561,22 @@ export class TransferenciaBodegaService {
           Boolean(order),
           detail.requestedCondition,
         );
+        // Con la mercaderia ya recibida, la linea se comporta como una
+        // transferencia manual: hay que comprobar que la bodega de compras
+        // tenga de verdad lo que se quiere mover.
+        if (order && pendingReceipt <= 0) {
+          const disponible = Math.max(
+            this.toNumber(sourceStock.stock_actual, 0),
+            0,
+          );
+          if (disponible + 0.000001 < quantity) {
+            throw new BadRequestException(
+              `${product.nombre} ya fue recibido en ${sourceWarehouse.nombre} y solo quedan ${disponible.toFixed(
+                2,
+              )} para transferir, menos que los ${quantity.toFixed(2)} solicitados.`,
+            );
+          }
+        }
         if (!order) {
           const reservedQuantity = await this.getActiveReservedQuantity(
             manager,
@@ -592,8 +603,8 @@ export class TransferenciaBodegaService {
         const subtotal = quantity * unitCost;
         totalCost += subtotal;
 
-        if (order && movementReceipt) {
-          currentSourceStock = this.applyNewStockDelta(sourceStock, quantity);
+        if (order && movementReceipt && pendingReceipt > 0) {
+          currentSourceStock = this.applyNewStockDelta(sourceStock, pendingReceipt);
           sourceStock.stock_fisico = this.toFixedText(currentSourceStock, 6);
           sourceStock.costo_promedio_bodega = this.toFixedText(unitCost, 4);
           sourceStock.updated_by = userName;
@@ -605,9 +616,9 @@ export class TransferenciaBodegaService {
             manager.create(MovimientoInventarioDet, {
               movimiento_id: movementReceipt.id,
               producto_id: product.id,
-              cantidad: this.toFixedText(quantity, 6),
+              cantidad: this.toFixedText(pendingReceipt, 6),
               costo_unitario: this.toFixedText(unitCost, 4),
-              subtotal_costo: this.toFixedText(subtotal, 4),
+              subtotal_costo: this.toFixedText(pendingReceipt * unitCost, 4),
               condicion_material: 'NUEVO',
               observacion:
                 this.toText(detail.observacion) ||
@@ -627,10 +638,10 @@ export class TransferenciaBodegaService {
               movimiento_id: movementReceipt.id,
               movimiento_det_id: receiptDet.id,
               tipo_movimiento: 'INGRESO',
-              entrada_cantidad: this.toFixedText(quantity, 6),
+              entrada_cantidad: this.toFixedText(pendingReceipt, 6),
               salida_cantidad: '0.000000',
               costo_unitario: this.toFixedText(unitCost, 4),
-              costo_total: this.toFixedText(subtotal, 4),
+              costo_total: this.toFixedText(pendingReceipt * unitCost, 4),
               saldo_cantidad: sourceStock.stock_actual,
               condicion_material: 'NUEVO',
               saldo_costo_promedio: this.toFixedText(unitCost, 4),
@@ -778,6 +789,12 @@ export class TransferenciaBodegaService {
         );
 
         if (orderDetail) {
+          if (pendingReceipt > 0) {
+            orderDetail.cantidad_recibida = this.toFixedText(
+              this.toNumber(orderDetail.cantidad_recibida, 0) + pendingReceipt,
+              6,
+            );
+          }
           orderDetail.cantidad_transferida = this.toFixedText(
             this.toNumber(orderDetail.cantidad_transferida, 0) + quantity,
             6,
@@ -837,10 +854,24 @@ export class TransferenciaBodegaService {
         6,
       );
       transfer.updated_by = userName;
+      // Sin esta referencia, anular no sabria cuanto devolver: desde que la
+      // recepcion puede ser mayor que lo transferido, las dos cifras dejaron
+      // de ser la misma.
+      transfer.movimiento_recepcion_id = movementReceipt?.id ?? null;
       await manager.save(TransferenciaBodega, transfer);
 
       if (order) {
-        order.estado = 'TRANSFERIDA';
+        // La orden se cierra cuando ya no le queda nada por mover, no por el
+        // hecho de haberse transferido una vez: si solo llego parte del
+        // pedido, tiene que seguir disponible para el resto.
+        const lineasVigentes = await manager.find(OrdenCompraDet, {
+          where: { orden_compra_id: order.id, is_deleted: false },
+        });
+        const saldoPendiente = lineasVigentes.reduce(
+          (sum, linea) => sum + this.getApprovedAvailableQuantity(linea),
+          0,
+        );
+        order.estado = saldoPendiente > 0.000001 ? 'EMITIDA' : 'TRANSFERIDA';
         order.updated_by = userName;
         await manager.save(OrdenCompra, order);
       }
@@ -965,6 +996,23 @@ export class TransferenciaBodegaService {
             updated_by: annulledBy,
           }),
         );
+        // Cuanto trajo a la bodega de compras la recepcion de esta
+        // transferencia, por producto. Con el modelo nuevo puede ser mas que
+        // lo transferido, y la anulacion tiene que devolver la diferencia.
+        const receiptByProduct = new Map<string, number>();
+        if (transfer.movimiento_recepcion_id) {
+          const receiptDetails = await manager.find(MovimientoInventarioDet, {
+            where: { movimiento_id: transfer.movimiento_recepcion_id },
+          });
+          for (const row of receiptDetails) {
+            const key = String(row.producto_id);
+            receiptByProduct.set(
+              key,
+              (receiptByProduct.get(key) ?? 0) + this.toNumber(row.cantidad, 0),
+            );
+          }
+        }
+
         const sourceIn = transfer.orden_compra_id
           ? null
           : await manager.save(
@@ -1121,11 +1169,81 @@ export class TransferenciaBodegaService {
             );
           }
 
+          // La recepcion de la orden pudo traer mas de lo que salio: el
+          // remanente quedo como existencia en la bodega de compras y tiene
+          // que irse con la anulacion, o el stock se queda huerfano.
+          const received = receiptByProduct.get(String(detail.producto_id)) ?? 0;
+          const leftoverAtSource = received - quantity;
+          if (leftoverAtSource > 0.000001) {
+            const sourceStock = await this.getOrCreateStockRow(manager, {
+              bodegaId: transfer.bodega_origen_id,
+              productoId: detail.producto_id,
+              costoPromedio: unitCost,
+              userName: annulledBy,
+            });
+            const sourceAfter = this.applyStockDeltaByCondition(
+              sourceStock,
+              -leftoverAtSource,
+              'NUEVO',
+            );
+            sourceStock.stock_fisico = this.toFixedText(sourceAfter, 6);
+            sourceStock.updated_by = annulledBy;
+            await manager.save(StockBodega, sourceStock);
+            changedStockIds.add(sourceStock.id);
+            decreasedStockIds.add(sourceStock.id);
+
+            const leftoverDetail = await manager.save(
+              MovimientoInventarioDet,
+              manager.create(MovimientoInventarioDet, {
+                movimiento_id: destinationOut.id,
+                producto_id: detail.producto_id,
+                cantidad: this.toFixedText(leftoverAtSource, 6),
+                costo_unitario: this.toFixedText(unitCost, 4),
+                subtotal_costo: this.toFixedText(leftoverAtSource * unitCost, 4),
+                condicion_material: 'NUEVO',
+                observacion: `${reversalObservation} (remanente no transferido)`,
+                created_by: annulledBy,
+                updated_by: annulledBy,
+              }),
+            );
+            await manager.save(
+              Kardex,
+              manager.create(Kardex, {
+                fecha: reversalDate,
+                bodega_id: transfer.bodega_origen_id,
+                producto_id: detail.producto_id,
+                movimiento_id: destinationOut.id,
+                movimiento_det_id: leftoverDetail.id,
+                tipo_movimiento: 'SALIDA',
+                entrada_cantidad: '0.000000',
+                salida_cantidad: this.toFixedText(leftoverAtSource, 6),
+                costo_unitario: this.toFixedText(unitCost, 4),
+                costo_total: this.toFixedText(leftoverAtSource * unitCost, 4),
+                saldo_cantidad: this.toFixedText(sourceAfter, 6),
+                condicion_material: 'NUEVO',
+                saldo_costo_promedio: this.toFixedText(unitCost, 4),
+                saldo_valorizado: this.toFixedText(sourceAfter * unitCost, 4),
+                observacion: `${reversalObservation} (remanente no transferido)`,
+                created_by: annulledBy,
+                updated_by: annulledBy,
+              }),
+            );
+          }
+
           if (detail.orden_compra_det_id) {
             const orderDetail = await manager.findOne(OrdenCompraDet, {
               where: { id: detail.orden_compra_det_id, is_deleted: false },
             });
             if (orderDetail) {
+              if (received > 0) {
+                orderDetail.cantidad_recibida = this.toFixedText(
+                  Math.max(
+                    0,
+                    this.toNumber(orderDetail.cantidad_recibida, 0) - received,
+                  ),
+                  6,
+                );
+              }
               orderDetail.cantidad_transferida = this.toFixedText(
                 Math.max(
                   0,
@@ -1324,6 +1442,21 @@ export class TransferenciaBodegaService {
         // bodega con saldo). El reverso respeta la misma condicion.
         const restoresSourceStock = !transfer.orden_compra_id;
 
+        // Lo que trajo la recepcion de esta transferencia, igual que al anular.
+        const receiptByProduct = new Map<string, number>();
+        if (transfer.movimiento_recepcion_id) {
+          const receiptDetails = await manager.find(MovimientoInventarioDet, {
+            where: { movimiento_id: transfer.movimiento_recepcion_id },
+          });
+          for (const row of receiptDetails) {
+            const key = String(row.producto_id);
+            receiptByProduct.set(
+              key,
+              (receiptByProduct.get(key) ?? 0) + this.toNumber(row.cantidad, 0),
+            );
+          }
+        }
+
         for (const detail of details) {
           const quantity = this.toNumber(detail.cantidad, 0);
           const unitCost = this.toNumber(detail.costo_unitario, 0);
@@ -1371,11 +1504,39 @@ export class TransferenciaBodegaService {
             decreasedStockIds.add(sourceStock.id);
           }
 
+          // Espejo de la anulacion: si la recepcion habia traido mas de lo
+          // transferido, el remanente vuelve a la bodega de compras.
+          const received = receiptByProduct.get(String(detail.producto_id)) ?? 0;
+          const leftoverAtSource = received - quantity;
+          if (leftoverAtSource > 0.000001) {
+            const sourceStock = await this.getOrCreateStockRow(manager, {
+              bodegaId: transfer.bodega_origen_id,
+              productoId: detail.producto_id,
+              costoPromedio: unitCost,
+              userName: reversedBy,
+            });
+            const sourceAfter = this.applyStockDeltaByCondition(
+              sourceStock,
+              leftoverAtSource,
+              'NUEVO',
+            );
+            sourceStock.stock_fisico = this.toFixedText(sourceAfter, 6);
+            sourceStock.updated_by = reversedBy;
+            await manager.save(StockBodega, sourceStock);
+            changedStockIds.add(sourceStock.id);
+          }
+
           if (detail.orden_compra_det_id) {
             const orderDetail = await manager.findOne(OrdenCompraDet, {
               where: { id: detail.orden_compra_det_id, is_deleted: false },
             });
             if (orderDetail) {
+              if (received > 0) {
+                orderDetail.cantidad_recibida = this.toFixedText(
+                  this.toNumber(orderDetail.cantidad_recibida, 0) + received,
+                  6,
+                );
+              }
               orderDetail.cantidad_transferida = this.toFixedText(
                 this.toNumber(orderDetail.cantidad_transferida, 0) + quantity,
                 6,
@@ -1435,7 +1596,16 @@ export class TransferenciaBodegaService {
             where: { id: transfer.orden_compra_id, is_deleted: false },
           });
           if (order) {
-            order.estado = 'TRANSFERIDA';
+            // Igual que al crear: la orden se cierra por saldo, no por el
+            // hecho de tener una transferencia vigente.
+            const lineasVigentes = await manager.find(OrdenCompraDet, {
+              where: { orden_compra_id: order.id, is_deleted: false },
+            });
+            const saldoPendiente = lineasVigentes.reduce(
+              (sum, linea) => sum + this.getApprovedAvailableQuantity(linea),
+              0,
+            );
+            order.estado = saldoPendiente > 0.000001 ? 'EMITIDA' : 'TRANSFERIDA';
             order.updated_by = reversedBy;
             await manager.save(OrdenCompra, order);
           }
@@ -1895,6 +2065,24 @@ export class TransferenciaBodegaService {
 
     const lastCost = this.toNumber(product?.ultimo_costo, 0);
     return lastCost > 0 ? lastCost : 0;
+  }
+
+  /**
+   * Lo que a una linea de la orden le falta por ENTRAR a la bodega de compras.
+   *
+   * Es distinto del saldo por transferir: la mercaderia llega primero a la
+   * bodega de compras y desde ahi se reparte. La primera transferencia de la
+   * linea trae todo lo pedido; despues esta cifra es cero y lo que quede en esa
+   * bodega se mueve como existencia normal.
+   */
+  private getPendingReceiptQuantity(orderDetail: OrdenCompraDet | null) {
+    if (!orderDetail) return 0;
+    const approved = this.toNumber(
+      orderDetail.cantidad_preaprobada,
+      this.toNumber(orderDetail.cantidad, 0),
+    );
+    const received = this.toNumber(orderDetail.cantidad_recibida, 0);
+    return Math.max(0, approved - received);
   }
 
   private getApprovedAvailableQuantity(orderDetail: OrdenCompraDet | null) {

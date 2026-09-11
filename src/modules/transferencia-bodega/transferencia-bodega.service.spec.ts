@@ -41,6 +41,76 @@ describe('TransferenciaBodegaService forced annulment guard', () => {
   );
 });
 
+describe('TransferenciaBodegaService transferencia parcial de una orden', () => {
+  const service = Object.create(
+    TransferenciaBodegaService.prototype,
+  ) as TransferenciaBodegaService;
+
+  const linea = (over: Record<string, unknown> = {}) => ({
+    cantidad: '5.000000',
+    cantidad_preaprobada: '5.000000',
+    cantidad_recibida: '0.000000',
+    cantidad_transferida: '0.000000',
+    ...over,
+  });
+
+  const porRecibir = (row: any) =>
+    (service as any).getPendingReceiptQuantity(row);
+  const porTransferir = (row: any) =>
+    (service as any).getApprovedAvailableQuantity(row);
+
+  it('la primera transferencia recibe TODO el pedido, no solo lo que sale', () => {
+    // La mercaderia llega completa a la bodega de compras; de ahi se reparte.
+    expect(porRecibir(linea())).toBe(5);
+    expect(porTransferir(linea())).toBe(5);
+  });
+
+  it('tras mover 3 de 5, la orden conserva saldo y ya no hay nada que recibir', () => {
+    const row = linea({
+      cantidad_recibida: '5.000000',
+      cantidad_transferida: '3.000000',
+    });
+    // Los 5 ya entraron: la segunda transferencia mueve existencia, no recibe.
+    expect(porRecibir(row)).toBe(0);
+    // Y quedan 2 por transferir, que es lo que mantiene abierta la orden.
+    expect(porTransferir(row)).toBe(2);
+  });
+
+  it('una linea agotada no deja saldo ni por recibir ni por transferir', () => {
+    const row = linea({
+      cantidad_recibida: '5.000000',
+      cantidad_transferida: '5.000000',
+    });
+    expect(porRecibir(row)).toBe(0);
+    expect(porTransferir(row)).toBe(0);
+  });
+
+  it('una orden historica, recibida solo por lo que se transfirio, sigue pudiendo recibir el resto', () => {
+    // Es el estado que dejo el modelo anterior y que rellena la migracion.
+    const row = linea({
+      cantidad_recibida: '1.000000',
+      cantidad_transferida: '1.000000',
+      cantidad: '2.000000',
+      cantidad_preaprobada: '2.000000',
+    });
+    expect(porRecibir(row)).toBe(1);
+    expect(porTransferir(row)).toBe(1);
+  });
+
+  it('nunca devuelve cantidades negativas aunque los datos vengan descuadrados', () => {
+    const row = linea({
+      cantidad_recibida: '9.000000',
+      cantidad_transferida: '9.000000',
+    });
+    expect(porRecibir(row)).toBe(0);
+    expect(porTransferir(row)).toBe(0);
+  });
+
+  it('sin linea de orden no hay nada que recibir', () => {
+    expect(porRecibir(null)).toBe(0);
+  });
+});
+
 describe('TransferenciaBodegaService getOrCreateStockRow', () => {
   const service = Object.create(
     TransferenciaBodegaService.prototype,

@@ -249,14 +249,33 @@ export class OrdenCompraService {
       where,
       order: { created_at: 'DESC', fecha_emision: 'DESC' },
     });
-    const activeTransfers = await this.transferenciaRepo.find({
-      where: { is_deleted: false, estado: Not('ANULADA') },
-      select: { orden_compra_id: true } as any,
+    // Lo que saca a una orden de esta lista es quedarse sin saldo, no tener ya
+    // un documento asociado: rara vez llega todo el pedido de una vez, asi que
+    // una orden se transfiere en varias tandas y tiene que seguir disponible
+    // mientras le quede algo por mover.
+    if (!rows.length) return this.hydrateOrders(rows, true);
+    const detalles = await this.detalleRepo.find({
+      where: {
+        orden_compra_id: In(rows.map((item) => item.id)),
+        is_deleted: false,
+      },
     });
-    const transferredIds = new Set(
-      activeTransfers.map((item) => String(item.orden_compra_id || '')),
+    const saldoPorOrden = new Map<string, number>();
+    for (const detalle of detalles) {
+      const aprobado = this.toNumber(
+        detalle.cantidad_preaprobada,
+        this.toNumber(detalle.cantidad, 0),
+      );
+      const transferido = this.toNumber(detalle.cantidad_transferida, 0);
+      const key = String(detalle.orden_compra_id);
+      saldoPorOrden.set(
+        key,
+        (saldoPorOrden.get(key) ?? 0) + Math.max(0, aprobado - transferido),
+      );
+    }
+    const pending = rows.filter(
+      (item) => (saldoPorOrden.get(String(item.id)) ?? 0) > 0.000001,
     );
-    const pending = rows.filter((item) => !transferredIds.has(item.id));
     return this.hydrateOrders(pending, true);
   }
 
