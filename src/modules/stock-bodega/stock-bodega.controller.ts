@@ -43,6 +43,25 @@ export class StockBodegaController extends CrudController<StockBodega> {
     return this.service.findAllPaginated(query, getSucursalScopeId(req));
   }
 
+  @Get('catalogo')
+  @ApiOperation({
+    summary: 'Catalogo completo de materiales con el stock de una bodega',
+    description:
+      'A diferencia del listado principal, incluye los materiales que la bodega nunca tuvo: salen con stock 0 para poder reservarlos y dejar constancia de la falta.',
+  })
+  @ApiQuery({ name: 'bodega_id', required: true, type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'es_aceite', required: false, type: Boolean })
+  @ApiResponse({
+    status: 200,
+    description: 'Catalogo paginado de materiales con el stock de la bodega',
+  })
+  findCatalogo(@Query() query: StockBodegaQueryDto, @Req() req?: any) {
+    return this.service.findCatalogoPorBodega(query, getSucursalScopeId(req));
+  }
+
   @Post()
   @ApiOperation({ summary: 'Crear registro' })
   @ApiBody({

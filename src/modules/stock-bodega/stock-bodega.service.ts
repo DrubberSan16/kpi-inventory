@@ -141,6 +141,139 @@ export class StockBodegaService
     return removed;
   }
 
+  /**
+   * Catalogo de materiales con el stock que tiene una bodega concreta.
+   *
+   * `findAllPaginated` se ancla en `tb_stock_bodega`, asi que un material que
+   * nunca entro a esa bodega no existe para ella. Eso servia para gestionar
+   * stock, pero no para reservar: si el tecnico no puede ni nombrar el material
+   * que necesita, la falta no se registra en ninguna parte y nadie se entera de
+   * que hay que comprarlo.
+   *
+   * Aqui se invierte el ancla -- se parte del producto y el stock entra por
+   * LEFT JOIN -- de modo que el material sin existencia aparece con stock 0. La
+   * consulta de gestion se deja intacta a proposito: son dos preguntas
+   * distintas y mezclarlas habria cambiado el comportamiento de las pantallas
+   * que ya dependen de la primera.
+   */
+  async findCatalogoPorBodega(
+    query: StockBodegaQueryDto,
+    sucursalId?: string | null,
+  ) {
+    const page =
+      Number.isFinite(Number(query.page)) && Number(query.page) > 0
+        ? Number(query.page)
+        : 1;
+    const limit =
+      Number.isFinite(Number(query.limit)) && Number(query.limit) > 0
+        ? Math.min(Number(query.limit), 100)
+        : 20;
+    const search = String(query.search || '').trim();
+    const warehouseId = String(query.bodega_id || '').trim();
+
+    if (!warehouseId) {
+      throw new BadRequestException(
+        'Indica la bodega para consultar el catalogo de materiales.',
+      );
+    }
+
+    const bodega = await this.dataSource.getRepository(Bodega).findOne({
+      where: { id: warehouseId, is_deleted: false } as any,
+    });
+    if (!bodega) {
+      throw new NotFoundException('Bodega no encontrada');
+    }
+    if (sucursalId && bodega.sucursal_id && bodega.sucursal_id !== sucursalId) {
+      throw new NotFoundException('Bodega no encontrada');
+    }
+
+    const baseQuery = this.dataSource
+      .getRepository(Producto)
+      .createQueryBuilder('producto')
+      .leftJoin(
+        StockBodega,
+        'stock',
+        'stock.producto_id = producto.id AND stock.bodega_id = :warehouseId AND stock.is_deleted = false',
+        { warehouseId },
+      )
+      .where('producto.is_deleted = false');
+
+    if (typeof query.es_aceite === 'boolean') {
+      baseQuery.andWhere('COALESCE(producto.es_aceite, false) = :oilOnly', {
+        oilOnly: query.es_aceite,
+      });
+    }
+
+    if (search) {
+      baseQuery.andWhere(
+        new Brackets((qb) => {
+          qb.where('producto.nombre ILIKE :search', { search: `%${search}%` })
+            .orWhere('producto.codigo ILIKE :search', { search: `%${search}%` })
+            .orWhere("COALESCE(producto.descripcion, '') ILIKE :search", {
+              search: `%${search}%`,
+            });
+        }),
+      );
+    }
+
+    const total = await baseQuery.clone().getCount();
+    const { entities, raw } = await baseQuery
+      .clone()
+      .select('producto')
+      .addSelect('stock.id', 'stock_id')
+      .addSelect('COALESCE(stock.stock_actual, 0)', 'stock_actual')
+      .addSelect('COALESCE(stock.stock_nuevo, 0)', 'stock_nuevo')
+      .addSelect('COALESCE(stock.stock_usado, 0)', 'stock_usado')
+      .addSelect('COALESCE(stock.stock_critico, 0)', 'stock_critico')
+      .addSelect('COALESCE(stock.es_usado, false)', 'stock_es_usado')
+      // Los materiales que la bodega si tiene van primero: es lo que el
+      // tecnico busca en el 95% de los casos, y lo que no hay queda al final
+      // sin desaparecer.
+      .orderBy('CASE WHEN COALESCE(stock.stock_actual, 0) > 0 THEN 0 ELSE 1 END', 'ASC')
+      .addOrderBy('producto.nombre', 'ASC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getRawAndEntities();
+
+    const data = entities.map((producto, index) => {
+      const row = raw[index] ?? {};
+      const stockActual = Number(row.stock_actual ?? 0);
+      return {
+        id: row.stock_id ?? null,
+        producto_id: producto.id,
+        bodega_id: warehouseId,
+        producto_label: [
+          producto.codigo ? `${producto.codigo}-` : '',
+          producto.nombre || 'Sin material',
+          producto.descripcion && String(producto.descripcion).trim()
+            ? ` (${String(producto.descripcion).trim()})`
+            : '',
+        ].join(''),
+        bodega_label: [bodega.codigo ? `${bodega.codigo} - ` : '', bodega.nombre || 'Sin bodega'].join(''),
+        es_aceite: Boolean(producto.es_aceite),
+        es_usado: Boolean(row.stock_es_usado ?? false),
+        stock_actual: stockActual,
+        stock_nuevo: Number(row.stock_nuevo ?? 0),
+        stock_usado: Number(row.stock_usado ?? 0),
+        stock_critico: Number(row.stock_critico ?? 0),
+        // Sin fila de stock no hay nada reservado, asi que lo disponible es lo
+        // que haya. Quien necesite el disponible neto usa el listado de gestion.
+        stock_disponible: stockActual,
+        sin_stock_en_bodega: stockActual <= 0,
+      };
+    });
+
+    return {
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    };
+  }
+
   async findAllPaginated(query: StockBodegaQueryDto, sucursalId?: string | null) {
     const page = Number.isFinite(Number(query.page)) && Number(query.page) > 0
       ? Number(query.page)
