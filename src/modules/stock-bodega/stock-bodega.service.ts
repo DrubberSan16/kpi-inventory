@@ -226,10 +226,16 @@ export class StockBodegaService
       .addSelect('COALESCE(stock.stock_usado, 0)', 'stock_usado')
       .addSelect('COALESCE(stock.stock_critico, 0)', 'stock_critico')
       .addSelect('COALESCE(stock.es_usado, false)', 'stock_es_usado')
+      .addSelect(
+        'CASE WHEN COALESCE(stock.stock_actual, 0) > 0 THEN 0 ELSE 1 END',
+        'stock_priority',
+      )
       // Los materiales que la bodega si tiene van primero: es lo que el
       // tecnico busca en el 95% de los casos, y lo que no hay queda al final
-      // sin desaparecer.
-      .orderBy('CASE WHEN COALESCE(stock.stock_actual, 0) > 0 THEN 0 ELSE 1 END', 'ASC')
+      // sin desaparecer. El CASE debe ordenarse mediante un alias seleccionado:
+      // TypeORM interpreta cualquier punto dentro de orderBy como alias.columna
+      // cuando combina LEFT JOIN con skip/take.
+      .orderBy('stock_priority', 'ASC')
       .addOrderBy('producto.nombre', 'ASC')
       .skip((page - 1) * limit)
       .take(limit)
