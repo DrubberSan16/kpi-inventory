@@ -24,6 +24,7 @@ import {
 } from './orden-compra.dto';
 import { TransferenciaBodega } from '../entities/transferencia-bodega.entity';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
+import { parseLocalDateInput } from '../../common/utils/local-date.util';
 import { buildAnnulmentInfo } from '../../common/http/annulled-records.util';
 import { buildSecurityServiceHeaders } from '../../common/http/internal-service.util';
 
@@ -583,9 +584,13 @@ export class OrdenCompraService {
     if (current) {
       entity.codigo = this.toText(dto.codigo) || entity.codigo;
     }
-    entity.fecha_emision = dto.fecha_emision
-      ? new Date(dto.fecha_emision)
-      : current?.fecha_emision ?? new Date();
+    // Leida con `new Date()`, la fecha elegida quedaba a las 19:00 del dia
+    // anterior; y como al editar el formulario recarga ese dia ya corrido,
+    // cada guardado la atrasaba un dia mas. Ver `parseLocalDateInput`.
+    entity.fecha_emision =
+      parseLocalDateInput(dto.fecha_emision) ??
+      current?.fecha_emision ??
+      new Date();
     entity.fecha_requerida = this.toText(dto.fecha_requerida) || null;
     entity.proveedor_id = supplier?.id ?? null;
     entity.proveedor_identificacion = supplier?.identificacion ?? null;
