@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { TransferenciaBodegaService } from './transferencia-bodega.service';
 
 describe('TransferenciaBodegaService forced annulment guard', () => {
@@ -39,6 +39,41 @@ describe('TransferenciaBodegaService forced annulment guard', () => {
       ).toThrow(ForbiddenException);
     },
   );
+});
+
+describe('TransferenciaBodegaService fecha de la transferencia', () => {
+  const service = Object.create(
+    TransferenciaBodegaService.prototype,
+  ) as TransferenciaBodegaService;
+
+  const parse = (value: unknown) => (service as any).parseTransferDate(value);
+
+  it('la fecha del formulario queda en su propio dia, no en las 19:00 del anterior', () => {
+    const fecha: Date = parse('2026-09-17');
+    // Partes locales: es lo que el driver escribe en la columna sin zona.
+    expect([
+      fecha.getFullYear(),
+      fecha.getMonth() + 1,
+      fecha.getDate(),
+      fecha.getHours(),
+      fecha.getMinutes(),
+    ]).toEqual([2026, 9, 17, 0, 0]);
+  });
+
+  it('una fecha con hora se respeta tal cual', () => {
+    const fecha: Date = parse('2026-09-17T10:43:19-05:00');
+    expect(fecha.toISOString()).toBe('2026-09-17T15:43:19.000Z');
+  });
+
+  it('sin fecha usa el momento del registro', () => {
+    const antes = Date.now();
+    const fecha: Date = parse(undefined);
+    expect(fecha.getTime()).toBeGreaterThanOrEqual(antes);
+  });
+
+  it('rechaza una fecha que no se puede leer', () => {
+    expect(() => parse('17/09/2026')).toThrow(BadRequestException);
+  });
 });
 
 describe('TransferenciaBodegaService transferencia parcial de una orden', () => {

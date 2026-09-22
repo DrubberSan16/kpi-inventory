@@ -28,6 +28,7 @@ import {
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
+import { parseLocalDateInput } from '../../common/utils/local-date.util';
 import {
   buildAnnulmentInfo,
   isAnnulledState,
@@ -416,9 +417,7 @@ export class TransferenciaBodegaService {
       });
       const code = await this.generateCode(manager, 'TB');
       const egressCode = await this.generateMovementDocumentCode(manager, 'EB');
-      const fechaTransferencia = dto.fecha_transferencia
-        ? new Date(dto.fecha_transferencia)
-        : new Date();
+      const fechaTransferencia = this.parseTransferDate(dto.fecha_transferencia);
       const baseObservation =
         this.toText(dto.observacion) || `Transferencia ${code}`;
 
@@ -2426,6 +2425,20 @@ export class TransferenciaBodegaService {
 
   private resolveUserName(dto: CreateTransferenciaBodegaDto) {
     return this.toText(dto.updated_by) || this.toText(dto.created_by) || 'SYSTEM';
+  }
+
+  /**
+   * Fecha de la transferencia tal como la eligio el usuario. Leida con
+   * `new Date()`, la tabla, el PDF, los movimientos y el kardex quedaban un dia
+   * antes de la fecha real: ver `parseLocalDateInput`.
+   */
+  private parseTransferDate(value: unknown): Date {
+    if (!this.toText(value)) return new Date();
+    const parsed = parseLocalDateInput(value);
+    if (!parsed) {
+      throw new BadRequestException('La fecha de la transferencia no es valida.');
+    }
+    return parsed;
   }
 
   private toText(value: unknown) {

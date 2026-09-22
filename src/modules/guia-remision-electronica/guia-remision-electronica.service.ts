@@ -941,6 +941,7 @@ export class GuiaRemisionElectronicaService
       this.buildSupplierContextFromGuideDraft(existingGuide);
     const defaultGuideDate = this.resolveDefaultGuideDate(
       existingGuide?.fecha_emision,
+      context.transfer.fecha_transferencia,
     );
     const defaultTransportStartDate = this.formatDateOnly(
       existingGuide?.fecha_ini_transporte || defaultGuideDate,
@@ -1179,6 +1180,7 @@ export class GuiaRemisionElectronicaService
 
       const defaultGuideDate = this.resolveDefaultGuideDate(
         shouldRegenerateExistingGuide ? existingGuide?.fecha_emision : null,
+        context.transfer.fecha_transferencia,
       );
       const normalizedFechaEmision = this.formatDateOnly(
         dto.fecha_emision || defaultGuideDate,
@@ -3254,10 +3256,21 @@ export class GuiaRemisionElectronicaService
     return this.formatDateOnly(new Date());
   }
 
-  private resolveDefaultGuideDate(existingDate?: Date | string | null) {
-    return existingDate
-      ? this.formatDateOnly(existingDate)
-      : this.currentDateOnly();
+  /**
+   * Fecha de emision que se propone para la guia.
+   *
+   * Una guia ya generada conserva la suya. Si no hay guia, se propone la fecha
+   * de la transferencia y no la de hoy: la guia acompana a ese traslado, y quien
+   * la emite dias despues tenia que corregirla a mano. El usuario la puede
+   * cambiar igual en el formulario.
+   */
+  private resolveDefaultGuideDate(
+    existingDate?: Date | string | null,
+    transferDate?: Date | string | null,
+  ) {
+    if (existingDate) return this.formatDateOnly(existingDate);
+    if (transferDate) return this.formatDateOnly(transferDate);
+    return this.currentDateOnly();
   }
 
   private toSriCalendarDate(value: Date | string | null | undefined) {

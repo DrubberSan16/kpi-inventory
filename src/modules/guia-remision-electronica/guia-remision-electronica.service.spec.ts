@@ -23,6 +23,25 @@ describe('GuiaRemisionElectronicaService guide dates', () => {
     );
   });
 
+  it('proposes the transfer date, not today, for a new guide', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-21T15:00:00.000Z'));
+
+    // Medianoche del 17 en Ecuador, como llega la transferencia desde la base.
+    const transferDate = new Date('2026-09-17T05:00:00.000Z');
+    expect(
+      (service as any).resolveDefaultGuideDate(null, transferDate),
+    ).toBe('2026-09-17');
+  });
+
+  it('keeps the existing guide date over the transfer date', () => {
+    expect(
+      (service as any).resolveDefaultGuideDate(
+        '2026-09-18',
+        new Date('2026-09-17T05:00:00.000Z'),
+      ),
+    ).toBe('2026-09-18');
+  });
+
   it('converts timestamps using the Ecuador time zone without a UTC day shift', () => {
     expect((service as any).formatDateOnly('2026-08-16T02:30:00.000Z')).toBe(
       '2026-08-15',
