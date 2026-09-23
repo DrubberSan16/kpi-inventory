@@ -17,6 +17,7 @@ import {
   EntityManager,
 } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
+import { FifoCostEngine } from '../../common/pricing/fifo-cost.engine';
 import { Bodega } from '../entities/bodega.entity';
 import { Kardex } from '../entities/kardex.entity';
 import { MovimientoInventario } from '../entities/movimiento-inventario.entity';
@@ -75,6 +76,7 @@ export class StockBodegaService
           current: createdRow,
           payload,
         });
+        await FifoCostEngine.syncPending(manager);
         return createdRow;
       });
       void this.notifyMaintenanceAlertRecalculation('create', created.id, {
@@ -113,7 +115,9 @@ export class StockBodegaService
           current: updatedRow,
           payload,
         });
-        return updatedRow;
+        await FifoCostEngine.syncPending(manager);
+        // El motor pudo reescribir el costo de la bodega con el de sus capas.
+        return (await stockRepo.findOne({ where: { id } })) ?? updatedRow;
       });
       const previousAvailable = this.getAlertableStockAmount(current);
       const currentAvailable = this.getAlertableStockAmount(updated);

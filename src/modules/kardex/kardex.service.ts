@@ -4,6 +4,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
@@ -14,6 +16,7 @@ import {
   buildAnnulmentInfo,
   isAnnulledState,
 } from '../../common/http/annulled-records.util';
+import { FifoCostEngine } from '../../common/pricing/fifo-cost.engine';
 import { MaterialPriceTimeline } from '../../common/pricing/material-price-history.util';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -164,7 +167,10 @@ type InventoryImportJobState = {
 };
 
 @Injectable()
-export class KardexService extends CrudService<Kardex> {
+export class KardexService
+  extends CrudService<Kardex>
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(KardexService.name);
   private readonly closedWorkOrderStatuses = [
     'CANCELLED',
@@ -219,6 +225,73 @@ export class KardexService extends CrudService<Kardex> {
     this.importRoot =
       configuredImportRoot ||
       join(process.cwd(), 'storage', 'inventory-imports');
+  }
+
+  private fifoSweepTimer: NodeJS.Timeout | null = null;
+  private fifoSweepRunning = false;
+
+  onModuleInit() {
+    // Quien escribe kardex costea en su propia transaccion; este barrido
+    // recoge lo que quedo en cola por otro camino (un script SQL, el codigo
+    // viejo durante un despliegue) o por un error que ya se corrigio.
+    if (process.env.NODE_ENV === 'test') return;
+    this.fifoSweepTimer = setInterval(() => {
+      void this.sweepFifoQueue();
+    }, 60_000);
+    this.fifoSweepTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.fifoSweepTimer) clearInterval(this.fifoSweepTimer);
+    this.fifoSweepTimer = null;
+  }
+
+  async sweepFifoQueue(limite = 200) {
+    if (this.fifoSweepRunning) return { pares: 0, errores: 0 };
+    this.fifoSweepRunning = true;
+    let pares = 0;
+    let errores = 0;
+    try {
+      const pending = await FifoCostEngine.listCommittedPending(
+        this.dataSource,
+        limite,
+      );
+      for (const pair of pending) {
+        try {
+          const result = await this.dataSource.transaction((manager) =>
+            FifoCostEngine.syncPair(manager, pair),
+          );
+          pares += result.pares;
+          for (const warning of result.descuadres) {
+            this.logger.warn(`FIFO: capas y stock no cuadran en ${warning}`);
+          }
+        } catch (error: any) {
+          errores += 1;
+          const message = error?.message ?? String(error);
+          this.logger.error(
+            `FIFO: no se pudo costear ${pair.bodegaId}/${pair.productoId}: ${message}`,
+          );
+          await FifoCostEngine.markError(this.dataSource, pair, message).catch(
+            () => undefined,
+          );
+        }
+      }
+    } catch (error: any) {
+      this.logger.error(`FIFO: fallo el barrido de la cola: ${error?.message}`);
+    } finally {
+      this.fifoSweepRunning = false;
+    }
+    return { pares, errores };
+  }
+
+  async getFifoStatus() {
+    return FifoCostEngine.listCierres(this.dataSource);
+  }
+
+  async closeFifoMonth(periodo: string, userName: string) {
+    return this.dataSource.transaction((manager) =>
+      FifoCostEngine.closeMonth(manager, periodo, userName),
+    );
   }
 
   private isKardexPurgeSuperAdministratorRoleName(roleName?: string): boolean {
@@ -1359,6 +1432,15 @@ export class KardexService extends CrudService<Kardex> {
           : null;
         const costoUnitarioBruto =
           precioIngresado ?? this.resolveWarehouseUnitCost(producto, stockRow);
+        // Con FIFO cada ingreso abre una capa: una capa en cero haria salir a
+        // cero todo lo que se consuma de ella.
+        if (tipo === 'INGRESO' && !(costoUnitarioBruto > 0)) {
+          throw new BadRequestException(
+            acceptsUnitCost
+              ? `Ingresa el precio unitario de ${producto.nombre}: el ingreso de bodega necesita un precio mayor a cero.`
+              : `${producto.nombre} no tiene precio en esta bodega. El ingreso lo debe registrar Bodega, Administracion o Gerencia indicando el precio unitario.`,
+          );
+        }
         const linea = this.resolveMovementLineAmounts(
           cantidad,
           costoUnitarioBruto,
@@ -1459,7 +1541,15 @@ export class KardexService extends CrudService<Kardex> {
       movimiento.updated_by = userName;
       await manager.save(MovimientoInventario, movimiento);
 
-      const [hydrated] = await this.hydrateMovementDocuments([movimiento]);
+      // Un egreso sale al costo de las capas que consume, no al precio que se
+      // calculo arriba: el motor lo reescribe en la misma transaccion.
+      await FifoCostEngine.syncPending(manager);
+      const costeado =
+        (await manager.findOne(MovimientoInventario, {
+          where: { id: movimiento.id },
+        })) ?? movimiento;
+
+      const [hydrated] = await this.hydrateMovementDocuments([costeado]);
       return hydrated ?? null;
     });
     await this.notifyMaintenanceRecalculationForStocks(
@@ -1538,6 +1628,7 @@ export class KardexService extends CrudService<Kardex> {
       movement.deleted_by = annulledBy;
       movement.updated_by = annulledBy;
       await manager.save(MovimientoInventario, movement);
+      await FifoCostEngine.syncPending(manager);
       return { id: movement.id, numero_documento: movement.numero_documento, estado: movement.estado };
     });
     await this.notifyMaintenanceRecalculationForStocks([...changedStockIds], 'document-annulment', { actorUsername: annulledBy });
@@ -1996,6 +2087,9 @@ export class KardexService extends CrudService<Kardex> {
    * que todavia no aparece en ninguna compra ni ingreso; en cuanto aparece,
    * manda la linea de tiempo para que la misma salida valga lo mismo en la
    * pantalla, en el PDF y en el Excel.
+   *
+   * Lo registrado desde el corte FIFO (`fifo_origen` nulo) ya trae en el
+   * kardex el costo de las capas que consumio, y ese es el que se informa.
    */
   private async valueKardexMovements(qb: SelectQueryBuilder<Kardex>) {
     const rows = await qb
@@ -2008,6 +2102,7 @@ export class KardexService extends CrudService<Kardex> {
         'kardex.costo_unitario AS costo_unitario',
         'kardex.costo_total AS costo_total',
         'kardex.is_deleted AS is_deleted',
+        'kardex.fifo_origen AS fifo_origen',
       ])
       .getRawMany<Record<string, unknown>>();
 
@@ -2059,7 +2154,10 @@ export class KardexService extends CrudService<Kardex> {
           : cantidad > 0 && totalAlmacenado > 0
             ? totalAlmacenado / cantidad
             : 0;
-      const precio = historico ?? respaldo;
+      // Desde el corte FIFO el kardex guarda el costo real de las capas que
+      // salieron: ese manda. Lo anterior sigue valorizandose como antes.
+      const costeadoFifo = row.fifo_origen === null || row.fifo_origen === undefined;
+      const precio = costeadoFifo ? respaldo : historico ?? respaldo;
 
       const bucket = byProduct.get(productoId) ?? {
         costoEntradas: 0,
@@ -4152,6 +4250,7 @@ export class KardexService extends CrudService<Kardex> {
         else summary.salidas += 1;
       }
 
+      await FifoCostEngine.syncPending(manager);
       return true;
     });
 
@@ -4621,6 +4720,7 @@ export class KardexService extends CrudService<Kardex> {
         else summary.salidas += 1;
       }
 
+      await FifoCostEngine.syncPending(manager);
       return true;
     });
   }

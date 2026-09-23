@@ -343,6 +343,42 @@ export class KardexController extends CrudController<Kardex> {
     };
   }
 
+  @Get('fifo/estado')
+  @ApiOperation({
+    summary:
+      'Estado del costeo FIFO: fecha de corte, meses cerrados y materiales en cola',
+  })
+  async getFifoStatus() {
+    return { data: await this.service.getFifoStatus() };
+  }
+
+  @Post('fifo/cierres')
+  @ApiOperation({
+    summary:
+      'Cierra un mes de inventario (AAAA-MM): ya no se aceptan movimientos con fecha dentro de el',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['periodo'],
+      properties: { periodo: { type: 'string', example: '2026-09' } },
+    },
+  })
+  async closeFifoMonth(@Body() body: { periodo?: string }, @Req() req?: any) {
+    if (!canRoleViewMaterialCosts(req?.headers?.['x-role-name'])) {
+      throw new ForbiddenException(
+        'Solo Administracion, Super Administracion o Gerencia pueden cerrar un mes de inventario.',
+      );
+    }
+    return {
+      message: 'Mes de inventario cerrado correctamente.',
+      data: await this.service.closeFifoMonth(
+        String(body?.periodo ?? ''),
+        getRequestActor(req),
+      ),
+    };
+  }
+
   @Patch('documentos/:id/anular')
   @ApiOperation({ summary: 'Anular un documento manual de Kardex y revertir su stock' })
   async annulMovementDocument(@Param('id') id: string, @Req() req?: any) {

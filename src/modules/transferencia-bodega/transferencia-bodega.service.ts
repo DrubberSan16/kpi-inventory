@@ -29,6 +29,7 @@ import {
 } from './transferencia-bodega.dto';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
 import { parseLocalDateInput } from '../../common/utils/local-date.util';
+import { FifoCostEngine } from '../../common/pricing/fifo-cost.engine';
 import {
   buildAnnulmentInfo,
   isAnnulledState,
@@ -875,6 +876,11 @@ export class TransferenciaBodegaService {
         await manager.save(OrdenCompra, order);
       }
 
+      // La salida consume las capas mas antiguas del origen y el destino las
+      // recibe con su fecha y su costo: el motor reescribe el costo calculado
+      // arriba en el kardex, los movimientos y el detalle.
+      await FifoCostEngine.syncPending(manager);
+
       const [hydrated] = await this.hydrateTransfersWithManager(
         manager,
         [transfer],
@@ -999,9 +1005,13 @@ export class TransferenciaBodegaService {
         // transferencia, por producto. Con el modelo nuevo puede ser mas que
         // lo transferido, y la anulacion tiene que devolver la diferencia.
         const receiptByProduct = new Map<string, number>();
-        if (transfer.movimiento_recepcion_id) {
+        const receiptMovementId = await this.resolveTransferReceiptMovementId(
+          manager,
+          transfer,
+        );
+        if (receiptMovementId) {
           const receiptDetails = await manager.find(MovimientoInventarioDet, {
-            where: { movimiento_id: transfer.movimiento_recepcion_id },
+            where: { movimiento_id: receiptMovementId },
           });
           for (const row of receiptDetails) {
             const key = String(row.producto_id);
@@ -1012,7 +1022,10 @@ export class TransferenciaBodegaService {
           }
         }
 
-        const sourceIn = transfer.orden_compra_id
+        // Solo la tanda que recibio la mercaderia tiene como origen al
+        // proveedor; las siguientes sacaron existencia real de la bodega de
+        // compras y tienen que devolversela.
+        const sourceIn = receiptMovementId
           ? null
           : await manager.save(
               MovimientoInventario,
@@ -1265,9 +1278,13 @@ export class TransferenciaBodegaService {
           await manager.save(MovimientoInventario, sourceIn);
         }
 
+        // La recepcion se anula con la transferencia: su stock ya se devolvio
+        // arriba y, si quedara vigente en el kardex, las capas del costeo
+        // mostrarian en la bodega de compras material que no esta.
         const annulledMovementIds = [
           transfer.movimiento_salida_id,
           transfer.movimiento_ingreso_id,
+          receiptMovementId,
           destinationOut.id,
           sourceIn?.id,
         ].filter((value): value is string => Boolean(value));
@@ -1324,6 +1341,8 @@ export class TransferenciaBodegaService {
           await manager.save(GuiaRemisionElectronica, guide);
         }
 
+        await FifoCostEngine.syncPending(manager);
+
         const [hydrated] = await this.hydrateTransfersWithManager(
           manager,
           [transfer],
@@ -1356,6 +1375,32 @@ export class TransferenciaBodegaService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Ingreso con que la orden de compra llego a la bodega de compras en esta
+   * transferencia. Desde el modelo de tandas lo guarda la cabecera; las
+   * anteriores lo crearon en la misma transaccion sin enlazarlo, y se reconoce
+   * por su observacion.
+   */
+  private async resolveTransferReceiptMovementId(
+    manager: EntityManager,
+    transfer: TransferenciaBodega,
+  ): Promise<string | null> {
+    if (transfer.movimiento_recepcion_id) return transfer.movimiento_recepcion_id;
+    if (!transfer.orden_compra_id) return null;
+    const rows: Array<{ id: string }> = await manager.query(
+      `SELECT mov.id
+         FROM kpi_inventory.tb_movimiento_inventario mov
+         JOIN kpi_inventory.tb_transferencia_bodega tr ON tr.id = $1
+        WHERE mov.tipo_documento = 'INGRESO_BODEGA'
+          AND mov.bodega_destino_id = tr.bodega_origen_id
+          AND mov.created_at = tr.created_at
+          AND mov.observacion LIKE $2
+        LIMIT 1`,
+      [transfer.id, `%para transferencia ${transfer.codigo}`],
+    );
+    return rows[0]?.id ?? null;
   }
 
   private assertCanReverseAnnulment(actor?: DocumentAnnulmentActor | null) {
@@ -1436,16 +1481,31 @@ export class TransferenciaBodegaService {
           );
         }
 
-        // La anulacion solo devolvio stock al origen cuando la transferencia no
-        // venia de una orden de compra (ahi el origen es el proveedor, no una
-        // bodega con saldo). El reverso respeta la misma condicion.
-        const restoresSourceStock = !transfer.orden_compra_id;
-
         // Lo que trajo la recepcion de esta transferencia, igual que al anular.
+        const receiptMovementId = await this.resolveTransferReceiptMovementId(
+          manager,
+          transfer,
+        );
+        // Con FIFO no se reactiva lo anterior al corte ni lo de un mes
+        // cerrado: su costo ya esta asentado.
+        await FifoCostEngine.assertMovementsReopenable(
+          manager,
+          [
+            transfer.movimiento_salida_id,
+            transfer.movimiento_ingreso_id,
+            receiptMovementId,
+          ].filter((value): value is string => Boolean(value)),
+        );
+
+        // La anulacion solo devolvio stock al origen cuando la transferencia no
+        // traia la recepcion de la orden (ahi el origen es el proveedor, no una
+        // bodega con saldo). El reverso respeta la misma condicion.
+        const restoresSourceStock = !receiptMovementId;
+
         const receiptByProduct = new Map<string, number>();
-        if (transfer.movimiento_recepcion_id) {
+        if (receiptMovementId) {
           const receiptDetails = await manager.find(MovimientoInventarioDet, {
-            where: { movimiento_id: transfer.movimiento_recepcion_id },
+            where: { movimiento_id: receiptMovementId },
           });
           for (const row of receiptDetails) {
             const key = String(row.producto_id);
@@ -1549,6 +1609,7 @@ export class TransferenciaBodegaService {
         const restoredMovementIds = [
           transfer.movimiento_salida_id,
           transfer.movimiento_ingreso_id,
+          receiptMovementId,
         ].filter((value): value is string => Boolean(value));
         if (restoredMovementIds.length) {
           await manager
@@ -1625,6 +1686,8 @@ export class TransferenciaBodegaService {
           guide.updated_by = reversedBy;
           await manager.save(GuiaRemisionElectronica, guide);
         }
+
+        await FifoCostEngine.syncPending(manager);
 
         const [hydrated] = await this.hydrateTransfersWithManager(
           manager,
