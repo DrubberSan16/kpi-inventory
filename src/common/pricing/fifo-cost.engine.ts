@@ -426,6 +426,50 @@ export class FifoCostEngine {
     }));
   }
 
+  /**
+   * Encola los pares cuyas capas ya no suman lo mismo que su stock: algo movio
+   * el stock sin dejar kardex (una edicion directa en la base, un ajuste de
+   * arranque). Al costearlos quedan como alerta visible. Se omiten los que ya
+   * tienen alerta o estan en cola.
+   */
+  static async enqueueStockMismatches(runner: Runner): Promise<number> {
+    if (!(await this.isActive(runner))) return 0;
+    const result: unknown = await runner.query(
+      `WITH capas AS (
+         SELECT bodega_id, producto_id, condicion_material, SUM(cantidad_disponible) AS q
+           FROM kpi_inventory.tb_fifo_capa
+          GROUP BY bodega_id, producto_id, condicion_material
+       ),
+       descuadre AS (
+         SELECT DISTINCT s.bodega_id, s.producto_id
+           FROM kpi_inventory.tb_stock_bodega s
+          CROSS JOIN LATERAL (VALUES ('NUEVO', s.stock_nuevo),
+                                     ('USADO', s.stock_usado),
+                                     ('CRITICO', s.stock_critico)) AS x(c, q)
+           LEFT JOIN capas c
+             ON c.bodega_id = s.bodega_id
+            AND c.producto_id = s.producto_id
+            AND c.condicion_material = x.c
+          WHERE COALESCE(s.is_deleted, false) = false
+            AND abs(COALESCE(x.q, 0) - COALESCE(c.q, 0)) > 0.0001
+       )
+       INSERT INTO kpi_inventory.tb_fifo_pendiente (bodega_id, producto_id, txid)
+       SELECT d.bodega_id, d.producto_id, 0
+         FROM descuadre d
+        WHERE NOT EXISTS (
+                SELECT 1 FROM kpi_inventory.tb_fifo_pendiente p
+                 WHERE p.bodega_id = d.bodega_id AND p.producto_id = d.producto_id)
+          AND NOT EXISTS (
+                SELECT 1 FROM kpi_inventory.tb_fifo_alerta a
+                 WHERE a.bodega_id = d.bodega_id AND a.producto_id = d.producto_id)
+       RETURNING bodega_id`,
+    );
+    const rows = (
+      Array.isArray(result) && Array.isArray(result[0]) ? result[0] : result
+    ) as unknown[];
+    return Array.isArray(rows) ? rows.length : 0;
+  }
+
   private static async loadState(runner: Runner): Promise<SyncState> {
     const rows: Array<Record<string, unknown>> = await runner.query(
       `SELECT tipo, periodo,

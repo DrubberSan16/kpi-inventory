@@ -228,6 +228,8 @@ export class KardexService
   }
 
   private fifoSweepTimer: NodeJS.Timeout | null = null;
+  private fifoMismatchTimer: NodeJS.Timeout | null = null;
+  private fifoMismatchFirstRun: NodeJS.Timeout | null = null;
   private fifoSweepRunning = false;
 
   onModuleInit() {
@@ -239,11 +241,40 @@ export class KardexService
       void this.sweepFifoQueue();
     }, 60_000);
     this.fifoSweepTimer.unref?.();
+    // Y cada hora (y poco despues de arrancar, porque el arranque ajusta el
+    // stock por SQL) busca stock que cambio sin kardex.
+    this.fifoMismatchFirstRun = setTimeout(() => {
+      void this.detectFifoMismatches();
+    }, 120_000);
+    this.fifoMismatchFirstRun.unref?.();
+    this.fifoMismatchTimer = setInterval(() => {
+      void this.detectFifoMismatches();
+    }, 3_600_000);
+    this.fifoMismatchTimer.unref?.();
   }
 
   onModuleDestroy() {
     if (this.fifoSweepTimer) clearInterval(this.fifoSweepTimer);
+    if (this.fifoMismatchTimer) clearInterval(this.fifoMismatchTimer);
+    if (this.fifoMismatchFirstRun) clearTimeout(this.fifoMismatchFirstRun);
     this.fifoSweepTimer = null;
+    this.fifoMismatchTimer = null;
+    this.fifoMismatchFirstRun = null;
+  }
+
+  async detectFifoMismatches() {
+    try {
+      const encolados = await FifoCostEngine.enqueueStockMismatches(this.dataSource);
+      if (encolados > 0) {
+        this.logger.warn(
+          `FIFO: ${encolados} material(es) con stock distinto de sus capas; quedan en cola para revisar.`,
+        );
+      }
+      return encolados;
+    } catch (error: any) {
+      this.logger.error(`FIFO: no se pudo revisar el cuadre de capas: ${error?.message}`);
+      return 0;
+    }
   }
 
   /**
