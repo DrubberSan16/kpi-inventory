@@ -474,8 +474,12 @@ export class KardexService
       // el ingreso. Ver KARDEX_ENTRY_FIRST_ORDER.
       .addOrderBy(KARDEX_ENTRY_FIRST_ORDER, 'DESC')
       .addOrderBy('kardex.id', 'DESC')
-      .skip((safePage - 1) * safeLimit)
-      .take(safeLimit)
+      // offset/limit y no skip/take: con skip/take TypeORM arma una
+      // subconsulta que no admite la expresion del orden y respondia 500. Las
+      // uniones son a una sola bodega y un solo material, asi que no duplican
+      // filas y la pagina sale igual.
+      .offset((safePage - 1) * safeLimit)
+      .limit(safeLimit)
       .getManyAndCount();
 
     return {
