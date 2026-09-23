@@ -1,11 +1,12 @@
 import {
-  FifoDeficitError,
+  DEFICIT_ROOT,
   FifoEvent,
   FifoOpeningLayer,
   replayFifo,
 } from './fifo-replay';
 
 const CORTE = '2026-09-22 23:59:59.999999';
+const HOY = '2026-09-24 10:00:00.000000';
 
 function opening(cantidad: number, costo: number): FifoOpeningLayer {
   return {
@@ -32,6 +33,7 @@ function entrada(
     cantidad,
     costo,
     fechaCapa: fecha,
+    fechaEvento: fecha,
     etiqueta: id,
     ...extra,
   };
@@ -48,6 +50,7 @@ function salida(
     tipo: 'SALIDA',
     condicion: 'NUEVO',
     cantidad,
+    fechaEvento: HOY,
     etiqueta: id,
     ...extra,
   };
@@ -68,6 +71,7 @@ describe('replayFifo', () => {
     ]);
     expect(result.saldoCantidad).toBe(8);
     expect(result.saldoValor).toBe(64);
+    expect(result.deficitTotal).toBe(0);
   });
 
   it('cada condicion tiene su propia cola', () => {
@@ -79,10 +83,25 @@ describe('replayFifo', () => {
     expect(result.saldoValor).toBe(52);
   });
 
-  it('rechaza una salida sin existencia en esa fecha', () => {
-    expect(() =>
-      replayFifo([opening(2, 5)], [salida('out', 3, { etiqueta: 'EB-1 del 2026-09-24' })]),
-    ).toThrow(FifoDeficitError);
+  it('lo que sale sin capa se costea al ultimo costo y queda como deuda', () => {
+    const result = replayFifo([opening(2, 5)], [salida('out', 3)]);
+    const out = result.eventos.get('out')!;
+    expect(out.deficit).toBe(1);
+    expect(out.porciones[1]).toMatchObject({ raiz: DEFICIT_ROOT, cantidad: 1, costo: 5 });
+    expect(out.costoTotal).toBe(15);
+    expect(result.deuda.NUEVO).toBe(1);
+    expect(result.saldoCantidad).toBe(-1);
+  });
+
+  it('la siguiente entrada salda la deuda antes de abrir capa', () => {
+    const result = replayFifo(
+      [opening(2, 5)],
+      [salida('out', 3), entrada('in', 10, 7, '2026-09-25 00:00:00.000000')],
+    );
+    expect(result.deuda.NUEVO).toBe(0);
+    expect(result.capas).toHaveLength(1);
+    expect(result.capas[0]).toMatchObject({ raiz: 'K:in', cantidad: 9 });
+    expect(result.saldoCantidad).toBe(9);
   });
 
   it('la entrada espejo conserva la fecha y el costo de las capas de origen', () => {
@@ -127,6 +146,23 @@ describe('replayFifo', () => {
     );
     expect(result.eventos.get('in:R')!.costoTotal).toBe(18);
     expect(result.saldoValor).toBe(25);
+  });
+
+  it('anular un ingreso ya consumido no deja faltante: sale de lo que haya hoy', () => {
+    // Entra A, sale todo A, entra B; anular A hoy saca de B.
+    const result = replayFifo(
+      [],
+      [
+        entrada('A', 10, 5, '2026-09-24 00:00:00.000000'),
+        salida('usa-A', 10),
+        entrada('B', 10, 8, '2026-09-25 00:00:00.000000'),
+        salida('A:R', 10, { key: 'A:R', kardexId: 'A', preferirCapasDe: 'A', preferirRaiz: 'K:A' }),
+      ],
+    );
+    expect(result.deficitTotal).toBe(0);
+    expect(result.eventos.get('usa-A')!.costoTotal).toBe(50);
+    expect(result.eventos.get('A:R')!.costoTotal).toBe(80);
+    expect(result.saldoCantidad).toBe(0);
   });
 
   it('una entrada sin precio abre una capa a costo cero', () => {

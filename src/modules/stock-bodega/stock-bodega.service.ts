@@ -666,8 +666,11 @@ export class StockBodegaService
   ) {
     const previousTotal = this.toNumeric(args.previous?.stock_actual, 0);
     const currentTotal = this.toNumeric(args.current.stock_actual, 0);
-    const delta = Number((currentTotal - previousTotal).toFixed(6));
-    if (Math.abs(delta) < 0.000001) return null;
+    // Cada condicion tiene sus propias capas FIFO: un ajuste que mueve stock
+    // de una condicion a otra deja un movimiento por cada una, aunque el total
+    // no cambie.
+    const deltas = this.resolveStockAdjustmentDeltas(args.previous, args.current);
+    if (!deltas.length) return null;
 
     if (currentTotal < -0.000001) {
       throw new BadRequestException('El stock actual no puede ser negativo.');
@@ -685,13 +688,6 @@ export class StockBodegaService
     });
     if (!producto || !bodega) return null;
 
-    const tipo: StockMovementType = delta > 0 ? 'INGRESO' : 'SALIDA';
-    const cantidad = Math.abs(delta);
-    const condicionMaterial = this.resolveStockAdjustmentCondition(
-      args.previous,
-      args.current,
-      tipo,
-    );
     const costoUnitario = this.resolveStockAdjustmentUnitCost(
       args.current,
       producto,
@@ -707,55 +703,48 @@ export class StockBodegaService
       this.firstNonEmptyString((args.payload as any)?.observacion) ??
       `Ajuste de stock por bodega (${previousTotal.toFixed(2)} -> ${currentTotal.toFixed(2)})`;
 
-    return this.createMovementArtifacts(manager, {
-      tipo,
-      bodegaId,
-      productoId,
-      cantidad,
-      costoUnitario,
-      saldoCantidad: currentTotal,
-      condicionMaterial,
-      observacion,
-      userName,
-    });
+    let saldo = previousTotal;
+    const artifacts: Array<Awaited<ReturnType<typeof this.createMovementArtifacts>>> = [];
+    for (const item of deltas) {
+      saldo += item.delta;
+      artifacts.push(
+        await this.createMovementArtifacts(manager, {
+          tipo: item.delta > 0 ? 'INGRESO' : 'SALIDA',
+          bodegaId,
+          productoId,
+          cantidad: Math.abs(item.delta),
+          costoUnitario,
+          saldoCantidad: saldo,
+          condicionMaterial: item.condition,
+          observacion,
+          userName,
+        }),
+      );
+    }
+    return artifacts;
   }
 
-  private resolveStockAdjustmentCondition(
+  /** Cambio de cada condicion, primero lo que baja y despues lo que sube. */
+  private resolveStockAdjustmentDeltas(
     previous: StockBodega | null | undefined,
     current: StockBodega,
-    tipo: StockMovementType,
-  ): StockMaterialCondition {
-    const previousNuevo = this.toNumeric(
-      previous?.stock_nuevo,
-      this.toNumeric(previous?.stock_actual, 0) -
-        this.toNumeric(previous?.stock_usado, 0) -
-        this.toNumeric(previous?.stock_critico, 0),
-    );
-    const previousUsado = this.toNumeric(previous?.stock_usado, 0);
-    const previousCritico = this.toNumeric(previous?.stock_critico, 0);
-    const currentNuevo = this.toNumeric(
-      current.stock_nuevo,
-      this.toNumeric(current.stock_actual, 0) -
-        this.toNumeric(current.stock_usado, 0) -
-        this.toNumeric(current.stock_critico, 0),
-    );
-    const currentUsado = this.toNumeric(current.stock_usado, 0);
-    const currentCritico = this.toNumeric(current.stock_critico, 0);
-    const nuevoDelta = Number((currentNuevo - previousNuevo).toFixed(6));
-    const usadoDelta = Number((currentUsado - previousUsado).toFixed(6));
-    const criticoDelta = Number((currentCritico - previousCritico).toFixed(6));
-    const candidates: Array<{
-      condition: StockMaterialCondition;
-      delta: number;
-    }> = [
-      { condition: 'NUEVO', delta: nuevoDelta },
-      { condition: 'USADO', delta: usadoDelta },
-      { condition: 'CRITICO', delta: criticoDelta },
-    ];
-    const matching = candidates
-      .filter((item) => (tipo === 'INGRESO' ? item.delta > 0 : item.delta < 0))
-      .sort((left, right) => Math.abs(right.delta) - Math.abs(left.delta));
-    return matching[0]?.condition ?? 'NUEVO';
+  ): Array<{ condition: StockMaterialCondition; delta: number }> {
+    const amounts = (stock: StockBodega | null | undefined) => {
+      const actual = this.toNumeric(stock?.stock_actual, 0);
+      const usado = this.toNumeric(stock?.stock_usado, 0);
+      const critico = this.toNumeric(stock?.stock_critico, 0);
+      const nuevo = this.toNumeric(stock?.stock_nuevo, actual - usado - critico);
+      return { NUEVO: nuevo, USADO: usado, CRITICO: critico };
+    };
+    const before = amounts(previous);
+    const after = amounts(current);
+    return (['NUEVO', 'USADO', 'CRITICO'] as StockMaterialCondition[])
+      .map((condition) => ({
+        condition,
+        delta: Number((after[condition] - before[condition]).toFixed(6)),
+      }))
+      .filter((item) => Math.abs(item.delta) > 0.000001)
+      .sort((left, right) => left.delta - right.delta);
   }
 
   private resolveStockAdjustmentUnitCost(

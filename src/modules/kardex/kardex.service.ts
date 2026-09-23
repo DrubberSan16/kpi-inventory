@@ -246,34 +246,43 @@ export class KardexService
     this.fifoSweepTimer = null;
   }
 
-  async sweepFifoQueue(limite = 200) {
+  /**
+   * Costea lo que quedo en cola, un par por transaccion para no retener mas
+   * de una fila de stock a la vez. Lo que un par arrastra a otros vuelve a la
+   * cola y se recoge en la siguiente vuelta del mismo barrido.
+   */
+  async sweepFifoQueue(limite = 500) {
     if (this.fifoSweepRunning) return { pares: 0, errores: 0 };
     this.fifoSweepRunning = true;
     let pares = 0;
     let errores = 0;
+    const fallidos = new Set<string>();
     try {
-      const pending = await FifoCostEngine.listCommittedPending(
-        this.dataSource,
-        limite,
-      );
-      for (const pair of pending) {
-        try {
-          const result = await this.dataSource.transaction((manager) =>
-            FifoCostEngine.syncPair(manager, pair),
-          );
-          pares += result.pares;
-          for (const warning of result.descuadres) {
-            this.logger.warn(`FIFO: capas y stock no cuadran en ${warning}`);
+      while (pares + errores < limite) {
+        const pending = (
+          await FifoCostEngine.listCommittedPending(this.dataSource, 50)
+        ).filter((pair) => !fallidos.has(`${pair.bodegaId}:${pair.productoId}`));
+        if (!pending.length) break;
+        for (const pair of pending) {
+          try {
+            const result = await this.dataSource.transaction((manager) =>
+              FifoCostEngine.syncPair(manager, pair),
+            );
+            pares += 1;
+            for (const warning of result.descuadres) {
+              this.logger.warn(`FIFO: revisar ${warning}`);
+            }
+          } catch (error: any) {
+            errores += 1;
+            fallidos.add(`${pair.bodegaId}:${pair.productoId}`);
+            const message = error?.message ?? String(error);
+            this.logger.error(
+              `FIFO: no se pudo costear ${pair.bodegaId}/${pair.productoId}: ${message}`,
+            );
+            await FifoCostEngine.markError(this.dataSource, pair, message).catch(
+              () => undefined,
+            );
           }
-        } catch (error: any) {
-          errores += 1;
-          const message = error?.message ?? String(error);
-          this.logger.error(
-            `FIFO: no se pudo costear ${pair.bodegaId}/${pair.productoId}: ${message}`,
-          );
-          await FifoCostEngine.markError(this.dataSource, pair, message).catch(
-            () => undefined,
-          );
         }
       }
     } catch (error: any) {
@@ -289,6 +298,8 @@ export class KardexService
   }
 
   async closeFifoMonth(periodo: string, userName: string) {
+    // El mes se congela con todo costeado: primero se vacia la cola.
+    await this.sweepFifoQueue(5000);
     return this.dataSource.transaction((manager) =>
       FifoCostEngine.closeMonth(manager, periodo, userName),
     );
@@ -3888,6 +3899,46 @@ export class KardexService
     return this.applyNewStockDelta(stockRow, delta);
   }
 
+  /**
+   * Un ajuste que cambia varias condiciones a la vez deja un movimiento por
+   * cada una. Con FIFO cada condicion tiene sus propias capas, y un solo
+   * movimiento por el total (o ninguno, si el total no cambia) haria que
+   * dejaran de sumar lo mismo que el stock.
+   */
+  private async recordConditionAdjustments(
+    manager: EntityManager,
+    args: {
+      bodegaId: string;
+      productoId: string;
+      costoUnitario: number;
+      stockAnterior: number;
+      deltas: Array<{ condition: 'NUEVO' | 'USADO' | 'CRITICO'; delta: number }>;
+      observacion: string;
+      userName: string;
+    },
+  ) {
+    let saldo = args.stockAnterior;
+    // Primero lo que sale y despues lo que entra.
+    const ordered = args.deltas
+      .map((item) => ({ ...item, delta: Number(item.delta.toFixed(6)) }))
+      .filter((item) => Math.abs(item.delta) > 0.000001)
+      .sort((left, right) => left.delta - right.delta);
+    for (const item of ordered) {
+      saldo += item.delta;
+      await this.createMovementArtifacts(manager, {
+        tipo: item.delta > 0 ? 'INGRESO' : 'SALIDA',
+        bodegaId: args.bodegaId,
+        productoId: args.productoId,
+        cantidad: Math.abs(item.delta),
+        costoUnitario: args.costoUnitario,
+        stockNuevo: saldo,
+        condicionMaterial: item.condition,
+        observacion: args.observacion,
+        userName: args.userName,
+      });
+    }
+  }
+
   private async createMovementArtifacts(
     manager: EntityManager,
     args: {
@@ -4215,8 +4266,11 @@ export class KardexService
         userName,
       });
       const stockAnterior = this.toNumber(stockRow.stock_actual, 0);
+      const stockNuevoAnterior = this.getStockNuevoAmount(stockRow);
+      const stockUsadoAnterior = this.toNumber(stockRow.stock_usado, 0);
+      const stockCriticoAnterior = this.getStockCriticoAmount(stockRow);
       const delta = stockObjetivo - stockAnterior;
-      const stockNuevo = this.applyInventoryImportStockTarget(stockRow, {
+      this.applyInventoryImportStockTarget(stockRow, {
         stockActual: stockObjetivo,
         stockNuevo: stockObjetivo,
         stockUsado: 0,
@@ -4232,23 +4286,21 @@ export class KardexService
       const savedStockRow = await manager.save(StockBodega, stockRow);
       changedStockIds.add(savedStockRow.id);
 
-      if (delta !== 0) {
-        const tipo = delta > 0 ? 'INGRESO' : 'SALIDA';
-
-        await this.createMovementArtifacts(manager, {
-          tipo,
-          bodegaId: bodega.id,
-          productoId: producto.id,
-          cantidad: Math.abs(delta),
-          costoUnitario: costoPromedio,
-          stockNuevo,
-          observacion: 'Ajuste por carga masiva XLSX',
-          userName,
-        });
-
-        if (delta > 0) summary.ingresos += 1;
-        else summary.salidas += 1;
-      }
+      await this.recordConditionAdjustments(manager, {
+        bodegaId: bodega.id,
+        productoId: producto.id,
+        costoUnitario: costoPromedio,
+        stockAnterior,
+        deltas: [
+          { condition: 'NUEVO', delta: stockObjetivo - stockNuevoAnterior },
+          { condition: 'USADO', delta: -stockUsadoAnterior },
+          { condition: 'CRITICO', delta: -stockCriticoAnterior },
+        ],
+        observacion: 'Ajuste por carga masiva XLSX',
+        userName,
+      });
+      if (delta > 0) summary.ingresos += 1;
+      else if (delta < 0) summary.salidas += 1;
 
       await FifoCostEngine.syncPending(manager);
       return true;
@@ -4695,30 +4747,21 @@ export class KardexService
       const savedStockRow = await manager.save(StockBodega, stockRow);
       changedStockIds.add(savedStockRow.id);
 
-      if (delta !== 0) {
-        const tipo = delta > 0 ? 'INGRESO' : 'SALIDA';
-
-        await this.createMovementArtifacts(manager, {
-          tipo,
-          bodegaId: bodega.id,
-          productoId: producto.id,
-          cantidad: Math.abs(delta),
-          costoUnitario,
-          stockNuevo: stockTotal,
-          observacion: 'Ajuste por carga masiva CSV/XLSX',
-          condicionMaterial: [
-            { condition: 'NUEVO', delta: deltaNuevo },
-            { condition: 'USADO', delta: deltaUsado },
-            { condition: 'CRITICO', delta: deltaCritico },
-          ].sort(
-            (left, right) => Math.abs(right.delta) - Math.abs(left.delta),
-          )[0]?.condition,
-          userName,
-        });
-
-        if (delta > 0) summary.ingresos += 1;
-        else summary.salidas += 1;
-      }
+      await this.recordConditionAdjustments(manager, {
+        bodegaId: bodega.id,
+        productoId: producto.id,
+        costoUnitario,
+        stockAnterior,
+        deltas: [
+          { condition: 'NUEVO', delta: deltaNuevo },
+          { condition: 'USADO', delta: deltaUsado },
+          { condition: 'CRITICO', delta: deltaCritico },
+        ],
+        observacion: 'Ajuste por carga masiva CSV/XLSX',
+        userName,
+      });
+      if (delta > 0) summary.ingresos += 1;
+      else if (delta < 0) summary.salidas += 1;
 
       await FifoCostEngine.syncPending(manager);
       return true;

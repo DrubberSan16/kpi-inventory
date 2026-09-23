@@ -519,6 +519,7 @@ export class TransferenciaBodegaService {
       });
 
       let totalCost = 0;
+      let receiptTotal = 0;
       const transferDetailEntities: TransferenciaBodegaDet[] = [];
 
       for (const detail of requestedDetails) {
@@ -601,12 +602,18 @@ export class TransferenciaBodegaService {
 
         const unitCost = this.resolveUnitCost(orderDetail, product, sourceStock);
         const subtotal = quantity * unitCost;
+        // La mercaderia de la orden entra a lo que se pago por ella: neto de
+        // descuento y sin IVA. El costo que ya tenia la bodega de compras no es
+        // el de esta compra; con FIFO, esta recepcion abre su propia capa.
+        const receiptUnitCost =
+          this.resolveOrderReceiptUnitCost(orderDetail) ?? unitCost;
         totalCost += subtotal;
 
         if (order && movementReceipt && pendingReceipt > 0) {
           currentSourceStock = this.applyNewStockDelta(sourceStock, pendingReceipt);
           sourceStock.stock_fisico = this.toFixedText(currentSourceStock, 6);
-          sourceStock.costo_promedio_bodega = this.toFixedText(unitCost, 4);
+          sourceStock.costo_promedio_bodega = this.toFixedText(receiptUnitCost, 4);
+          receiptTotal += pendingReceipt * receiptUnitCost;
           sourceStock.updated_by = userName;
           await manager.save(StockBodega, sourceStock);
           changedStockIds.add(sourceStock.id);
@@ -617,8 +624,8 @@ export class TransferenciaBodegaService {
               movimiento_id: movementReceipt.id,
               producto_id: product.id,
               cantidad: this.toFixedText(pendingReceipt, 6),
-              costo_unitario: this.toFixedText(unitCost, 4),
-              subtotal_costo: this.toFixedText(pendingReceipt * unitCost, 4),
+              costo_unitario: this.toFixedText(receiptUnitCost, 4),
+              subtotal_costo: this.toFixedText(pendingReceipt * receiptUnitCost, 4),
               condicion_material: 'NUEVO',
               observacion:
                 this.toText(detail.observacion) ||
@@ -640,13 +647,13 @@ export class TransferenciaBodegaService {
               tipo_movimiento: 'INGRESO',
               entrada_cantidad: this.toFixedText(pendingReceipt, 6),
               salida_cantidad: '0.000000',
-              costo_unitario: this.toFixedText(unitCost, 4),
-              costo_total: this.toFixedText(pendingReceipt * unitCost, 4),
+              costo_unitario: this.toFixedText(receiptUnitCost, 4),
+              costo_total: this.toFixedText(pendingReceipt * receiptUnitCost, 4),
               saldo_cantidad: sourceStock.stock_actual,
               condicion_material: 'NUEVO',
-              saldo_costo_promedio: this.toFixedText(unitCost, 4),
+              saldo_costo_promedio: this.toFixedText(receiptUnitCost, 4),
               saldo_valorizado: this.toFixedText(
-                this.toNumber(sourceStock.stock_actual, 0) * unitCost,
+                this.toNumber(sourceStock.stock_actual, 0) * receiptUnitCost,
                 4,
               ),
               observacion:
@@ -831,7 +838,7 @@ export class TransferenciaBodegaService {
       movementIn.total_costos = this.toFixedText(totalCost, 4);
       movementIn.updated_by = userName;
       if (movementReceipt) {
-        movementReceipt.total_costos = this.toFixedText(totalCost, 4);
+        movementReceipt.total_costos = this.toFixedText(receiptTotal, 4);
         movementReceipt.updated_by = userName;
       }
       const movementBatch = [movementReceipt, movementOut, movementIn].filter(
@@ -2099,6 +2106,16 @@ export class TransferenciaBodegaService {
       });
     }
     return prepared;
+  }
+
+  /** Costo neto por unidad de la linea de la orden: subtotal / cantidad. */
+  private resolveOrderReceiptUnitCost(orderDetail: OrdenCompraDet | null) {
+    if (!orderDetail) return null;
+    const cantidad = this.toNumber(orderDetail.cantidad, 0);
+    const subtotal = this.toNumber(orderDetail.subtotal, 0);
+    if (cantidad > 0 && subtotal > 0) return subtotal / cantidad;
+    const bruto = this.toNumber(orderDetail.costo_unitario, 0);
+    return bruto > 0 ? bruto : null;
   }
 
   private resolveUnitCost(
