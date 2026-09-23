@@ -348,7 +348,12 @@ export class KardexController extends CrudController<Kardex> {
     summary:
       'Estado del costeo FIFO: fecha de corte, meses cerrados y materiales en cola',
   })
-  async getFifoStatus() {
+  async getFifoStatus(@Req() req?: any) {
+    if (!canRoleViewMaterialCosts(req?.headers?.['x-role-name'])) {
+      throw new ForbiddenException(
+        'Solo Administracion, Super Administracion o Gerencia pueden consultar el costeo FIFO.',
+      );
+    }
     return { data: await this.service.getFifoStatus() };
   }
 
