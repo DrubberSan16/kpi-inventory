@@ -241,6 +241,12 @@ export class StockBodegaService
       // cuando combina LEFT JOIN con skip/take.
       .orderBy('stock_priority', 'ASC')
       .addOrderBy('producto.nombre', 'ASC')
+      // El nombre se repite ("suministro" lo comparten cientos de materiales) y
+      // con empates Postgres no garantiza el mismo orden entre dos consultas:
+      // al paginar, un material salía en dos páginas y otro en ninguna. El id
+      // desempata y hace el orden estable.
+      .addOrderBy('producto.codigo', 'ASC')
+      .addOrderBy('producto.id', 'ASC')
       .skip((page - 1) * limit)
       .take(limit)
       .getRawAndEntities();
@@ -422,6 +428,9 @@ export class StockBodegaService
       )
       .orderBy('stock.updated_at', 'DESC')
       .addOrderBy('stock.created_at', 'DESC')
+      // El costeo FIFO actualiza muchas filas en la misma transacción con la
+      // misma marca de tiempo; sin desempate la paginación repite y salta filas.
+      .addOrderBy('stock.id', 'ASC')
       .skip((page - 1) * limit)
       .take(limit)
       .getRawAndEntities();
