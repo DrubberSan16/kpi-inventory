@@ -1,0 +1,27 @@
+name: Notify monorepo
+
+# Avisa a DrubberSan16/kpi-justice que main cambió, para que traiga el cambio al monorepo.
+# Plantilla: la original vive en kpi-justice/sync/notify-monorepo.yml.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  notify:
+    name: Avisar a kpi-justice
+    # Lo que llega desde el monorepo trae este trailer: avisar sería un eco.
+    if: ${{ !contains(github.event.head_commit.message, 'Monorepo-Commit:') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Disparar la sincronización
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: >-
+          gh api repos/DrubberSan16/kpi-justice/dispatches
+          -f event_type=project-updated
+          -f "client_payload[repository]=$GITHUB_REPOSITORY"
