@@ -53,7 +53,16 @@ export function canRoleSetIncomeUnitCost(value: unknown): boolean {
   return UNIT_COST_ON_INCOME_ROLES.has(role) || AUTHORIZED_COST_ROLES.has(role);
 }
 
-export function stripMaterialCosts<T>(payload: T): T {
+export function canRoleSaveUnpricedIncome(value: unknown): boolean {
+  return UNIT_COST_ON_INCOME_ROLES.has(normalizeMaterialCostRole(value));
+}
+
+export function isIncomePriceReferenceRequest(method: unknown, url: unknown): boolean {
+  return String(method || '').toUpperCase() === 'GET' &&
+    /\/kardex\/precios-ingreso(?:\?|$)/.test(String(url || ''));
+}
+
+export function stripMaterialCosts<T>(payload: T, allowIncomeUnitCost = false): T {
   const seen = new WeakMap<object, unknown>();
 
   const clean = (value: any): any => {
@@ -78,7 +87,7 @@ export function stripMaterialCosts<T>(payload: T): T {
     const monetaryObject = Object.keys(value).some((key) => MATERIAL_COST_KEY.test(key));
     for (const [key, item] of Object.entries(value)) {
       if (
-        !MATERIAL_COST_KEY.test(key) &&
+        (!MATERIAL_COST_KEY.test(key) || (allowIncomeUnitCost && key === 'costo_unitario')) &&
         !(monetaryObject && CONTEXTUAL_MATERIAL_COST_KEY.test(key))
       ) copy[key] = clean(item);
     }
@@ -94,6 +103,8 @@ export class MaterialCostVisibilityInterceptor implements NestInterceptor {
     const request = context.switchToHttp().getRequest<Request>();
     const roleName = request?.headers?.['x-role-name'];
     if (canRoleViewMaterialCosts(roleName)) return next.handle();
-    return next.handle().pipe(map((payload) => stripMaterialCosts(payload)));
+    const allowIncomeUnitCost = canRoleSetIncomeUnitCost(roleName) &&
+      isIncomePriceReferenceRequest(request.method, request.originalUrl || request.url);
+    return next.handle().pipe(map((payload) => stripMaterialCosts(payload, allowIncomeUnitCost)));
   }
 }

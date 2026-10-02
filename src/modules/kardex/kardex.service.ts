@@ -1337,15 +1337,58 @@ export class KardexService
     };
   }
 
-  /**
-   * `options.canSetUnitCost` lo decide el controlador a partir del rol: bodega
-   * recibe la mercaderia y sabe a que precio entro, asi que puede fijarlo. Para
-   * cualquier otro rol el costo se sigue tomando del material, aunque el cuerpo
-   * de la peticion traiga uno.
-   */
+  /** La precarga y el guardado comparten la misma referencia de precio. */
+  async getIncomePriceReference(
+    productoId: string,
+    bodegaId: string,
+    fecha?: string,
+    sucursalId?: string | null,
+  ) {
+    const manager = this.dataSource.manager;
+    const bodega = await manager.findOne(Bodega, {
+      where: { id: bodegaId, is_deleted: false, ...(sucursalId ? { sucursal_id: sucursalId } : {}) },
+    });
+    if (!bodega) throw new NotFoundException('La bodega seleccionada no existe.');
+    const producto = await manager.findOne(Producto, { where: { id: productoId, is_deleted: false } });
+    if (!producto) throw new NotFoundException('El material seleccionado no existe.');
+    const stock = await manager.findOne(StockBodega, {
+      where: { producto_id: productoId, bodega_id: bodegaId, is_deleted: false },
+    });
+    return this.resolveIncomePriceReference(manager, producto, stock, bodegaId, fecha);
+  }
+
+  private async resolveIncomePriceReference(
+    manager: EntityManager,
+    producto: Producto,
+    stock: StockBodega | null,
+    bodegaId: string,
+    fecha?: string,
+  ) {
+    const hasta = fecha ? this.parseDateBoundary(fecha, 'end') : new Date();
+    if (!hasta) throw new BadRequestException('La fecha del ingreso no es válida.');
+    const average = this.toNumber(producto.costo_promedio, 0);
+    if (average > 0) return { costo_unitario: average, fuente: 'PROMEDIO_MATERIAL', documento: null };
+    const last = this.toNumber(producto.ultimo_costo, 0);
+    if (last > 0) return { costo_unitario: last, fuente: 'ULTIMO_COSTO_MATERIAL', documento: null };
+    const timeline = await MaterialPriceTimeline.load(manager, [producto.id], { hasta });
+    const historical = timeline.lookup(producto.id, hasta, bodegaId);
+    if (historical) return {
+      costo_unitario: historical.costo,
+      fuente: historical.fuente,
+      documento: historical.documento,
+    };
+    const warehouse = this.toNumber(stock?.costo_promedio_bodega, 0);
+    return {
+      costo_unitario: warehouse > 0 ? warehouse : null,
+      fuente: warehouse > 0 ? 'COSTO_BODEGA' : 'SIN_PRECIO',
+      documento: null,
+    };
+  }
+
+  /** Los permisos de precio los decide el controlador a partir del rol. */
   async createMovementDocument(
     payload: MovementDocumentPayload,
-    options?: { canSetUnitCost?: boolean },
+    options?: { canSetUnitCost?: boolean; allowUnpricedIncome?: boolean },
   ) {
     const tipo = this.normalizeMovementType(payload.tipo_movimiento);
     const bodegaId = this.toText(payload.bodega_id);
@@ -1476,11 +1519,14 @@ export class KardexService
         const precioIngresado = acceptsUnitCost
           ? this.resolveIncomeUnitCost(detail?.costo_unitario)
           : null;
-        const costoUnitarioBruto =
-          precioIngresado ?? this.resolveWarehouseUnitCost(producto, stockRow);
-        // Con FIFO cada ingreso abre una capa: una capa en cero haria salir a
-        // cero todo lo que se consuma de ella.
-        if (tipo === 'INGRESO' && !(costoUnitarioBruto > 0)) {
+        const costoUnitarioBruto = precioIngresado ?? (
+          tipo === 'INGRESO'
+            ? (await this.resolveIncomePriceReference(manager, producto, stockRow, bodega.id,
+                this.toText(payload.fecha_movimiento) || undefined)).costo_unitario ?? 0
+            : this.resolveWarehouseUnitCost(producto, stockRow)
+        );
+        if (tipo === 'INGRESO' && !(costoUnitarioBruto > 0) &&
+            !(acceptsUnitCost && options?.allowUnpricedIncome === true)) {
           throw new BadRequestException(
             acceptsUnitCost
               ? `Ingresa el precio unitario de ${producto.nombre}: el ingreso de bodega necesita un precio mayor a cero.`

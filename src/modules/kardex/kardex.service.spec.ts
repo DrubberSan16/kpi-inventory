@@ -18,6 +18,7 @@ import { StockBodega } from '../entities/stock-bodega.entity';
 import { Sucursal } from '../entities/sucursal.entity';
 import { UnidadMedida } from '../entities/unidad-medida.entity';
 import { KardexService } from './kardex.service';
+import { FifoCostEngine } from '../../common/pricing/fifo-cost.engine';
 
 type ImportLocationResolver = {
   findOrCreateInventoryImportSucursal(
@@ -149,6 +150,140 @@ const asMovementOriginFilterResolver = (service: KardexService) =>
   service as unknown as MovementOriginFilterResolver;
 
 const squash = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+
+describe('KardexService referencias de precio para IB', () => {
+  const reference = (average = '0', last = '0', warehouse = '0', history: unknown[] = []) => {
+    const manager = {
+      findOne: jest.fn()
+        .mockResolvedValueOnce({ id: 'warehouse' })
+        .mockResolvedValueOnce({ id: 'product', costo_promedio: average, ultimo_costo: last })
+        .mockResolvedValueOnce({ costo_promedio_bodega: warehouse }),
+      query: jest.fn().mockResolvedValue(history),
+    };
+    const service = buildService({ manager } as unknown as DataSource);
+    return { service, manager };
+  };
+
+  it('prefiere el promedio configurado antes que el último costo y la bodega', async () => {
+    const { service, manager } = reference('6', '8', '10');
+    expect(await service.getIncomePriceReference('product', 'warehouse', '2026-10-02', 'branch'))
+      .toEqual({ costo_unitario: 6, fuente: 'PROMEDIO_MATERIAL', documento: null });
+    expect(manager.query).not.toHaveBeenCalled();
+    expect(manager.findOne.mock.calls[0][1].where.sucursal_id).toBe('branch');
+  });
+
+  it('usa el último costo configurado cuando no hay promedio', async () => {
+    const { service } = reference('0', '8', '10');
+    expect(await service.getIncomePriceReference('product', 'warehouse'))
+      .toEqual({ costo_unitario: 8, fuente: 'ULTIMO_COSTO_MATERIAL', documento: null });
+  });
+
+  it.each(['INGRESO', 'ORDEN_COMPRA'])('recupera el precio más reciente de %s sin usar fechas futuras', async fuente => {
+    const { service, manager } = reference('0', '0', '3', [
+      { producto_id: 'product', bodega_id: 'warehouse', fecha: '2026-10-01', costo: 4, fuente: 'INGRESO', documento: 'IB-1' },
+      { producto_id: 'product', bodega_id: 'warehouse', fecha: '2026-10-02', costo: 9, fuente, documento: 'RECENT' },
+      { producto_id: 'product', bodega_id: 'warehouse', fecha: '2026-10-03', costo: 99, fuente: 'ORDEN_COMPRA', documento: 'FUTURE' },
+    ]);
+    expect(await service.getIncomePriceReference('product', 'warehouse', '2026-10-02'))
+      .toEqual({ costo_unitario: 9, fuente, documento: 'RECENT' });
+    const sql = manager.query.mock.calls[0][0] as string;
+    expect(sql).toContain('oc.fecha_emision <= $2');
+    expect(sql).toContain('k.fecha <= $2');
+    expect(sql).toContain("'ANULADA'");
+  });
+
+  it('conserva la referencia de bodega cuando no hay catálogo ni documentos válidos', async () => {
+    const { service } = reference('0', '0', '3');
+    expect(await service.getIncomePriceReference('product', 'warehouse'))
+      .toEqual({ costo_unitario: 3, fuente: 'COSTO_BODEGA', documento: null });
+  });
+
+  it('distingue ausencia de precio de un precio sugerido', async () => {
+    const { service } = reference();
+    expect(await service.getIncomePriceReference('product', 'warehouse'))
+      .toEqual({ costo_unitario: null, fuente: 'SIN_PRECIO', documento: null });
+  });
+
+  it('rechaza la consulta para una bodega fuera del alcance', async () => {
+    const { service, manager } = reference();
+    manager.findOne.mockReset().mockResolvedValue(null);
+    await expect(service.getIncomePriceReference('product', 'warehouse', undefined, 'branch'))
+      .rejects.toThrow('La bodega seleccionada no existe.');
+  });
+});
+
+describe('KardexService guardado de IB con permisos de precio', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  const fixture = (average = '0', history: unknown[] = []) => {
+    const stock = { id: 'stock', stock_actual: '0', stock_fisico: '0', stock_nuevo: '0', stock_usado: '0', stock_critico: '0', costo_promedio_bodega: '0' };
+    const saved: Array<{ entity: unknown; row: Record<string, unknown> }> = [];
+    const manager = {
+      findOne: jest.fn().mockImplementation(entity => Promise.resolve(entity === Bodega ? { id: 'warehouse' } : null)),
+      query: jest.fn().mockResolvedValue(history),
+      create: jest.fn().mockImplementation((_entity, row) => row),
+      save: jest.fn().mockImplementation((entity, row) => {
+        row.id ??= `saved-${saved.length}`;
+        saved.push({ entity, row: { ...row } });
+        return Promise.resolve(row);
+      }),
+    };
+    const service = buildService({ transaction: async callback => callback(manager) } as unknown as DataSource);
+    const internal = service as unknown as Record<string, unknown>;
+    internal.generateMovementDocumentCode = jest.fn().mockResolvedValue('IB-TEST');
+    internal.getOrReactivateMovementProduct = jest.fn().mockResolvedValue({ id: 'product', nombre: 'Pernos', costo_promedio: average, ultimo_costo: '0' });
+    internal.getOrCreateStockRow = jest.fn().mockResolvedValue(stock);
+    internal.hydrateMovementDocuments = jest.fn().mockImplementation(rows => Promise.resolve(rows));
+    internal.notifyMaintenanceRecalculationForStocks = jest.fn().mockResolvedValue(undefined);
+    jest.spyOn(FifoCostEngine, 'syncPending').mockResolvedValue({ pares: 0, descuadres: [] });
+    return { service, saved, stock, payload: {
+      tipo_movimiento: 'INGRESO', bodega_id: 'warehouse', fecha_movimiento: '2026-10-02',
+      detalles: [{ producto_id: 'product', cantidad: 3, condicion_material: 'NUEVO' }],
+    } };
+  };
+
+  it('permite a Bodega registrar cantidad y kardex sin precio ni referencia', async () => {
+    const { service, saved, stock, payload } = fixture();
+    await service.createMovementDocument(payload, { canSetUnitCost: true, allowUnpricedIncome: true });
+    expect(Number(stock.stock_actual)).toBe(3);
+    expect(Number(stock.stock_fisico)).toBe(3);
+    expect(saved.find(item => item.entity === Kardex)?.row).toMatchObject({ entrada_cantidad: '3.000000', costo_unitario: '0.0000', costo_total: '0.0000' });
+    expect(saved.find(item => item.entity === MovimientoInventarioDet)?.row).toMatchObject({ cantidad: '3.000000', costo_unitario: '0.0000' });
+    expect(FifoCostEngine.syncPending).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechaza un ingreso administrativo sin precio ni referencia', async () => {
+    const { service, saved, payload } = fixture();
+    await expect(service.createMovementDocument(payload, { canSetUnitCost: true, allowUnpricedIncome: false }))
+      .rejects.toThrow('Ingresa el precio unitario de Pernos');
+    expect(saved.some(item => item.entity === Kardex)).toBe(false);
+    expect(FifoCostEngine.syncPending).not.toHaveBeenCalled();
+  });
+
+  it('no concede la excepción de Bodega a un rol que no puede fijar precios', async () => {
+    const { service, payload } = fixture();
+    await expect(service.createMovementDocument(payload, { canSetUnitCost: false, allowUnpricedIncome: true }))
+      .rejects.toThrow('no tiene precio');
+  });
+
+  it('resuelve el precio configurado al guardar aunque el cliente no envíe precio', async () => {
+    const { service, saved, payload } = fixture('6');
+    await service.createMovementDocument(payload, { canSetUnitCost: true });
+    expect(saved.find(item => item.entity === Kardex)?.row).toMatchObject({ costo_unitario: '6.0000', costo_total: '18.0000' });
+  });
+
+  it('resuelve una OC al guardar aunque el cliente no envíe precio', async () => {
+    const { service, saved, payload } = fixture('0', [{ producto_id: 'product', fecha: '2026-10-01', costo: 7, fuente: 'ORDEN_COMPRA', documento: 'OC-1' }]);
+    await service.createMovementDocument(payload, { canSetUnitCost: true });
+    expect(saved.find(item => item.entity === Kardex)?.row).toMatchObject({ costo_unitario: '7.0000', costo_total: '21.0000' });
+  });
+
+  it('respeta el precio positivo ingresado por el usuario sobre la referencia', async () => {
+    const { service, saved, payload } = fixture('6');
+    await service.createMovementDocument({ ...payload, detalles: [{ ...payload.detalles[0], costo_unitario: 8 }] }, { canSetUnitCost: true });
+    expect(saved.find(item => item.entity === Kardex)?.row).toMatchObject({ costo_unitario: '8.0000', costo_total: '24.0000' });
+  });
+});
 
 describe('KardexService material search filters', () => {
   it('aplica los mismos criterios de material y documento al resumen y al detalle', () => {

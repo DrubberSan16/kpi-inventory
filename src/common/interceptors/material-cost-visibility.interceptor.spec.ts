@@ -1,6 +1,8 @@
 import {
   canRoleSetIncomeUnitCost,
+  canRoleSaveUnpricedIncome,
   canRoleViewMaterialCosts,
+  isIncomePriceReferenceRequest,
   stripMaterialCosts,
 } from './material-cost-visibility.interceptor';
 
@@ -47,6 +49,20 @@ describe('material cost visibility', () => {
 });
 
 describe('precio de entrada en el ingreso de bodega', () => {
+  it.each(['BODEGA', 'BODEGUERO', ' bodega '])('permite ingreso sin referencia solo a %s', role => {
+    expect(canRoleSaveUnpricedIncome(role)).toBe(true);
+  });
+  it.each(['ADMINISTRADOR', 'SUPER ADMINISTRADOR', 'GERENTE GENERAL', 'OPERADOR', undefined])(
+    'requiere referencia o precio para %s', role => expect(canRoleSaveUnpricedIncome(role)).toBe(false),
+  );
+  it('la excepción de consulta conserva solo el precio unitario del ingreso', () => {
+    expect(stripMaterialCosts({ data: { costo_unitario: 7, costo_promedio: 9, precio_venta: 12, total_costos: 50, fuente: 'INGRESO' } }, true))
+      .toEqual({ data: { costo_unitario: 7, fuente: 'INGRESO' } });
+    expect(isIncomePriceReferenceRequest('GET', '/kpi_inventory/kardex/precios-ingreso?producto_id=1')).toBe(true);
+    expect(isIncomePriceReferenceRequest('POST', '/kpi_inventory/kardex/precios-ingreso')).toBe(false);
+    expect(isIncomePriceReferenceRequest('GET', '/kpi_inventory/kardex/documentos')).toBe(false);
+    expect(isIncomePriceReferenceRequest('GET', '/kpi_inventory/kardex/precios-ingreso/export')).toBe(false);
+  });
   it.each(['BODEGA', 'BODEGUERO'])(
     'deja fijar el precio de entrada al rol %s, que es quien recibe',
     (roleName) => {

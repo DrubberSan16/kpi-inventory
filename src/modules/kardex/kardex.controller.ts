@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Req,
@@ -31,6 +32,7 @@ import { shouldIncludeAnnulledRecords } from '../../common/http/annulled-records
 import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import {
   canRoleSetIncomeUnitCost,
+  canRoleSaveUnpricedIncome,
   canRoleViewMaterialCosts,
 } from '../../common/interceptors/material-cost-visibility.interceptor';
 import { Kardex } from '../entities/kardex.entity';
@@ -70,6 +72,27 @@ export class KardexController extends CrudController<Kardex> {
       getSucursalScopeId(req),
       shouldIncludeAnnulledRecords(req, query.include_annulled),
     );
+  }
+
+  @Get('precios-ingreso')
+  @ApiOperation({ summary: 'Consultar el precio sugerido para un ingreso de bodega' })
+  @ApiQuery({ name: 'producto_id', required: true, type: String })
+  @ApiQuery({ name: 'bodega_id', required: true, type: String })
+  @ApiQuery({ name: 'fecha', required: false, type: String })
+  async getIncomePriceReference(
+    @Query('producto_id', new ParseUUIDPipe()) productoId: string,
+    @Query('bodega_id', new ParseUUIDPipe()) bodegaId: string,
+    @Query('fecha') fecha?: string,
+    @Req() req?: any,
+  ) {
+    if (!canRoleSetIncomeUnitCost(req?.headers?.['x-role-name'])) {
+      throw new ForbiddenException('No puedes consultar precios para ingresos de bodega.');
+    }
+    return {
+      data: await this.service.getIncomePriceReference(
+        productoId, bodegaId, fecha, getSucursalScopeId(req),
+      ),
+    };
   }
 
   @Get('resumen-material')
@@ -298,7 +321,7 @@ export class KardexController extends CrudController<Kardex> {
                 type: 'number',
                 nullable: true,
                 description:
-                  'Precio unitario de entrada para esta bodega. Solo se acepta en INGRESO y desde Bodega, Administrador, Super Administrador o Gerente General; queda en costo_promedio_bodega y no altera el costo del material. Si se omite se usa el costo de la bodega y, a falta de este, el del material.',
+                  'Precio del ingreso. Si se omite, se usa el promedio o último costo del material, luego la última IB u OC válida y finalmente el costo de la bodega. Solo Bodega puede guardar sin precio cuando no existe ninguna referencia.',
               },
               descuento: {
                 type: 'number',
@@ -339,6 +362,7 @@ export class KardexController extends CrudController<Kardex> {
         canSetUnitCost: canRoleSetIncomeUnitCost(
           req?.headers?.['x-role-name'],
         ),
+        allowUnpricedIncome: canRoleSaveUnpricedIncome(req?.headers?.['x-role-name']),
       }),
     };
   }
