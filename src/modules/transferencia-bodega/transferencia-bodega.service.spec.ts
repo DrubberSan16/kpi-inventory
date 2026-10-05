@@ -1,6 +1,35 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { TransferenciaBodegaService } from './transferencia-bodega.service';
 
+describe('TransferenciaBodegaService correo de bodega destino', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  it.each([
+    'http://maintenance/kpi_maintenance',
+    'http://maintenance/kpi_maintenance/alertas/recalcular',
+  ])('notifica por la API de mantenimiento configurada en %s', async (url) => {
+    const service: any = Object.create(TransferenciaBodegaService.prototype);
+    service.configService = { get: jest.fn(() => url) };
+    service.logger = { warn: jest.fn() };
+    global.fetch = jest.fn().mockResolvedValue({ ok: true });
+    await service.notifyDestinationWarehouse('transfer-id');
+    expect(global.fetch).toHaveBeenCalledWith(
+      'http://maintenance/kpi_maintenance/alertas/transferencias-bodega/transfer-id/notificar',
+      expect.objectContaining({ method: 'POST', signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('un fallo de correo posterior a confirmar stock se registra sin fallar la transferencia', async () => {
+    const service: any = Object.create(TransferenciaBodegaService.prototype);
+    service.configService = { get: jest.fn(() => 'http://maintenance') };
+    service.logger = { warn: jest.fn() };
+    global.fetch = jest.fn().mockRejectedValue(new Error('Sin conexión'));
+    await expect(service.notifyDestinationWarehouse('transfer-id')).resolves.toBeUndefined();
+    expect(service.logger.warn).toHaveBeenCalledWith(expect.stringContaining('transfer-id'));
+  });
+});
+
 describe('TransferenciaBodegaService forced annulment guard', () => {
   const service = Object.create(
     TransferenciaBodegaService.prototype,

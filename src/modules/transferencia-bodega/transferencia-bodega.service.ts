@@ -900,6 +900,7 @@ export class TransferenciaBodegaService {
         createdBy,
         description: `Transferencia ${this.toText((result as any)?.codigo) || 'sin-codigo'} registrada correctamente.`,
       });
+      await this.notifyDestinationWarehouse((result as any)?.id);
       await this.notifyMaintenanceRecalculationForStocks(
         changedStockIds,
         'transfer',
@@ -2462,6 +2463,25 @@ export class TransferenciaBodegaService {
     if (!baseUrl) return null;
     if (baseUrl.endsWith('/alertas/recalcular')) return baseUrl;
     return `${baseUrl}/alertas/recalcular`;
+  }
+
+  private async notifyDestinationWarehouse(transferId?: string) {
+    const recalcUrl = this.getMaintenanceRecalcUrl();
+    if (!recalcUrl || !transferId) return;
+    const url = recalcUrl.replace(/\/alertas\/recalcular$/, '')
+      + `/alertas/transferencias-bodega/${encodeURIComponent(transferId)}/notificar`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch (error: any) {
+      // La transferencia ya está confirmada: un fallo de correo no revierte
+      // el stock ni convierte la operación de inventario en un error.
+      this.logger.warn(`No se pudo notificar la transferencia ${transferId} a bodega destino: ${error?.message ?? 'Error de red'}`);
+    }
   }
 
   private async notifyMaintenanceRecalculationForStocks(
