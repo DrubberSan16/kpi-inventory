@@ -100,7 +100,11 @@ interface SyncState {
  * `nuevo`: fila creada en esta transaccion. `actual`: ocurre en esta
  * transaccion (una fila nueva o una anulacion hecha ahora).
  */
-type OrderedEvent = FifoEvent & { orden: string; nuevo: boolean; actual: boolean };
+type OrderedEvent = FifoEvent & {
+  orden: string;
+  nuevo: boolean;
+  actual: boolean;
+};
 
 interface FifoAlert {
   tipo: string;
@@ -238,7 +242,9 @@ export class FifoCostEngine {
       // Si la transaccion ya fallo, este comando tambien fallaria y taparia
       // el error real; el ajuste es local y muere con el rollback.
       try {
-        await manager.query(`SELECT set_config('kpi.fifo_engine', 'off', true)`);
+        await manager.query(
+          `SELECT set_config('kpi.fifo_engine', 'off', true)`,
+        );
       } catch {
         /* la transaccion se deshace de todos modos */
       }
@@ -388,7 +394,11 @@ export class FifoCostEngine {
        VALUES ('CIERRE_MENSUAL', $1, $2::timestamp, $3)
        RETURNING id, tipo, periodo, to_char(fecha_limite, ${TS}) AS fecha_limite,
                  to_char(created_at, ${TS}) AS created_at, created_by`,
-      [`${year}-${String(month).padStart(2, '0')}`, limite, usuario || 'SYSTEM'],
+      [
+        `${year}-${String(month).padStart(2, '0')}`,
+        limite,
+        usuario || 'SYSTEM',
+      ],
     );
     return rows[0];
   }
@@ -534,9 +544,10 @@ export class FifoCostEngine {
       [pair.bodegaId, pair.productoId],
     );
     if (!rows.length) {
-      await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
-        `fifo:${pairKey(pair)}`,
-      ]);
+      await manager.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+        [`fifo:${pairKey(pair)}`],
+      );
     }
   }
 
@@ -571,14 +582,22 @@ export class FifoCostEngine {
          LEFT JOIN LATERAL (
            SELECT td.kardex_salida_id
              FROM kpi_inventory.tb_transferencia_bodega_det td
-            WHERE td.kardex_ingreso_id = k.id
+             WHERE td.kardex_ingreso_id = k.id
+             UNION ALL
+             SELECT rd.kardex_salida_id
+               FROM kpi_inventory.tb_recepcion_bodega_det rd
+              WHERE rd.kardex_ingreso_id = k.id
             LIMIT 1
          ) tin ON true
          LEFT JOIN kpi_inventory.tb_kardex src ON src.id = tin.kardex_salida_id
          LEFT JOIN LATERAL (
            SELECT td.kardex_ingreso_id
              FROM kpi_inventory.tb_transferencia_bodega_det td
-            WHERE td.kardex_salida_id = k.id
+             WHERE td.kardex_salida_id = k.id
+             UNION ALL
+             SELECT rd.kardex_ingreso_id
+               FROM kpi_inventory.tb_recepcion_bodega_det rd
+              WHERE rd.kardex_salida_id = k.id
             LIMIT 1
          ) tout ON true
          LEFT JOIN kpi_inventory.tb_kardex dst ON dst.id = tout.kardex_ingreso_id
@@ -624,7 +643,9 @@ export class FifoCostEngine {
     state: SyncState,
     rows: KardexRow[],
   ) {
-    const anuladas = rows.filter((row) => row.is_deleted && !row.fifo_anulado_at);
+    const anuladas = rows.filter(
+      (row) => row.is_deleted && !row.fifo_anulado_at,
+    );
     if (anuladas.length) {
       await manager.query(
         `UPDATE kpi_inventory.tb_kardex
@@ -634,7 +655,9 @@ export class FifoCostEngine {
       );
       for (const row of anuladas) row.fifo_anulado_at = state.ahora;
     }
-    const reactivadas = rows.filter((row) => !row.is_deleted && row.fifo_anulado_at);
+    const reactivadas = rows.filter(
+      (row) => !row.is_deleted && row.fifo_anulado_at,
+    );
     if (reactivadas.length) {
       await manager.query(
         `UPDATE kpi_inventory.tb_kardex
@@ -677,13 +700,14 @@ export class FifoCostEngine {
   }
 
   private static async describePair(runner: Runner, pair: Pair) {
-    const rows: Array<{ material: string; bodega: string }> = await runner.query(
-      `SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' - ', p.codigo, p.nombre)), ''), p.id::text) AS material,
+    const rows: Array<{ material: string; bodega: string }> =
+      await runner.query(
+        `SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' - ', p.codigo, p.nombre)), ''), p.id::text) AS material,
               COALESCE(NULLIF(TRIM(CONCAT_WS(' - ', b.codigo, b.nombre)), ''), b.id::text) AS bodega
          FROM kpi_inventory.tb_producto p, kpi_inventory.tb_bodega b
         WHERE p.id = $2 AND b.id = $1`,
-      [pair.bodegaId, pair.productoId],
-    );
+        [pair.bodegaId, pair.productoId],
+      );
     return {
       material: toText(rows[0]?.material) || pair.productoId,
       bodega: toText(rows[0]?.bodega) || pair.bodegaId,
@@ -717,10 +741,17 @@ export class FifoCostEngine {
       // que vive en otro par: si ese par tambien es de esta transaccion, se
       // costea primero.
       for (const row of rows) {
-        if (!row.origen_kardex_id || row.origen_fifo_origen || !row.origen_bodega_id) {
+        if (
+          !row.origen_kardex_id ||
+          row.origen_fifo_origen ||
+          !row.origen_bodega_id
+        ) {
           continue;
         }
-        const source = { bodegaId: row.origen_bodega_id, productoId: pair.productoId };
+        const source = {
+          bodegaId: row.origen_bodega_id,
+          productoId: pair.productoId,
+        };
         const sourceKey = pairKey(source);
         if (
           state.propios.has(sourceKey) &&
@@ -736,7 +767,9 @@ export class FifoCostEngine {
         .filter((row) => row.origen_kardex_id && !row.origen_fifo_origen)
         .map((row) => row.origen_kardex_id as string);
       const sourcePortions = sourceIds.length
-        ? await this.loadPortions(manager, 'kardex_id = ANY($1::uuid[])', [sourceIds])
+        ? await this.loadPortions(manager, 'kardex_id = ANY($1::uuid[])', [
+            sourceIds,
+          ])
         : new Map<string, FifoPortion[]>();
       const previousPortions = await this.loadPortions(
         manager,
@@ -752,9 +785,23 @@ export class FifoCostEngine {
         sourcePortions,
       );
       const result = replayFifo(apertura, events);
-      await this.assertNoBackdatedShortage(manager, pair, apertura, events, result);
+      await this.assertNoBackdatedShortage(
+        manager,
+        pair,
+        apertura,
+        events,
+        result,
+      );
 
-      await this.persist(manager, state, pair, rows, regular, result, previousPortions);
+      await this.persist(
+        manager,
+        state,
+        pair,
+        rows,
+        regular,
+        result,
+        previousPortions,
+      );
       await manager.query(
         `DELETE FROM kpi_inventory.tb_fifo_pendiente
           WHERE bodega_id = $1 AND producto_id = $2`,
@@ -791,7 +838,8 @@ export class FifoCostEngine {
     const sinPrecio = rows.some(
       (row) =>
         toNumber(row.costo_unitario) <= 0 &&
-        (row.costo_revalorizado === null || row.costo_revalorizado === undefined),
+        (row.costo_revalorizado === null ||
+          row.costo_revalorizado === undefined),
     );
     const revalorizado = sinPrecio
       ? await this.valueUnpricedOpening(manager, state, pair)
@@ -806,7 +854,7 @@ export class FifoCostEngine {
         raiz: `SI:${toText(row.id)}`,
         condicion: normalizeCondition(row.condicion_material),
         fechaCapa: toText(row.fecha_capa),
-        costo: original > 0 ? original : asignado ?? 0,
+        costo: original > 0 ? original : (asignado ?? 0),
         cantidad: toNumber(row.cantidad),
       };
     });
@@ -860,6 +908,10 @@ export class FifoCostEngine {
                     SELECT 1 FROM kpi_inventory.tb_transferencia_bodega tr
                      WHERE tr.movimiento_ingreso_id = mov.id
                         OR tr.movimiento_salida_id = mov.id)
+              AND NOT EXISTS (
+                    SELECT 1 FROM kpi_inventory.tb_recepcion_bodega receipt
+                     WHERE receipt.movimiento_ingreso_id = mov.id
+                        OR receipt.movimiento_salida_id = mov.id)
          ) p
         WHERE to_char(llegada, ${TS}) >= $2
           AND costo > 0
@@ -886,7 +938,10 @@ export class FifoCostEngine {
       Array.isArray(updated) && Array.isArray(updated[0]) ? updated[0] : updated
     ) as Array<{ bodega_id: string }>;
     for (const row of list ?? []) {
-      const other = { bodegaId: toText(row.bodega_id), productoId: pair.productoId };
+      const other = {
+        bodegaId: toText(row.bodega_id),
+        productoId: pair.productoId,
+      };
       if (pairKey(other) === pairKey(pair)) continue;
       this.requeue(state, other);
     }
@@ -960,7 +1015,7 @@ export class FifoCostEngine {
               : fechaEvento,
           espejo:
             esEntrada && row.origen_kardex_id && !row.origen_fifo_origen
-              ? sourcePortions.get(row.origen_kardex_id) ?? null
+              ? (sourcePortions.get(row.origen_kardex_id) ?? null)
               : null,
           etiqueta,
         });
@@ -969,7 +1024,9 @@ export class FifoCostEngine {
 
       if (row.is_deleted && row.fifo_anulado_at) {
         const instante =
-          row.fifo_anulado_at > row.created_at ? row.fifo_anulado_at : row.created_at;
+          row.fifo_anulado_at > row.created_at
+            ? row.fifo_anulado_at
+            : row.created_at;
         events.push({
           orden: `${instante.slice(0, 10)}|${instante}|${esEntrada ? 3 : 2}|${row.id}:R`,
           nuevo: false,
@@ -1034,7 +1091,9 @@ export class FifoCostEngine {
       return ahora - antes > EPSILON;
     });
     const names = await this.describePair(manager, pair);
-    const faltante = afectado ? result.eventos.get(afectado.key)?.deficit ?? 0 : 0;
+    const faltante = afectado
+      ? (result.eventos.get(afectado.key)?.deficit ?? 0)
+      : 0;
     throw new BadRequestException(
       afectado && culpable && afectado.key === culpable.key
         ? `No se puede registrar ${culpable.etiqueta}: a esa fecha ${names.bodega} no tenia existencia ${afectado.condicion.toLowerCase()} suficiente de ${names.material} (faltan ${formatQty(
@@ -1159,7 +1218,10 @@ export class FifoCostEngine {
       const derivado = row.salida > EPSILON || !!row.origen_kardex_id;
       const costoTotal = derivado ? eventResult.costoTotal : row.costo_total;
       const costoUnitario = derivado
-        ? round(eventResult.cantidad > 0 ? costoTotal / eventResult.cantidad : 0, 4)
+        ? round(
+            eventResult.cantidad > 0 ? costoTotal / eventResult.cantidad : 0,
+            4,
+          )
         : row.costo_unitario;
       const saldoPromedio = round(
         eventResult.saldoCantidad > EPSILON
@@ -1192,7 +1254,13 @@ export class FifoCostEngine {
            FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[])
              AS v(id, cu, ct, scp, sv)
           WHERE k.id = v.id`,
-        [kardexUpdate.id, kardexUpdate.cu, kardexUpdate.ct, kardexUpdate.scp, kardexUpdate.sv],
+        [
+          kardexUpdate.id,
+          kardexUpdate.cu,
+          kardexUpdate.ct,
+          kardexUpdate.scp,
+          kardexUpdate.sv,
+        ],
       );
     }
     if (costChanged.length) {
@@ -1234,7 +1302,10 @@ export class FifoCostEngine {
    * movimiento y su total, la linea de la transferencia, el desecho de la OT y
    * la entrega de material que ve la orden de trabajo.
    */
-  private static async propagateCosts(manager: EntityManager, kardexIds: string[]) {
+  private static async propagateCosts(
+    manager: EntityManager,
+    kardexIds: string[],
+  ) {
     const movements: unknown = await manager.query(
       `UPDATE kpi_inventory.tb_movimiento_inventario_det d
           SET costo_unitario = k.costo_unitario,
@@ -1246,7 +1317,9 @@ export class FifoCostEngine {
       [kardexIds],
     );
     const movementRows = (
-      Array.isArray(movements) && Array.isArray(movements[0]) ? movements[0] : movements
+      Array.isArray(movements) && Array.isArray(movements[0])
+        ? movements[0]
+        : movements
     ) as Array<{ movimiento_id: string }>;
     const movementIds = [
       ...new Set((movementRows ?? []).map((row) => toText(row.movimiento_id))),
@@ -1285,6 +1358,24 @@ export class FifoCostEngine {
       [kardexIds],
     );
     await manager.query(
+      `UPDATE kpi_inventory.tb_transferencia_bodega_det td
+          SET costo_unitario = c.costo_total / NULLIF(c.cantidad,0),
+              subtotal = td.cantidad * c.costo_total / NULLIF(c.cantidad,0)
+         FROM (
+           SELECT rd.transferencia_detalle_id, SUM(k.costo_total) costo_total,
+                  SUM(k.salida_cantidad) cantidad
+             FROM kpi_inventory.tb_recepcion_bodega_det rd
+             JOIN kpi_inventory.tb_recepcion_bodega r ON r.id=rd.recepcion_bodega_id AND r.estado='APROBADA'
+             JOIN kpi_inventory.tb_kardex k ON k.id=rd.kardex_salida_id AND NOT k.is_deleted
+            WHERE rd.transferencia_detalle_id IN (
+              SELECT transferencia_detalle_id FROM kpi_inventory.tb_recepcion_bodega_det
+               WHERE kardex_salida_id=ANY($1::uuid[]) OR kardex_ingreso_id=ANY($1::uuid[]))
+            GROUP BY rd.transferencia_detalle_id
+         ) c
+        WHERE td.id=c.transferencia_detalle_id AND c.cantidad>0`,
+      [kardexIds],
+    );
+    await manager.query(
       `UPDATE kpi_inventory.tb_entrega_material_det ed
           SET costo_unitario = k.costo_unitario
          FROM kpi_inventory.tb_kardex k
@@ -1308,7 +1399,8 @@ export class FifoCostEngine {
     for (const event of events) {
       const eventResult = result.eventos.get(event.key);
       if (!eventResult || !(eventResult.deficit > EPSILON)) continue;
-      const deficitPortion = eventResult.porciones[eventResult.porciones.length - 1];
+      const deficitPortion =
+        eventResult.porciones[eventResult.porciones.length - 1];
       alerts.push({
         tipo: 'SALIDA_SIN_CAPA',
         kardexId: event.kardexId,
@@ -1334,7 +1426,11 @@ export class FifoCostEngine {
       USADO: toNumber(rows[0]?.usado),
       CRITICO: toNumber(rows[0]?.critico),
     };
-    const layers: Record<FifoCondition, number> = { NUEVO: 0, USADO: 0, CRITICO: 0 };
+    const layers: Record<FifoCondition, number> = {
+      NUEVO: 0,
+      USADO: 0,
+      CRITICO: 0,
+    };
     for (const capa of result.capas) layers[capa.condicion] += capa.cantidad;
     for (const condicion of FIFO_CONDITIONS) {
       const enCapas = round(layers[condicion] - result.deuda[condicion], 6);

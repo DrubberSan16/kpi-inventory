@@ -3,7 +3,9 @@ import { TransferenciaBodegaService } from './transferencia-bodega.service';
 
 describe('TransferenciaBodegaService correo de bodega destino', () => {
   const originalFetch = global.fetch;
-  afterEach(() => { global.fetch = originalFetch; });
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
 
   it.each([
     'http://maintenance/kpi_maintenance',
@@ -16,7 +18,10 @@ describe('TransferenciaBodegaService correo de bodega destino', () => {
     await service.notifyDestinationWarehouse('transfer-id');
     expect(global.fetch).toHaveBeenCalledWith(
       'http://maintenance/kpi_maintenance/alertas/transferencias-bodega/transfer-id/notificar',
-      expect.objectContaining({ method: 'POST', signal: expect.any(AbortSignal) }),
+      expect.objectContaining({
+        method: 'POST',
+        signal: expect.any(AbortSignal),
+      }),
     );
   });
 
@@ -25,8 +30,12 @@ describe('TransferenciaBodegaService correo de bodega destino', () => {
     service.configService = { get: jest.fn(() => 'http://maintenance') };
     service.logger = { warn: jest.fn() };
     global.fetch = jest.fn().mockRejectedValue(new Error('Sin conexión'));
-    await expect(service.notifyDestinationWarehouse('transfer-id')).resolves.toBeUndefined();
-    expect(service.logger.warn).toHaveBeenCalledWith(expect.stringContaining('transfer-id'));
+    await expect(
+      service.notifyDestinationWarehouse('transfer-id'),
+    ).resolves.toBeUndefined();
+    expect(service.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('transfer-id'),
+    );
   });
 });
 

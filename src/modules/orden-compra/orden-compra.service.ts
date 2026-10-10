@@ -8,7 +8,14 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { Brackets, DataSource, EntityManager, In, Not, Repository } from 'typeorm';
+import {
+  Brackets,
+  DataSource,
+  EntityManager,
+  In,
+  Not,
+  Repository,
+} from 'typeorm';
 import {
   Bodega,
   OrdenCompra,
@@ -70,7 +77,11 @@ export class OrdenCompraService {
   }
 
   private resolveAnnulmentActorName(actor?: DocumentAnnulmentActor | null) {
-    return this.toText(actor?.displayName) || this.toText(actor?.username) || 'SYSTEM';
+    return (
+      this.toText(actor?.displayName) ||
+      this.toText(actor?.username) ||
+      'SYSTEM'
+    );
   }
 
   private get securityServiceUrl() {
@@ -138,7 +149,9 @@ export class OrdenCompraService {
         }),
       });
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+        throw new Error(
+          `HTTP ${response.status} ${response.statusText}`.trim(),
+        );
       }
     } catch (error: any) {
       this.logger.warn(
@@ -201,10 +214,14 @@ export class OrdenCompraService {
       });
     }
     if (query.desde) {
-      qb.andWhere('DATE(orden.fecha_emision) >= :desde', { desde: query.desde });
+      qb.andWhere('DATE(orden.fecha_emision) >= :desde', {
+        desde: query.desde,
+      });
     }
     if (query.hasta) {
-      qb.andWhere('DATE(orden.fecha_emision) <= :hasta', { hasta: query.hasta });
+      qb.andWhere('DATE(orden.fecha_emision) <= :hasta', {
+        hasta: query.hasta,
+      });
     }
     const search = this.toText(query.search);
     if (search) {
@@ -261,6 +278,10 @@ export class OrdenCompraService {
         is_deleted: false,
       },
     });
+    const comprometido = await this.pendingOrderTransferQuantities(
+      this.dataSource.manager,
+      rows.map((r) => r.id),
+    );
     const saldoPorOrden = new Map<string, number>();
     for (const detalle of detalles) {
       const aprobado = this.toNumber(
@@ -271,7 +292,11 @@ export class OrdenCompraService {
       const key = String(detalle.orden_compra_id);
       saldoPorOrden.set(
         key,
-        (saldoPorOrden.get(key) ?? 0) + Math.max(0, aprobado - transferido),
+        (saldoPorOrden.get(key) ?? 0) +
+          Math.max(
+            0,
+            aprobado - transferido - (comprometido.get(detalle.id) || 0),
+          ),
       );
     }
     const pending = rows.filter(
@@ -288,7 +313,10 @@ export class OrdenCompraService {
       throw new NotFoundException('La orden de compra no existe.');
     }
     const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
-    if (warehouseIds && !warehouseIds.includes(String(order.bodega_destino_id || ''))) {
+    if (
+      warehouseIds &&
+      !warehouseIds.includes(String(order.bodega_destino_id || ''))
+    ) {
       throw new NotFoundException('La orden de compra no existe.');
     }
     const [hydrated] = await this.hydrateOrders([order], true);
@@ -341,20 +369,39 @@ export class OrdenCompraService {
     });
     try {
       const result = await this.dataSource.transaction(async (manager) => {
+        await manager.query(
+          "SELECT pg_advisory_xact_lock(hashtext('warehouse-transfer-flow'))",
+        );
         const current = await manager.findOne(OrdenCompra, {
           where: { id, is_deleted: false },
+          lock: { mode: 'pessimistic_write' },
         });
         if (!current) {
           throw new NotFoundException('La orden de compra no existe.');
         }
-        if (String(current.estado || '').trim().toUpperCase() === 'ANULADA') {
-          throw new BadRequestException('La orden de compra esta anulada y no se puede modificar.');
+        if (
+          String(current.estado || '')
+            .trim()
+            .toUpperCase() === 'ANULADA'
+        ) {
+          throw new BadRequestException(
+            'La orden de compra esta anulada y no se puede modificar.',
+          );
         }
 
         const transfer = await manager.findOne(TransferenciaBodega, {
-          where: { orden_compra_id: id, is_deleted: false },
+          where: {
+            orden_compra_id: id,
+            is_deleted: false,
+            estado: Not('ANULADA'),
+          },
         });
-        if (transfer && String(transfer.estado || '').trim().toUpperCase() !== 'ANULADA') {
+        if (
+          transfer &&
+          String(transfer.estado || '')
+            .trim()
+            .toUpperCase() !== 'ANULADA'
+        ) {
           throw new BadRequestException(
             'La orden ya tiene una transferencia registrada y no se puede modificar.',
           );
@@ -363,6 +410,15 @@ export class OrdenCompraService {
         const details = await manager.find(OrdenCompraDet, {
           where: { orden_compra_id: id, is_deleted: false },
         });
+        if (
+          details.some(
+            (item) => this.toNumber(item.cantidad_recibida, 0) > 0.000001,
+          )
+        ) {
+          throw new BadRequestException(
+            'La orden tiene un ingreso de compra registrado en bodega y no se puede modificar, aunque su transferencia haya sido anulada.',
+          );
+        }
         if (details.length) {
           details.forEach((item) => {
             item.is_deleted = true;
@@ -408,13 +464,21 @@ export class OrdenCompraService {
     });
     try {
       const result = await this.dataSource.transaction(async (manager) => {
+        await manager.query(
+          "SELECT pg_advisory_xact_lock(hashtext('warehouse-transfer-flow'))",
+        );
         const current = await manager.findOne(OrdenCompra, {
           where: { id, is_deleted: false },
+          lock: { mode: 'pessimistic_write' },
         });
         if (!current) {
           throw new NotFoundException('La orden de compra no existe.');
         }
-        if (String(current.estado || '').trim().toUpperCase() === 'ANULADA') {
+        if (
+          String(current.estado || '')
+            .trim()
+            .toUpperCase() === 'ANULADA'
+        ) {
           const [hydrated] = await this.hydrateOrdersWithManager(
             manager,
             [current],
@@ -423,14 +487,35 @@ export class OrdenCompraService {
           return hydrated;
         }
         const transfer = await manager.findOne(TransferenciaBodega, {
-          where: { orden_compra_id: id, is_deleted: false },
+          where: {
+            orden_compra_id: id,
+            is_deleted: false,
+            estado: Not('ANULADA'),
+          },
         });
-        if (transfer && String(transfer.estado || '').trim().toUpperCase() !== 'ANULADA') {
+        if (
+          transfer &&
+          String(transfer.estado || '')
+            .trim()
+            .toUpperCase() !== 'ANULADA'
+        ) {
           throw new BadRequestException(
             'La orden ya tiene una transferencia activa y no se puede anular.',
           );
         }
 
+        const receivedDetails = await manager.find(OrdenCompraDet, {
+          where: { orden_compra_id: id, is_deleted: false },
+        });
+        if (
+          receivedDetails.some(
+            (item) => this.toNumber(item.cantidad_recibida, 0) > 0.000001,
+          )
+        ) {
+          throw new BadRequestException(
+            'La orden tiene un ingreso de compra registrado en bodega y no se puede anular desde compras. Conserva el ingreso y su trazabilidad de inventario.',
+          );
+        }
         current.estado = 'ANULADA';
         current.updated_by = annulledBy;
         await manager.save(OrdenCompra, current);
@@ -563,7 +648,11 @@ export class OrdenCompraService {
       throw new BadRequestException('El proveedor seleccionado no existe.');
     }
 
-    const preparedDetails = await this.prepareDetails(manager, details, warehouseId);
+    const preparedDetails = await this.prepareDetails(
+      manager,
+      details,
+      warehouseId,
+    );
     const totals = this.calculateTotals(preparedDetails);
     if (traceId) {
       this.queueTransactionLog({
@@ -599,22 +688,31 @@ export class OrdenCompraService {
       (this.toText(current?.proveedor_nombre) || null);
     entity.bodega_destino_id = warehouse.id;
     entity.vendedor =
-      this.toText(dto.vendedor) || current?.vendedor || warehouse.nombre || null;
+      this.toText(dto.vendedor) ||
+      current?.vendedor ||
+      warehouse.nombre ||
+      null;
     entity.condicion_pago =
       this.toText(dto.condicion_pago) || current?.condicion_pago || null;
     entity.referencia =
-      this.toText(dto.referencia) || current?.referencia || (await this.generateReference(manager));
+      this.toText(dto.referencia) ||
+      current?.referencia ||
+      (await this.generateReference(manager));
     entity.observacion = this.toText(dto.observacion) || null;
     entity.moneda = this.toText(dto.moneda) || current?.moneda || 'USD';
     entity.tipo_cambio = this.toFixedText(
-      this.toNumber(dto.tipo_cambio, this.toNumber(current?.tipo_cambio, 1) || 1),
+      this.toNumber(
+        dto.tipo_cambio,
+        this.toNumber(current?.tipo_cambio, 1) || 1,
+      ),
       6,
     );
     entity.subtotal = this.toFixedText(totals.subtotal, 4);
     entity.descuento_total = this.toFixedText(totals.descuentoTotal, 4);
     entity.iva_total = this.toFixedText(totals.ivaTotal, 4);
     entity.total = this.toFixedText(totals.total, 4);
-    entity.estado = current?.estado === 'TRANSFERIDA' ? 'TRANSFERIDA' : 'EMITIDA';
+    entity.estado =
+      current?.estado === 'TRANSFERIDA' ? 'TRANSFERIDA' : 'EMITIDA';
     entity.updated_by = userName;
 
     const savedOrder = await manager.save(OrdenCompra, entity);
@@ -659,7 +757,11 @@ export class OrdenCompraService {
       });
     }
 
-    const [hydrated] = await this.hydrateOrdersWithManager(manager, [savedOrder], true);
+    const [hydrated] = await this.hydrateOrdersWithManager(
+      manager,
+      [savedOrder],
+      true,
+    );
     return hydrated;
   }
 
@@ -697,12 +799,33 @@ export class OrdenCompraService {
     );
   }
 
+  private async pendingOrderTransferQuantities(
+    manager: EntityManager,
+    orderIds: string[],
+  ) {
+    if (!orderIds.length) return new Map<string, number>();
+    const rows = await manager.query(
+      `SELECT d.orden_compra_det_id id,SUM(GREATEST(d.cantidad-d.cantidad_recibida,0)) cantidad
+      FROM kpi_inventory.tb_transferencia_bodega_det d JOIN kpi_inventory.tb_transferencia_bodega t ON t.id=d.transferencia_bodega_id
+      WHERE t.orden_compra_id=ANY($1::uuid[]) AND NOT t.is_deleted AND NOT d.is_deleted
+        AND t.recepcion_requerida AND t.estado IN ('PENDIENTE_RECEPCION','PARCIALMENTE_RECIBIDA')
+      GROUP BY d.orden_compra_det_id`,
+      [orderIds],
+    );
+    return new Map<string, number>(
+      rows.map((r: any) => [String(r.id), Number(r.cantidad || 0)]),
+    );
+  }
+
   private async hydrateOrders(rows: OrdenCompra[], includeDetails = false) {
     if (!rows.length) return [];
     const ids = rows.map((item) => item.id);
     const [details, warehouses, transfers] = await Promise.all([
       this.detalleRepo.find({
-        where: ids.map((ordenId) => ({ orden_compra_id: ordenId, is_deleted: false })),
+        where: ids.map((ordenId) => ({
+          orden_compra_id: ordenId,
+          is_deleted: false,
+        })),
         order: { created_at: 'ASC' },
       }),
       this.bodegaRepo.find({
@@ -724,30 +847,45 @@ export class OrdenCompraService {
       ? await this.buildDetailDescriptionMap(null, details)
       : new Map<string, string | null>();
 
-    const detailMap = details.reduce((acc, item) => {
-      const cantidadPreaprobada = this.toNumber(
-        item.cantidad_preaprobada,
-        this.toNumber(item.cantidad, 0),
-      );
-      const cantidadTransferida = this.toNumber(item.cantidad_transferida, 0);
-      const cantidadDisponible = Math.max(
-        0,
-        cantidadPreaprobada - cantidadTransferida,
-      );
-      (acc[item.orden_compra_id] ??= []).push({
-        ...item,
-        descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
-        cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
-        cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
-        cantidad_preaprobada_disponible: this.toFixedText(
-          cantidadDisponible,
-          6,
-        ),
-      });
-      return acc;
-    }, {} as Record<string, any[]>);
+    const comprometido = await this.pendingOrderTransferQuantities(
+      this.dataSource.manager,
+      ids,
+    );
+    const detailMap = details.reduce(
+      (acc, item) => {
+        const cantidadPreaprobada = this.toNumber(
+          item.cantidad_preaprobada,
+          this.toNumber(item.cantidad, 0),
+        );
+        const cantidadTransferida = this.toNumber(item.cantidad_transferida, 0);
+        const cantidadDisponible = Math.max(
+          0,
+          cantidadPreaprobada -
+            cantidadTransferida -
+            (comprometido.get(item.id) || 0),
+        );
+        (acc[item.orden_compra_id] ??= []).push({
+          ...item,
+          descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
+          cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
+          cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
+          cantidad_comprometida_transferencia: this.toFixedText(
+            comprometido.get(item.id) || 0,
+            6,
+          ),
+          cantidad_preaprobada_disponible: this.toFixedText(
+            cantidadDisponible,
+            6,
+          ),
+        });
+        return acc;
+      },
+      {} as Record<string, any[]>,
+    );
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
-    const transferMap = new Map(transfers.map((item) => [item.orden_compra_id, item]));
+    const transferMap = new Map(
+      transfers.map((item) => [item.orden_compra_id, item]),
+    );
 
     return rows.map((item) => {
       const warehouse = item.bodega_destino_id
@@ -763,8 +901,9 @@ export class OrdenCompraService {
           : 'Sin bodega',
         transferencia_id: transfer?.id ?? null,
         transferencia_codigo: transfer?.codigo ?? null,
+        transferencia_estado: transfer?.estado ?? null,
         tiene_transferencia: Boolean(transfer),
-        detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
+        detalles: includeDetails ? (detailMap[item.id] ?? []) : undefined,
       };
     });
   }
@@ -778,7 +917,10 @@ export class OrdenCompraService {
     const ids = rows.map((item) => item.id);
     const [details, warehouses, transfers] = await Promise.all([
       manager.find(OrdenCompraDet, {
-        where: ids.map((ordenId) => ({ orden_compra_id: ordenId, is_deleted: false })),
+        where: ids.map((ordenId) => ({
+          orden_compra_id: ordenId,
+          is_deleted: false,
+        })),
         order: { created_at: 'ASC' },
       }),
       manager.find(Bodega, {
@@ -800,30 +942,45 @@ export class OrdenCompraService {
       ? await this.buildDetailDescriptionMap(manager, details)
       : new Map<string, string | null>();
 
-    const detailMap = details.reduce((acc, item) => {
-      const cantidadPreaprobada = this.toNumber(
-        item.cantidad_preaprobada,
-        this.toNumber(item.cantidad, 0),
-      );
-      const cantidadTransferida = this.toNumber(item.cantidad_transferida, 0);
-      const cantidadDisponible = Math.max(
-        0,
-        cantidadPreaprobada - cantidadTransferida,
-      );
-      (acc[item.orden_compra_id] ??= []).push({
-        ...item,
-        descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
-        cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
-        cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
-        cantidad_preaprobada_disponible: this.toFixedText(
-          cantidadDisponible,
-          6,
-        ),
-      });
-      return acc;
-    }, {} as Record<string, any[]>);
+    const comprometido = await this.pendingOrderTransferQuantities(
+      manager,
+      ids,
+    );
+    const detailMap = details.reduce(
+      (acc, item) => {
+        const cantidadPreaprobada = this.toNumber(
+          item.cantidad_preaprobada,
+          this.toNumber(item.cantidad, 0),
+        );
+        const cantidadTransferida = this.toNumber(item.cantidad_transferida, 0);
+        const cantidadDisponible = Math.max(
+          0,
+          cantidadPreaprobada -
+            cantidadTransferida -
+            (comprometido.get(item.id) || 0),
+        );
+        (acc[item.orden_compra_id] ??= []).push({
+          ...item,
+          descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
+          cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
+          cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
+          cantidad_comprometida_transferencia: this.toFixedText(
+            comprometido.get(item.id) || 0,
+            6,
+          ),
+          cantidad_preaprobada_disponible: this.toFixedText(
+            cantidadDisponible,
+            6,
+          ),
+        });
+        return acc;
+      },
+      {} as Record<string, any[]>,
+    );
     const warehouseMap = new Map(warehouses.map((item) => [item.id, item]));
-    const transferMap = new Map(transfers.map((item) => [item.orden_compra_id, item]));
+    const transferMap = new Map(
+      transfers.map((item) => [item.orden_compra_id, item]),
+    );
 
     return rows.map((item) => {
       const warehouse = item.bodega_destino_id
@@ -839,8 +996,9 @@ export class OrdenCompraService {
           : 'Sin bodega',
         transferencia_id: transfer?.id ?? null,
         transferencia_codigo: transfer?.codigo ?? null,
+        transferencia_estado: transfer?.estado ?? null,
         tiene_transferencia: Boolean(transfer),
-        detalles: includeDetails ? detailMap[item.id] ?? [] : undefined,
+        detalles: includeDetails ? (detailMap[item.id] ?? []) : undefined,
       };
     });
   }
@@ -926,7 +1084,9 @@ export class OrdenCompraService {
     return out;
   }
 
-  private calculateTotals(details: Awaited<ReturnType<typeof this.prepareDetails>>) {
+  private calculateTotals(
+    details: Awaited<ReturnType<typeof this.prepareDetails>>,
+  ) {
     return details.reduce<Totals>(
       (acc, detail) => {
         acc.subtotal += detail.subtotal;
@@ -999,7 +1159,9 @@ export class OrdenCompraService {
   }
 
   private resolveUserName(dto: CreateOrdenCompraDto | UpdateOrdenCompraDto) {
-    return this.toText(dto.updated_by) || this.toText(dto.created_by) || 'SYSTEM';
+    return (
+      this.toText(dto.updated_by) || this.toText(dto.created_by) || 'SYSTEM'
+    );
   }
 
   private toText(value: unknown) {

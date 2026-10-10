@@ -18,6 +18,7 @@ import {
 } from 'typeorm';
 import { CrudService } from '../../common/crud/crud.service';
 import { FifoCostEngine } from '../../common/pricing/fifo-cost.engine';
+import { getPendingTransferStock } from '../../common/utils/transfer-pending-stock.util';
 import { Bodega } from '../entities/bodega.entity';
 import { Kardex } from '../entities/kardex.entity';
 import { MovimientoInventario } from '../entities/movimiento-inventario.entity';
@@ -48,6 +49,18 @@ export class StockBodegaService
     'DONE',
     'COMPLETED',
   ];
+
+  private pendingTransferSql(column = 'cantidad_total') {
+    return `COALESCE((SELECT pendiente.${column}
+      FROM kpi_inventory.v_transferencia_stock_pendiente pendiente
+      WHERE pendiente.producto_id = stock.producto_id AND pendiente.bodega_id = stock.bodega_id), 0)`;
+  }
+
+  private pendingOperationalSql() {
+    return `CASE WHEN COALESCE(stock.stock_nuevo, 0) + COALESCE(stock.stock_usado, 0) > 0
+      THEN ${this.pendingTransferSql('cantidad_nuevo')} + ${this.pendingTransferSql('cantidad_usado')}
+      ELSE ${this.pendingTransferSql('cantidad_critico')} END`;
+  }
 
   constructor(
     @InjectRepository(StockBodega) repository: Repository<StockBodega>,
@@ -103,12 +116,22 @@ export class StockBodegaService
         const stockRepo = manager.getRepository(StockBodega);
         const currentInTx = await stockRepo.findOne({
           where: { id, is_deleted: false },
+          lock: { mode: 'pessimistic_write' },
         });
         if (!currentInTx) {
           throw new NotFoundException(`Registro ${id} no encontrado`);
         }
         const previousSnapshot = stockRepo.create({ ...currentInTx });
-        const merged = stockRepo.merge(currentInTx, preparedPayload);
+        const pending = await getPendingTransferStock(manager, currentInTx.bodega_id, currentInTx.producto_id);
+        if (pending.total > 0 && (
+          (payload.bodega_id && payload.bodega_id !== currentInTx.bodega_id) ||
+          (payload.producto_id && payload.producto_id !== currentInTx.producto_id) || payload.is_deleted === true ||
+          (payload.status && payload.status !== 'ACTIVE')
+        )) throw new ConflictException('El stock está comprometido en transferencias pendientes de recepción.');
+        const merged = stockRepo.merge(currentInTx, this.normalizeStockPayload(payload, currentInTx));
+        if (Number(merged.stock_nuevo) + 0.000001 < pending.nuevo || Number(merged.stock_usado) + 0.000001 < pending.usado || Number(merged.stock_critico) + 0.000001 < pending.critico) {
+          throw new ConflictException('No puedes reducir el stock por debajo del material pendiente de recepción.');
+        }
         const updatedRow = await stockRepo.save(merged);
         await this.createStockAdjustmentArtifacts(manager, {
           previous: previousSnapshot,
@@ -140,7 +163,17 @@ export class StockBodegaService
   }
 
   async remove(id: string, deletedBy?: string) {
-    const removed = await super.remove(id, deletedBy);
+    const removed = await this.dataSource.transaction(async manager => {
+      const row = await manager.findOne(StockBodega, { where: { id, is_deleted: false }, lock: { mode: 'pessimistic_write' } });
+      if (!row) throw new NotFoundException(`Registro ${id} no encontrado`);
+      const pending = await getPendingTransferStock(manager, row.bodega_id, row.producto_id);
+      if (pending.total > 0) throw new ConflictException('El stock está comprometido en transferencias pendientes de recepción.');
+      row.is_deleted = true;
+      row.deleted_at = new Date();
+      row.deleted_by = deletedBy;
+      await manager.save(StockBodega, row);
+      return { message: `Registro ${id} eliminado correctamente` };
+    });
     void this.notifyMaintenanceAlertRecalculation('remove', id);
     return removed;
   }
@@ -230,6 +263,10 @@ export class StockBodegaService
       .addSelect('COALESCE(stock.stock_usado, 0)', 'stock_usado')
       .addSelect('COALESCE(stock.stock_critico, 0)', 'stock_critico')
       .addSelect('COALESCE(stock.es_usado, false)', 'stock_es_usado')
+      .addSelect(this.pendingTransferSql(), 'cantidad_pendiente_transferencia')
+      .addSelect(`GREATEST(COALESCE(stock.stock_nuevo, 0) - ${this.pendingTransferSql('cantidad_nuevo')}, 0)`, 'stock_disponible_nuevo')
+      .addSelect(`GREATEST(COALESCE(stock.stock_usado, 0) - ${this.pendingTransferSql('cantidad_usado')}, 0)`, 'stock_disponible_usado')
+      .addSelect(`GREATEST(COALESCE(stock.stock_critico, 0) - ${this.pendingTransferSql('cantidad_critico')}, 0)`, 'stock_disponible_critico')
       .addSelect(
         'CASE WHEN COALESCE(stock.stock_actual, 0) > 0 THEN 0 ELSE 1 END',
         'stock_priority',
@@ -272,9 +309,11 @@ export class StockBodegaService
         stock_nuevo: Number(row.stock_nuevo ?? 0),
         stock_usado: Number(row.stock_usado ?? 0),
         stock_critico: Number(row.stock_critico ?? 0),
-        // Sin fila de stock no hay nada reservado, asi que lo disponible es lo
-        // que haya. Quien necesite el disponible neto usa el listado de gestion.
-        stock_disponible: stockActual,
+        cantidad_pendiente_transferencia: Number(row.cantidad_pendiente_transferencia ?? 0),
+        stock_disponible_nuevo: Number(row.stock_disponible_nuevo ?? row.stock_nuevo ?? 0),
+        stock_disponible_usado: Number(row.stock_disponible_usado ?? row.stock_usado ?? 0),
+        stock_disponible_critico: Number(row.stock_disponible_critico ?? row.stock_critico ?? 0),
+        stock_disponible: Math.max(stockActual - Number(row.cantidad_pendiente_transferencia ?? 0), 0),
         sin_stock_en_bodega: stockActual <= 0,
       };
     });
@@ -422,8 +461,12 @@ export class StockBodegaService
         'stock_diferencia',
       )
       .addSelect(activeReservationSql, 'cantidad_reservada_activa')
+      .addSelect(this.pendingTransferSql(), 'cantidad_pendiente_transferencia')
+      .addSelect(`GREATEST(COALESCE(stock.stock_nuevo, 0) - ${this.pendingTransferSql('cantidad_nuevo')}, 0)`, 'stock_disponible_nuevo')
+      .addSelect(`GREATEST(COALESCE(stock.stock_usado, 0) - ${this.pendingTransferSql('cantidad_usado')}, 0)`, 'stock_disponible_usado')
+      .addSelect(`GREATEST(COALESCE(stock.stock_critico, 0) - ${this.pendingTransferSql('cantidad_critico')}, 0)`, 'stock_disponible_critico')
       .addSelect(
-        `GREATEST((${operationalStockSql}) - ${activeReservationSql}, 0)`,
+        `GREATEST((${operationalStockSql}) - ${activeReservationSql} - (${this.pendingOperationalSql()}), 0)`,
         'stock_disponible',
       )
       .orderBy('stock.updated_at', 'DESC')
@@ -444,6 +487,10 @@ export class StockBodegaService
       cantidad_reservada_activa: Number(
         raw[index]?.cantidad_reservada_activa ?? 0,
       ),
+      cantidad_pendiente_transferencia: Number(raw[index]?.cantidad_pendiente_transferencia ?? 0),
+      stock_disponible_nuevo: Number(raw[index]?.stock_disponible_nuevo ?? item.stock_nuevo ?? 0),
+      stock_disponible_usado: Number(raw[index]?.stock_disponible_usado ?? item.stock_usado ?? 0),
+      stock_disponible_critico: Number(raw[index]?.stock_disponible_critico ?? item.stock_critico ?? 0),
       stock_disponible: Number(
         raw[index]?.stock_disponible ?? item.stock_actual ?? 0,
       ),

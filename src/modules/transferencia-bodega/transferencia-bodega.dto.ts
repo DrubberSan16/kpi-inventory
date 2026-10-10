@@ -10,12 +10,53 @@ import {
   IsString,
   IsUUID,
   Min,
+  MaxLength,
+  ArrayMinSize,
+  ArrayMaxSize,
   ValidateNested,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 
+export class RecepcionAdjuntoDto {
+  @IsString() @MaxLength(200) nombre: string;
+  @IsString()
+  @IsIn(['application/pdf', 'image/jpeg', 'image/png'])
+  mime_type: string;
+  @IsString() @MaxLength(7000000) contenido_base64: string;
+}
+
+export class RecepcionDetalleDto {
+  @IsUUID() transferencia_detalle_id: string;
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 6 })
+  @Min(0)
+  cantidad_recibida: number;
+  @IsBoolean() llego: boolean;
+  @IsOptional() @IsString() @MaxLength(4000) observacion?: string;
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @ValidateNested({ each: true })
+  @Type(() => RecepcionAdjuntoDto)
+  adjuntos?: RecepcionAdjuntoDto[];
+}
+
+export class CreateRecepcionBodegaDto {
+  @IsUUID() idempotency_key: string;
+  @IsOptional() @IsString() @MaxLength(4000) observacion?: string;
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => RecepcionDetalleDto)
+  detalles: RecepcionDetalleDto[];
+}
+
 export class TransferenciaBodegaDetalleDto {
-  @ApiPropertyOptional({ description: 'orden compra detalle id', format: 'uuid' })
+  @ApiPropertyOptional({
+    description: 'orden compra detalle id',
+    format: 'uuid',
+  })
   @IsOptional()
   @IsUUID()
   orden_compra_det_id?: string;

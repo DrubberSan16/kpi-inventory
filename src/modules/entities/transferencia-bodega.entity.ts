@@ -4,6 +4,11 @@ import { BaseAuditEntity } from '../../common/entities/base-audit.entity';
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_transferencia_bodega' })
 export class TransferenciaBodega extends BaseAuditEntity {
+  @Column({ type: 'boolean', default: false })
+  recepcion_requerida: boolean;
+
+  @Column({ type: 'text', nullable: true })
+  estado_antes_anulacion: string | null;
   @Column({ type: 'varchar', length: 30 })
   @ApiProperty({ description: 'codigo de transferencia' })
   codigo: string;

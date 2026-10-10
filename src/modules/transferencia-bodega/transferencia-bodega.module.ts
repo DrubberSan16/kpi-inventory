@@ -3,6 +3,9 @@ import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   Bodega,
+  RecepcionBodega,
+  RecepcionBodegaDet,
+  RecepcionBodegaAdjunto,
   GuiaRemisionElectronica,
   Kardex,
   MovimientoInventario,
@@ -21,12 +24,15 @@ import { TransferenciaBodegaService } from './transferencia-bodega.service';
   imports: [
     ConfigModule,
     TypeOrmModule.forFeature([
+      RecepcionBodega,
+      RecepcionBodegaDet,
+      RecepcionBodegaAdjunto,
       TransferenciaBodega,
       TransferenciaBodegaDet,
       OrdenCompra,
       OrdenCompraDet,
       Bodega,
-  GuiaRemisionElectronica,
+      GuiaRemisionElectronica,
       Producto,
       StockBodega,
       MovimientoInventario,

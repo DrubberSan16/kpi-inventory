@@ -1,3 +1,4 @@
+import { RecepcionBodega, RecepcionBodegaDet, RecepcionBodegaAdjunto } from './recepcion-bodega.entity';
 import { Bodega } from "./bodega.entity";
 import { Categoria } from "./categoria.entity";
 import { Kardex } from "./kardex.entity";
@@ -22,6 +23,6 @@ import { SriSignatureConfig } from "./sri-signature-config.entity";
 import { GuiaRemisionElectronica } from "./guia-remision-electronica.entity";
 import { MaintenanceEquipo } from "./maintenance-equipo.entity";
 
-export const ENTITIES = [Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, OrdenServicio, OrdenServicioDet, OrdenServicioEquipo, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica, MaintenanceEquipo];
+export const ENTITIES = [RecepcionBodega, RecepcionBodegaDet, RecepcionBodegaAdjunto, Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, OrdenServicio, OrdenServicioDet, OrdenServicioEquipo, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica, MaintenanceEquipo];
 
-export { Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, OrdenServicio, OrdenServicioDet, OrdenServicioEquipo, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica, MaintenanceEquipo };
+export { RecepcionBodega, RecepcionBodegaDet, RecepcionBodegaAdjunto, Bodega, Categoria, Kardex, Linea, Marca, MovimientoInventario, MovimientoInventarioDet, OrdenCompra, OrdenCompraDet, OrdenServicio, OrdenServicioDet, OrdenServicioEquipo, Producto, StockBodega, Sucursal, Tercero, TransferenciaBodega, TransferenciaBodegaDet, UnidadMedida, SriEmissionConfig, SriSignatureConfig, GuiaRemisionElectronica, MaintenanceEquipo };

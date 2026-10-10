@@ -1,4 +1,5 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
@@ -10,7 +11,8 @@ process.env.TZ =
   String(process.env.APP_TIMEZONE || '').trim() || 'America/Guayaquil';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.useBodyParser('json', { limit: '30mb' });
   app.enableCors({ origin: true, credentials: true });
   const config = app.get(ConfigService);
 
@@ -41,13 +43,15 @@ async function bootstrap() {
   // ✅ Swagger SIEMPRE en /<prefix>/docs
   const swaggerPath = globalPrefix ? `${globalPrefix}/docs` : 'docs';
   SwaggerModule.setup(swaggerPath, app, document);
-  app.getHttpAdapter().get(
-    globalPrefix ? `/${globalPrefix}/docs-json` : '/docs-json',
-    (_req, res) => {
-      res.setHeader('Content-Type', 'application/json');
-      res.send(document);
-    },
-  );
+  app
+    .getHttpAdapter()
+    .get(
+      globalPrefix ? `/${globalPrefix}/docs-json` : '/docs-json',
+      (_req, res: any) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.send(document);
+      },
+    );
   app.useGlobalInterceptors(
     new TimezoneInterceptor(),
     new MaterialCostVisibilityInterceptor(),

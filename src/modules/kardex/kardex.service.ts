@@ -42,6 +42,7 @@ import { UnidadMedida } from '../entities/unidad-medida.entity';
 import { OrdenCompra } from '../entities/orden-compra.entity';
 import { TransferenciaBodega } from '../entities/transferencia-bodega.entity';
 import { TransferenciaBodegaDet } from '../entities/transferencia-bodega-det.entity';
+import { getPendingTransferStock } from '../../common/utils/transfer-pending-stock.util';
 
 type MovementType = 'INGRESO' | 'SALIDA';
 
@@ -1496,10 +1497,12 @@ export class KardexService
             bodega.id,
             producto.id,
           );
+          const pendingTransfer = await getPendingTransferStock(manager, bodega.id, producto.id);
           const availableForCondition = this.getAvailableStockByCondition(
             stockRow,
             condition,
             reservedQuantity,
+            pendingTransfer,
           );
           if (availableForCondition + 0.000001 < cantidad) {
             throw new BadRequestException(
@@ -1507,7 +1510,7 @@ export class KardexService
                 2,
               )}, reservado en ordenes de trabajo ${reservedQuantity.toFixed(
                 2,
-              )}, requerido ${cantidad.toFixed(2)}.`,
+              )}, pendiente de recepción ${pendingTransfer.total.toFixed(2)}, requerido ${cantidad.toFixed(2)}.`,
             );
           }
         }
@@ -1703,6 +1706,13 @@ export class KardexService
         });
         if (!stock) throw new BadRequestException('No se encontró el stock a revertir.');
         const delta = movement.tipo_movimiento === 'INGRESO' ? -quantity : quantity;
+        if (delta < 0) {
+          await this.assertTransferStockFloor(manager, stock, {
+            nuevo: this.getStockNuevoAmount(stock) - (condition === 'NUEVO' ? quantity : 0),
+            usado: this.getStockUsadoAmount(stock) - (condition === 'USADO' ? quantity : 0),
+            critico: this.getStockCriticoAmount(stock) - (condition === 'CRITICO' ? quantity : 0),
+          });
+        }
         const total = this.applyStockDeltaByCondition(stock, delta, condition);
         stock.stock_fisico = this.toFixedText(this.toNumber(stock.stock_fisico, total - delta) + delta, 6);
         stock.updated_by = annulledBy;
@@ -1753,16 +1763,22 @@ export class KardexService
             FROM kpi_inventory.tb_transferencia_bodega transferencia
             WHERE transferencia.movimiento_salida_id = $1
                OR transferencia.movimiento_ingreso_id = $1
-               OR UPPER(TRIM(COALESCE(transferencia.codigo, '')))
-                  = UPPER(TRIM(COALESCE($2, '')))
+               OR (
+                 NULLIF(TRIM(COALESCE($2, '')), '') IS NOT NULL
+                 AND UPPER(TRIM(COALESCE(transferencia.codigo, '')))
+                     = UPPER(TRIM(COALESCE($2, '')))
+               )
           ) AS es_transferencia,
           EXISTS (
             SELECT 1
             FROM kpi_inventory.tb_orden_compra orden_compra
-            WHERE UPPER(TRIM(COALESCE(orden_compra.codigo, '')))
-                    = UPPER(TRIM(COALESCE($2, '')))
-               OR UPPER(TRIM(COALESCE(orden_compra.referencia, '')))
-                    = UPPER(TRIM(COALESCE($2, '')))
+            WHERE NULLIF(TRIM(COALESCE($2, '')), '') IS NOT NULL
+              AND (
+                UPPER(TRIM(COALESCE(orden_compra.codigo, '')))
+                  = UPPER(TRIM(COALESCE($2, '')))
+                OR UPPER(TRIM(COALESCE(orden_compra.referencia, '')))
+                  = UPPER(TRIM(COALESCE($2, '')))
+              )
           ) AS es_compra
       `,
       [movement.id, movement.referencia ?? ''],
@@ -3937,10 +3953,13 @@ export class KardexService
     stockRow: StockBodega,
     condition: 'NUEVO' | 'USADO' | 'CRITICO',
     reservedQuantity: number,
+    pendingTransfer = { nuevo: 0, usado: 0, critico: 0, total: 0 },
   ) {
+    const pendingOperational = this.getStockNuevoAmount(stockRow) + this.getStockUsadoAmount(stockRow) > 0.000001
+      ? pendingTransfer.nuevo + pendingTransfer.usado : pendingTransfer.critico;
     const totalAvailable = Math.max(
       this.getOperationalStockAmount(stockRow) -
-        Math.max(this.toNumber(reservedQuantity, 0), 0),
+        Math.max(this.toNumber(reservedQuantity, 0), 0) - pendingOperational,
       0,
     );
     const conditionStock =
@@ -3949,7 +3968,20 @@ export class KardexService
         : condition === 'CRITICO'
           ? this.getStockCriticoAmount(stockRow)
           : this.getStockNuevoAmount(stockRow);
-    return Math.max(Math.min(conditionStock, totalAvailable), 0);
+    const conditionPending = condition === 'USADO' ? pendingTransfer.usado
+      : condition === 'CRITICO' ? pendingTransfer.critico : pendingTransfer.nuevo;
+    return Math.max(Math.min(conditionStock - conditionPending, totalAvailable), 0);
+  }
+
+  private async assertTransferStockFloor(
+    manager: EntityManager,
+    stock: StockBodega,
+    target: { nuevo: number; usado: number; critico: number },
+  ) {
+    const pending = await getPendingTransferStock(manager, stock.bodega_id, stock.producto_id);
+    if (target.nuevo + 0.000001 < pending.nuevo || target.usado + 0.000001 < pending.usado || target.critico + 0.000001 < pending.critico) {
+      throw new BadRequestException('El ajuste o anulación consumiría material pendiente de recepción en una transferencia. Resuelve primero la transferencia.');
+    }
   }
 
   private applyUsedStockDelta(stockRow: StockBodega, delta: number) {
@@ -4351,6 +4383,7 @@ export class KardexService
       const stockUsadoAnterior = this.toNumber(stockRow.stock_usado, 0);
       const stockCriticoAnterior = this.getStockCriticoAmount(stockRow);
       const delta = stockObjetivo - stockAnterior;
+      await this.assertTransferStockFloor(manager, stockRow, { nuevo: stockObjetivo, usado: 0, critico: 0 });
       this.applyInventoryImportStockTarget(stockRow, {
         stockActual: stockObjetivo,
         stockNuevo: stockObjetivo,
@@ -4812,6 +4845,7 @@ export class KardexService
       const deltaNuevo = stockNuevoObjetivo - stockNuevoAnterior;
       const deltaUsado = stockUsadoObjetivo - stockUsadoAnterior;
       const deltaCritico = stockCriticoObjetivo - stockCriticoAnterior;
+      await this.assertTransferStockFloor(manager, stockRow, { nuevo: stockNuevoObjetivo, usado: stockUsadoObjetivo, critico: stockCriticoObjetivo });
       const stockTotal = this.applyInventoryImportStockTarget(stockRow, {
         stockActual: stockObjetivo,
         stockNuevo: stockNuevoObjetivo,

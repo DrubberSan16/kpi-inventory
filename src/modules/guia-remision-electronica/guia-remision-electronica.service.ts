@@ -1684,6 +1684,8 @@ export class GuiaRemisionElectronicaService
     }
     const transferStatus = String(transfer.estado || '').toUpperCase();
     const eligibleStates = new Set([
+      'PENDIENTE_RECEPCION',
+      'PARCIALMENTE_RECIBIDA',
       'COMPLETADA',
       'COMPLETADO',
       'FINALIZADA',
@@ -1693,7 +1695,7 @@ export class GuiaRemisionElectronicaService
     ]);
     if (!eligibleStates.has(transferStatus)) {
       throw new BadRequestException(
-        'La guía de remisión solo puede generarse cuando la transferencia esté aprobada, completada o finalizada.',
+        'La guía de remisión solo puede generarse para una transferencia vigente, pendiente de recepción, parcial o completada.',
       );
     }
     const [sourceWarehouse, destinationWarehouse, details, purchaseOrder] =
