@@ -5,19 +5,20 @@ const APP_TIME_ZONE =
 const ZONED_DATE_TIME_PATTERN =
   /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i;
 
+// Un solo formateador: construirlo en cada llamada cuesta unos 0,2 ms.
+const LOCAL_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: APP_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
 function formatLocalTimestamp(date: Date): string {
-  return new Intl.DateTimeFormat('sv-SE', {
-    timeZone: APP_TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  })
-    .format(date)
-    .replace(' ', 'T');
+  return LOCAL_TIMESTAMP_FORMATTER.format(date).replace(' ', 'T');
 }
 
 function normalizeTimestampValue(value: unknown): unknown {
