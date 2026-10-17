@@ -16,7 +16,7 @@ export class SucursalService extends CrudService<Sucursal> {
   async findAllScoped(page = 1, limit = 10, search?: string, sucursalId?: string | null) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
-      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 1000) : 10;
     const normalizedSearch = String(search ?? '').trim();
 
     const qb = this.repository

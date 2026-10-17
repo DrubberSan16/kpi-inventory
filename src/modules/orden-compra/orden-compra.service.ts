@@ -175,7 +175,7 @@ export class OrdenCompraService {
     includeAnnulled = false,
   ) {
     const page = Number(query.page || 1);
-    const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
+    const limit = Math.min(1000, Math.max(1, Number(query.limit || 10)));
     const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
     if (warehouseIds && !warehouseIds.length) {
       return {

@@ -203,7 +203,7 @@ export class StockBodegaService
         : 1;
     const limit =
       Number.isFinite(Number(query.limit)) && Number(query.limit) > 0
-        ? Math.min(Number(query.limit), 100)
+        ? Math.min(Number(query.limit), 1000)
         : 20;
     const search = String(query.search || '').trim();
     const warehouseId = String(query.bodega_id || '').trim();
@@ -334,7 +334,7 @@ export class StockBodegaService
       ? Number(query.page)
       : 1;
     const limit = Number.isFinite(Number(query.limit)) && Number(query.limit) > 0
-      ? Math.min(Number(query.limit), 100)
+      ? Math.min(Number(query.limit), 1000)
       : 20;
     const search = String(query.search || '').trim();
     const warehouseId = String(query.bodega_id || '').trim();

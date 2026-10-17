@@ -455,7 +455,7 @@ export class KardexService
   ) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
-      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 1000) : 10;
     const normalizedSearch = String(search ?? '').trim();
 
     const qb = this.repository
@@ -554,7 +554,7 @@ export class KardexService
         : 1;
     const safeLimit =
       Number.isFinite(Number(params?.limit)) && Number(params?.limit) > 0
-        ? Math.min(Number(params?.limit), 100)
+        ? Math.min(Number(params?.limit), 1000)
         : 10;
 
     const baseQb = this.repository
@@ -1128,7 +1128,7 @@ export class KardexService
   ) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
-      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 1000) : 10;
     const normalizedSearch = this.toText(search);
     const normalizedType = this.normalizeMovementType(tipoMovimiento);
     const fromDate = this.parseDateBoundary(filters?.desde, 'start');

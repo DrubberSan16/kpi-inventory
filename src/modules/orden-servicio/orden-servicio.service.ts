@@ -152,7 +152,7 @@ export class OrdenServicioService implements OnModuleInit {
 
   async findAll(query: OrdenServicioQueryDto, includeAnnulled = false) {
     const page = Number(query.page || 1);
-    const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
+    const limit = Math.min(1000, Math.max(1, Number(query.limit || 10)));
     const qb = this.ordenRepo
       .createQueryBuilder('orden')
       .where('orden.is_deleted = false');

@@ -33,7 +33,7 @@ export class BodegaService extends CrudService<Bodega> {
   ) {
     const safePage = Number.isFinite(+page) && +page > 0 ? +page : 1;
     const safeLimit =
-      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 100) : 10;
+      Number.isFinite(+limit) && +limit > 0 ? Math.min(+limit, 1000) : 10;
     const normalizedSearch = String(search ?? '').trim();
 
     const qb = this.repository

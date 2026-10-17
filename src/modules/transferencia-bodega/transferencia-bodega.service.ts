@@ -370,7 +370,7 @@ export class TransferenciaBodegaService {
         hasta: query.hasta,
       });
     const page = Math.max(1, Number(query.page || 1));
-    const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
+    const limit = Math.min(1000, Math.max(1, Number(query.limit || 10)));
     const [rows, total] = await qb
       .orderBy('t.created_at', 'DESC')
       .skip((page - 1) * limit)
@@ -1293,7 +1293,7 @@ export class TransferenciaBodegaService {
     includeAnnulled = false,
   ) {
     const page = Number(query.page || 1);
-    const limit = Math.min(100, Math.max(1, Number(query.limit || 10)));
+    const limit = Math.min(1000, Math.max(1, Number(query.limit || 10)));
     const search = this.toText(query.search);
     const warehouseIds = await this.getWarehouseIdsBySucursal(sucursalId);
 
