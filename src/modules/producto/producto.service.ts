@@ -173,6 +173,13 @@ export class ProductoService
   }
 
   private async ensureOilSchemaAndDefaults() {
+    const [columna] = await this.dataSource.query(`
+      SELECT 1 AS existe
+      FROM information_schema.columns
+      WHERE table_schema = 'kpi_inventory'
+        AND table_name = 'tb_producto'
+        AND column_name = 'es_aceite'
+    `);
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_inventory.tb_producto
       ADD COLUMN IF NOT EXISTS es_aceite boolean NOT NULL DEFAULT false
@@ -182,13 +189,18 @@ export class ProductoService
       ON kpi_inventory.tb_producto (es_aceite)
       WHERE is_deleted = false
     `);
-    await this.dataSource.query(`
-      UPDATE kpi_inventory.tb_producto
-      SET es_aceite = true
-      WHERE is_deleted = false
-        AND COALESCE(es_aceite, false) = false
-        AND UPPER(COALESCE(nombre, '')) LIKE '%ACEITE%'
-    `);
+    // El marcado por nombre solo siembra la columna recién creada: repetirlo en
+    // cada arranque deshacía las correcciones del catálogo ("FILTRO DE ACEITE"
+    // no es aceite) y volvía a meter esos materiales en los reportes de aceite.
+    if (!columna) {
+      await this.dataSource.query(`
+        UPDATE kpi_inventory.tb_producto
+        SET es_aceite = true
+        WHERE is_deleted = false
+          AND COALESCE(es_aceite, false) = false
+          AND UPPER(COALESCE(nombre, '')) LIKE '%ACEITE%'
+      `);
+    }
     await this.ensureGallonsUnit(this.unidadRepository.manager);
   }
 
