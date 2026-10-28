@@ -9,9 +9,12 @@ import {
   RecepcionBodega,
   RecepcionBodegaDet,
   MovimientoInventario,
+  MovimientoInventarioDet,
   Kardex,
   Bodega,
   Producto,
+  OrdenCompra,
+  OrdenCompraDet,
 } from '../entities';
 
 const actor = {
@@ -423,6 +426,116 @@ describe('Recepción de transferencia: aprobación y trazabilidad', () => {
     expect(f.source.stock_actual).toBe('7.000000');
     expect(f.destination.stock_actual).toBe('3.000000');
     expect(f.transfer.estado).toBe('PARCIALMENTE_RECIBIDA');
+  });
+
+  // Caso real: JCTI-OC000109 ingresó 1 a la bodega de compras con TB-00000322,
+  // la transferencia se anuló antes de recibirse y otra orden ingresó 1 más que
+  // ya está comprometida en una transferencia pendiente.
+  function orderReceiptFixture() {
+    const f = fixture();
+    const receiptId = randomUUID();
+    Object.assign(f.transfer, {
+      orden_compra_id: 'order',
+      estado: 'ANULADA',
+      movimiento_recepcion_id: receiptId,
+    });
+    Object.assign(f.source, {
+      stock_actual: '2',
+      stock_nuevo: '2',
+      stock_fisico: '2',
+    });
+    const receipt = {
+      id: receiptId,
+      estado: 'CONFIRMADO',
+      bodega_destino_id: f.transfer.bodega_origen_id,
+      is_deleted: false,
+    };
+    const kardex = { movimiento_id: receiptId, is_deleted: false };
+    const orderLine = {
+      id: randomUUID(),
+      orden_compra_id: 'order',
+      producto_id: f.detail.producto_id,
+      cantidad_recibida: '1.000000',
+      is_deleted: false,
+    };
+    f.rows.set(MovimientoInventario, [receipt]);
+    f.rows.set(MovimientoInventarioDet, [
+      {
+        movimiento_id: receiptId,
+        producto_id: f.detail.producto_id,
+        cantidad: '1.000000',
+        costo_unitario: '1143.7000',
+        is_deleted: false,
+      },
+    ]);
+    f.rows.set(Kardex, [kardex]);
+    f.rows.set(OrdenCompraDet, [orderLine]);
+    f.manager.query.mockImplementation(async (sql: string) =>
+      sql.includes('tb_reserva_stock')
+        ? [{ cantidad: 0 }]
+        : [{ nuevo: 1, usado: 0, critico: 0, total: 1 }],
+    );
+    return { ...f, receipt, kardex, orderLine };
+  }
+
+  it('anular la orden retira el ingreso que dejó su transferencia anulada sin tocar lo comprometido', async () => {
+    const f = orderReceiptFixture();
+    const changed = new Set<string>();
+    const decreased = new Set<string>();
+    await f.service.annulOrderReceiptsOfAnnulledTransfers(
+      f.manager,
+      'order',
+      'super',
+      changed,
+      decreased,
+    );
+    expect(f.source.stock_actual).toBe('1.000000');
+    expect(f.source.stock_nuevo).toBe('1.000000');
+    expect(f.source.stock_fisico).toBe('1.000000');
+    expect(f.receipt).toMatchObject({ estado: 'ANULADO', is_deleted: true });
+    expect(f.kardex).toMatchObject({ status: 'INACTIVE', is_deleted: true });
+    expect(f.orderLine.cantidad_recibida).toBe('0.000000');
+    expect([...decreased]).toEqual([f.source.id]);
+    expect(fifo).toHaveBeenCalledWith(f.manager);
+  });
+
+  it('no retira el ingreso de la orden si ese material ya está comprometido', async () => {
+    const f = orderReceiptFixture();
+    f.manager.query.mockImplementation(async (sql: string) =>
+      sql.includes('tb_reserva_stock')
+        ? [{ cantidad: 0 }]
+        : [{ nuevo: 2, usado: 0, critico: 0, total: 2 }],
+    );
+    await expect(
+      f.service.annulOrderReceiptsOfAnnulledTransfers(f.manager, 'order', 'x'),
+    ).rejects.toThrow('La orden no se puede anular');
+    expect(f.source.stock_actual).toBe('2');
+    expect(f.receipt.estado).toBe('CONFIRMADO');
+    expect(f.orderLine.cantidad_recibida).toBe('1.000000');
+  });
+
+  it('no toca el ingreso de una transferencia que sigue vigente', async () => {
+    const f = orderReceiptFixture();
+    f.transfer.estado = 'PENDIENTE_RECEPCION';
+    await f.service.annulOrderReceiptsOfAnnulledTransfers(
+      f.manager,
+      'order',
+      'x',
+    );
+    expect(f.source.stock_actual).toBe('2');
+    expect(f.receipt.estado).toBe('CONFIRMADO');
+    expect(f.manager.update).not.toHaveBeenCalled();
+  });
+
+  it('no reversa la anulación de una transferencia cuya orden ya se anuló', async () => {
+    const f = orderReceiptFixture();
+    f.service.queueTransactionLog = jest.fn();
+    f.rows.set(OrdenCompra, [{ id: 'order', estado: 'ANULADA' }]);
+    await expect(
+      f.service.reverseAnnulment(f.transfer.id, actor),
+    ).rejects.toThrow('orden de compra de esta transferencia esta anulada');
+    expect(f.transfer.estado).toBe('ANULADA');
+    expect(f.source.stock_actual).toBe('2');
   });
 
   it('Gerente General sin edición solo consulta y no puede aprobar', async () => {

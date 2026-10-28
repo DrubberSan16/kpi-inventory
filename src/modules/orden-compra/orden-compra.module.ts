@@ -8,11 +8,13 @@ import {
   Tercero,
   TransferenciaBodega,
 } from '../entities';
+import { TransferenciaBodegaModule } from '../transferencia-bodega/transferencia-bodega.module';
 import { OrdenCompraController } from './orden-compra.controller';
 import { OrdenCompraService } from './orden-compra.service';
 
 @Module({
   imports: [
+    TransferenciaBodegaModule,
     TypeOrmModule.forFeature([
       OrdenCompra,
       OrdenCompraDet,

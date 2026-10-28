@@ -2485,6 +2485,167 @@ export class TransferenciaBodegaService {
     return rows[0]?.id ?? null;
   }
 
+  /**
+   * Anula, junto con la orden de compra, los ingresos con que la orden llego a
+   * la bodega de compras y que siguieron vigentes al anular su transferencia.
+   *
+   * Con la recepcion en destino, anular una transferencia solo deshace lo que
+   * se recibio alla: el ingreso de la compra se queda para que la orden se
+   * pueda transferir de nuevo sin ingresarla otra vez. Si lo que se anula es la
+   * orden, ese ingreso se queda sin compra que lo respalde y la bodega de
+   * compras mostraria material que nunca llego.
+   *
+   * Se detiene si ese material ya no esta libre en la bodega (se uso, esta
+   * reservado para una OT o comprometido en otra transferencia): retirarlo
+   * dejaria a esos documentos sin existencia.
+   */
+  async annulOrderReceiptsOfAnnulledTransfers(
+    manager: EntityManager,
+    orderId: string,
+    user: string,
+    changed?: Set<string>,
+    decreased?: Set<string>,
+  ) {
+    const transfers = await manager.find(TransferenciaBodega, {
+      where: { orden_compra_id: orderId },
+    });
+    const receipts = new Map<string, MovimientoInventario>();
+    for (const transfer of transfers) {
+      if (!isAnnulledState(transfer.estado)) continue;
+      const movementId = await this.resolveTransferReceiptMovementId(
+        manager,
+        transfer,
+      );
+      if (!movementId || receipts.has(movementId)) continue;
+      const movement = await manager.findOne(MovimientoInventario, {
+        where: { id: movementId, is_deleted: false },
+      });
+      if (movement && !isAnnulledState(movement.estado)) {
+        receipts.set(movementId, movement);
+      }
+    }
+    if (!receipts.size) return;
+
+    const byStock = new Map<
+      string,
+      { bodegaId: string; productoId: string; cantidad: number; costo: number }
+    >();
+    for (const receipt of receipts.values()) {
+      const rows = await manager.find(MovimientoInventarioDet, {
+        where: { movimiento_id: receipt.id, is_deleted: false },
+      });
+      for (const row of rows) {
+        const key = `${receipt.bodega_destino_id}:${row.producto_id}`;
+        const current = byStock.get(key) ?? {
+          bodegaId: String(receipt.bodega_destino_id),
+          productoId: String(row.producto_id),
+          cantidad: 0,
+          costo: this.toNumber(row.costo_unitario, 0),
+        };
+        current.cantidad += this.toNumber(row.cantidad, 0);
+        byStock.set(key, current);
+      }
+    }
+
+    const removedByProduct = new Map<string, number>();
+    for (const key of [...byStock.keys()].sort()) {
+      const item = byStock.get(key)!;
+      if (item.cantidad <= 0.000001) continue;
+      const stock = await this.getOrCreateStockRow(manager, {
+        bodegaId: item.bodegaId,
+        productoId: item.productoId,
+        costoPromedio: item.costo,
+        userName: user,
+      });
+      // El ingreso de una compra siempre entra NUEVO; lo libre es lo mismo que
+      // podria salir en una transferencia nueva desde esa bodega.
+      const committed = await getPendingTransferStock(
+        manager,
+        item.bodegaId,
+        item.productoId,
+      );
+      const reserved = await this.getActiveReservedQuantity(
+        manager,
+        item.bodegaId,
+        item.productoId,
+      );
+      const available = Math.min(
+        this.getTransferableStockByCondition(
+          stock,
+          'NUEVO',
+          reserved + this.getOperationalCommitment(committed, 'NUEVO'),
+        ),
+        this.getTransferableStockByCondition(stock, 'NUEVO', 0) -
+          committed.nuevo,
+      );
+      if (available + 0.000001 < item.cantidad) {
+        const product = await manager.findOne(Producto, {
+          where: { id: item.productoId },
+        });
+        throw new BadRequestException(
+          `La orden no se puede anular: ${product?.nombre || 'un material'} ingreso con ella a la bodega de compras (${item.cantidad.toFixed(2)}) y solo quedan ${Math.max(0, available).toFixed(2)} libres; el resto ya se uso, esta reservado para una OT o comprometido en otra transferencia.`,
+        );
+      }
+      this.applyStockDeltaByCondition(stock, -item.cantidad, 'NUEVO');
+      stock.stock_fisico = this.toFixedText(
+        this.toNumber(stock.stock_fisico) - item.cantidad,
+        6,
+      );
+      stock.updated_by = user;
+      await manager.save(StockBodega, stock);
+      changed?.add(stock.id);
+      decreased?.add(stock.id);
+      removedByProduct.set(
+        item.productoId,
+        (removedByProduct.get(item.productoId) ?? 0) + item.cantidad,
+      );
+    }
+
+    const lines = await manager.find(OrdenCompraDet, {
+      where: { orden_compra_id: orderId, is_deleted: false },
+      order: { created_at: 'ASC' },
+    });
+    for (const line of lines) {
+      const productId = String(line.producto_id);
+      const removed = removedByProduct.get(productId) ?? 0;
+      const received = this.toNumber(line.cantidad_recibida, 0);
+      if (removed <= 0.000001 || received <= 0.000001) continue;
+      const taken = Math.min(received, removed);
+      line.cantidad_recibida = this.toFixedText(received - taken, 6);
+      line.updated_by = user;
+      await manager.save(OrdenCompraDet, line);
+      removedByProduct.set(productId, removed - taken);
+    }
+
+    const annulledAt = new Date();
+    for (const receiptId of receipts.keys()) {
+      await manager.update(
+        MovimientoInventario,
+        { id: receiptId },
+        {
+          estado: 'ANULADO',
+          status: 'INACTIVE',
+          is_deleted: true,
+          deleted_at: annulledAt,
+          deleted_by: user,
+          updated_by: user,
+        },
+      );
+      await manager.update(
+        Kardex,
+        { movimiento_id: receiptId },
+        {
+          status: 'INACTIVE',
+          is_deleted: true,
+          deleted_at: annulledAt,
+          deleted_by: user,
+          updated_by: user,
+        },
+      );
+    }
+    await FifoCostEngine.syncPending(manager);
+  }
+
   private assertCanReverseAnnulment(actor?: DocumentAnnulmentActor | null) {
     if (this.isSuperAdministratorRoleName(actor?.roleName || undefined)) return;
     throw new ForbiddenException(
@@ -2558,6 +2719,19 @@ export class TransferenciaBodegaService {
           throw new BadRequestException(
             'La transferencia no esta anulada, no hay nada que reversar.',
           );
+        }
+        // Anular la orden se llevo el ingreso de la compra: la transferencia ya
+        // no tiene material que mover, y reactivarla devolveria la orden a
+        // EMITIDA.
+        if (transfer.orden_compra_id) {
+          const order = await manager.findOne(OrdenCompra, {
+            where: { id: transfer.orden_compra_id },
+          });
+          if (order && isAnnulledState(order.estado)) {
+            throw new BadRequestException(
+              'La orden de compra de esta transferencia esta anulada; no se puede reversar la anulacion de la transferencia.',
+            );
+          }
         }
 
         const details = await manager.find(TransferenciaBodegaDet, {
@@ -3769,7 +3943,7 @@ export class TransferenciaBodegaService {
     }
   }
 
-  private async notifyMaintenanceRecalculationForStocks(
+  async notifyMaintenanceRecalculationForStocks(
     stockIds: Iterable<string>,
     source: string,
     context?: {

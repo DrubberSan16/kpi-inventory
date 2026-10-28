@@ -30,6 +30,7 @@ import {
   UpdateOrdenCompraDto,
 } from './orden-compra.dto';
 import { TransferenciaBodega } from '../entities/transferencia-bodega.entity';
+import { TransferenciaBodegaService } from '../transferencia-bodega/transferencia-bodega.service';
 import { isAdministrativeManagementRoleName } from '../../common/utils/administrative-role.util';
 import { parseLocalDateInput } from '../../common/utils/local-date.util';
 import { buildAnnulmentInfo } from '../../common/http/annulled-records.util';
@@ -65,6 +66,7 @@ export class OrdenCompraService {
     private readonly bodegaRepo: Repository<Bodega>,
     @InjectRepository(TransferenciaBodega)
     private readonly transferenciaRepo: Repository<TransferenciaBodega>,
+    private readonly transferenciaService: TransferenciaBodegaService,
     private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
@@ -456,6 +458,8 @@ export class OrdenCompraService {
     this.assertCanAnnul(actor);
     const annulledBy = this.resolveAnnulmentActorName(actor);
     const traceId = randomUUID();
+    const changedStockIds = new Set<string>();
+    const decreasedStockIds = new Set<string>();
     this.queueTransactionLog({
       traceId,
       typeLog: 'PURCHASE_ORDER_FLOW',
@@ -504,17 +508,27 @@ export class OrdenCompraService {
           );
         }
 
-        const receivedDetails = await manager.find(OrdenCompraDet, {
-          where: { orden_compra_id: id, is_deleted: false },
-        });
-        if (
-          receivedDetails.some(
-            (item) => this.toNumber(item.cantidad_recibida, 0) > 0.000001,
-          )
-        ) {
-          throw new BadRequestException(
-            'La orden tiene un ingreso de compra registrado en bodega y no se puede anular desde compras. Conserva el ingreso y su trazabilidad de inventario.',
+        const hasReceipt = async () =>
+          (
+            await manager.find(OrdenCompraDet, {
+              where: { orden_compra_id: id, is_deleted: false },
+            })
+          ).some((item) => this.toNumber(item.cantidad_recibida, 0) > 0.000001);
+        if (await hasReceipt()) {
+          // Sin transferencia activa, lo recibido es el ingreso que dejo en la
+          // bodega de compras una transferencia ya anulada: se va con la orden.
+          await this.transferenciaService.annulOrderReceiptsOfAnnulledTransfers(
+            manager,
+            id,
+            annulledBy,
+            changedStockIds,
+            decreasedStockIds,
           );
+          if (await hasReceipt()) {
+            throw new BadRequestException(
+              'La orden tiene un ingreso de compra en bodega que no salio de una transferencia anulada y no se puede anular desde compras.',
+            );
+          }
         }
         current.estado = 'ANULADA';
         current.updated_by = annulledBy;
@@ -532,6 +546,13 @@ export class OrdenCompraService {
         createdBy: annulledBy,
         description: `Orden de compra ${id} anulada correctamente.`,
       });
+      if (changedStockIds.size) {
+        await this.transferenciaService.notifyMaintenanceRecalculationForStocks(
+          changedStockIds,
+          'purchase-order-annulment',
+          { decreasedStockIds, actorUsername: annulledBy },
+        );
+      }
       return result;
     } catch (error: any) {
       this.queueTransactionLog({
