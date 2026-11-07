@@ -18,6 +18,7 @@ import {
 } from 'typeorm';
 import {
   Bodega,
+  Categoria,
   OrdenCompra,
   OrdenCompraDet,
   Producto,
@@ -838,6 +839,45 @@ export class OrdenCompraService {
     );
   }
 
+  private async buildDetailCategoryMap(details: OrdenCompraDet[]) {
+    const productIds = [
+      ...new Set(details.map((item) => item.producto_id).filter(Boolean)),
+    ];
+    if (!productIds.length)
+      return new Map<
+        string,
+        { categoria_id: string | null; categoria_nombre: string }
+      >();
+    const products = await this.productoRepo.find({
+      where: { id: In(productIds), is_deleted: false },
+      select: { id: true, categoria_id: true },
+    });
+    const categoryIds = [
+      ...new Set(
+        products
+          .map((item) => item.categoria_id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const categories = categoryIds.length
+      ? await this.dataSource.getRepository(Categoria).find({
+          where: { id: In(categoryIds), is_deleted: false },
+          select: { id: true, nombre: true },
+        })
+      : [];
+    const names = new Map(categories.map((item) => [item.id, item.nombre]));
+    return new Map(
+      products.map((item) => [
+        item.id,
+        {
+          categoria_id: item.categoria_id ?? null,
+          categoria_nombre:
+            names.get(item.categoria_id || '') || 'Sin categoría',
+        },
+      ]),
+    );
+  }
+
   private async hydrateOrders(rows: OrdenCompra[], includeDetails = false) {
     if (!rows.length) return [];
     const ids = rows.map((item) => item.id);
@@ -868,14 +908,14 @@ export class OrdenCompraService {
       ? await this.buildDetailDescriptionMap(null, details)
       : new Map<string, string | null>();
 
-    const classifications: Array<{ id: string; producto_codigo: string; producto_nombre: string; categoria_id: string | null; categoria_nombre: string }> = includeDetails && details.length
-      ? await this.dataSource.query(`SELECT p.id, p.codigo AS producto_codigo, p.nombre AS producto_nombre,
-          p.categoria_id, COALESCE(c.nombre, 'Sin categoría') AS categoria_nombre
-        FROM kpi_inventory.tb_producto p
-        LEFT JOIN kpi_inventory.tb_categoria c ON c.id = p.categoria_id
-        WHERE p.id = ANY($1::uuid[])`, [[...new Set(details.map(item => item.producto_id))]])
-      : [];
-    const categoryMap = new Map(classifications.map(({ id, ...fields }) => [id, fields]));
+    // Clasificación actual del catálogo; las cantidades e importes conservan
+    // la fotografía de la línea original de la orden.
+    const categoryMap = includeDetails
+      ? await this.buildDetailCategoryMap(details)
+      : new Map<
+          string,
+          { categoria_id: string | null; categoria_nombre: string }
+        >();
 
     const comprometido = await this.pendingOrderTransferQuantities(
       this.dataSource.manager,
@@ -897,7 +937,7 @@ export class OrdenCompraService {
         (acc[item.orden_compra_id] ??= []).push({
           ...item,
           descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
-          ...(categoryMap.get(item.producto_id) || {}),
+          ...categoryMap.get(item.producto_id),
           cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
           cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
           cantidad_comprometida_transferencia: this.toFixedText(
