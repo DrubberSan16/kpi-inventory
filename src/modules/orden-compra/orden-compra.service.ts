@@ -249,7 +249,7 @@ export class OrdenCompraService {
       .take(limit)
       .getManyAndCount();
     return {
-      data: await this.hydrateOrders(rows),
+      data: await this.hydrateOrders(rows, query.include_details === 'true'),
       pagination: {
         page,
         limit,
@@ -868,6 +868,15 @@ export class OrdenCompraService {
       ? await this.buildDetailDescriptionMap(null, details)
       : new Map<string, string | null>();
 
+    const classifications: Array<{ id: string; producto_codigo: string; producto_nombre: string; categoria_id: string | null; categoria_nombre: string }> = includeDetails && details.length
+      ? await this.dataSource.query(`SELECT p.id, p.codigo AS producto_codigo, p.nombre AS producto_nombre,
+          p.categoria_id, COALESCE(c.nombre, 'Sin categoría') AS categoria_nombre
+        FROM kpi_inventory.tb_producto p
+        LEFT JOIN kpi_inventory.tb_categoria c ON c.id = p.categoria_id
+        WHERE p.id = ANY($1::uuid[])`, [[...new Set(details.map(item => item.producto_id))]])
+      : [];
+    const categoryMap = new Map(classifications.map(({ id, ...fields }) => [id, fields]));
+
     const comprometido = await this.pendingOrderTransferQuantities(
       this.dataSource.manager,
       ids,
@@ -888,6 +897,7 @@ export class OrdenCompraService {
         (acc[item.orden_compra_id] ??= []).push({
           ...item,
           descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
+          ...(categoryMap.get(item.producto_id) || {}),
           cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
           cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
           cantidad_comprometida_transferencia: this.toFixedText(

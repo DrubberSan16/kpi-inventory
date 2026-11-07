@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsIn,
   IsDateString,
   IsNumber,
   IsOptional,
@@ -135,6 +136,11 @@ export class CreateOrdenCompraDto {
 export class UpdateOrdenCompraDto extends CreateOrdenCompraDto {}
 
 export class OrdenCompraQueryDto extends PaginationQueryDto {
+  @ApiPropertyOptional({ description: 'Incluir artículos y categorías para el reporte de compras', enum: ['true', 'false'] })
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  include_details?: string;
+
   @ApiPropertyOptional({ description: 'estado de la orden' })
   @IsOptional()
   @IsString()
