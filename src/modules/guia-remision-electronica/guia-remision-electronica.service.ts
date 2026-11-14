@@ -1050,6 +1050,11 @@ export class GuiaRemisionElectronicaService
     roleName?: string,
   ) {
     return this.dataSource.transaction(async (manager) => {
+      // Serializa la lectura del detalle con la edicion de la TB. Una guia
+      // nunca puede generarse con un detalle que cambie antes del commit.
+      await manager.query(
+        "SELECT pg_advisory_xact_lock(hashtext('warehouse-transfer-flow'))",
+      );
       const context = await this.loadGuideContext(transferId, manager);
       const userName = this.resolveUser(dto.updated_by || dto.created_by);
 

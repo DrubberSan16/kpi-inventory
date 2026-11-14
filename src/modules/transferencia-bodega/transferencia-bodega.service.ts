@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -27,6 +28,7 @@ import {
 } from '../entities';
 import {
   CreateTransferenciaBodegaDto,
+  UpdateTransferenciaBodegaDto,
   CreateRecepcionBodegaDto,
   RecepcionAdjuntoDto,
   TransferenciaBodegaDetalleDto,
@@ -50,7 +52,7 @@ type PreparedTransferDetail = {
   codigoProducto: string | null;
   nombreProducto: string;
   orderUnitCost: number;
-  requestedCondition: 'NUEVO' | 'USADO' | null;
+  requestedCondition: 'NUEVO' | 'USADO' | 'CRITICO' | null;
 };
 
 type DocumentAnnulmentActor = {
@@ -319,6 +321,141 @@ export class TransferenciaBodegaService {
       throw new ForbiddenException(
         'La transferencia no pertenece a las sucursales asignadas al usuario.',
       );
+  }
+
+  private async transferEditWarehouseIds(
+    manager: EntityManager,
+    actor?: DocumentAnnulmentActor | null,
+  ): Promise<string[] | null> {
+    if (!actor?.userId) return [];
+    // El permiso individual se administra en Usuarios > Perfil de menus.
+    // Tambien se respeta para Super Administrador, sin excepciones por rol.
+    const permission = await manager.query(
+      `SELECT mu.id FROM kpi_security.tb_menu_user mu
+       JOIN kpi_security.tb_menu m ON m.id=mu.menu_id
+       WHERE mu.user_id=$1 AND NOT mu.is_delete AND mu.status='ACTIVE'
+         AND NOT m.is_deleted AND m.status='ACTIVE'
+         AND m.url_component='transferencias-bodega'
+         AND mu.is_readed=true AND mu.is_edited=true LIMIT 1`,
+      [actor.userId],
+    );
+    if (!permission.length) return [];
+    const role = this.toText(actor.roleName)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase();
+    if (
+      this.isAdministratorRoleName(role) ||
+      this.isSuperAdministratorRoleName(role) ||
+      ['GERENTE GENERAL', 'GERENCIA GENERAL'].includes(role)
+    )
+      return null;
+    if (!['BODEGA', 'BODEGUERO'].includes(role)) return [];
+    // La asignacion vigente es por sucursal. Matriz queda exclusivamente
+    // a cargo de administracion, incluso si Bodega tiene esa sucursal asignada.
+    const rows = await manager.query(
+      `SELECT b.id FROM kpi_inventory.tb_bodega b
+       JOIN kpi_inventory.tb_sucursal s ON s.id=b.sucursal_id
+       JOIN kpi_security.tb_user_sucursal us ON us.sucursal_id=b.sucursal_id
+       WHERE us.user_id=$1 AND NOT us.is_deleted AND NOT b.is_deleted
+         AND NOT s.is_deleted
+         AND UPPER(TRIM(s.nombre)) <> 'MATRIZ'
+         AND UPPER(TRIM(s.codigo)) <> 'MATRIZ'`,
+      [actor.userId],
+    );
+    return rows.map((row: any) => String(row.id));
+  }
+
+  private async withTransferEditPermissions<T extends TransferenciaBodega>(
+    rows: T[],
+    actor?: DocumentAnnulmentActor | null,
+    manager = this.dataSource.manager,
+  ) {
+    if (!rows.length) return [];
+    const allowed = await this.transferEditWarehouseIds(manager, actor);
+    const blockers = await manager.query(
+      `SELECT t.id, to_char(t.updated_at,'YYYYMMDDHH24MISSUS') AS version_edicion,
+        EXISTS(SELECT 1 FROM kpi_inventory.tb_guia_remision_electronica g
+          WHERE g.transferencia_bodega_id=t.id) AS tiene_guia,
+        EXISTS(SELECT 1 FROM kpi_inventory.tb_recepcion_bodega r
+          WHERE r.transferencia_bodega_id=t.id AND NOT r.is_deleted
+            AND r.estado <> 'CANCELADA') AS tiene_recepcion
+       FROM kpi_inventory.tb_transferencia_bodega t WHERE t.id=ANY($1::uuid[])`,
+      [rows.map((row) => row.id)],
+    );
+    const byId = new Map(blockers.map((row: any) => [String(row.id), row]));
+    return rows.map((row) => {
+      const blocker = byId.get(row.id) as any;
+      return {
+        ...row,
+        puede_editar: Boolean(
+          blocker &&
+          row.recepcion_requerida &&
+          row.estado === 'PENDIENTE_RECEPCION' &&
+          !blocker.tiene_guia &&
+          !blocker.tiene_recepcion &&
+          (allowed === null || allowed.includes(row.bodega_origen_id)),
+        ),
+        bodegas_origen_editables: allowed,
+        version_edicion: blocker?.version_edicion,
+      };
+    });
+  }
+
+  private async transferEditVersion(
+    manager: EntityManager,
+    id: string,
+  ): Promise<string> {
+    // El interceptor de fechas elimina fracciones de segundo. Este token opaco
+    // conserva los microsegundos de PostgreSQL para detectar ediciones simultaneas.
+    const [row] = await manager.query(
+      "SELECT to_char(updated_at,'YYYYMMDDHH24MISSUS') AS version FROM kpi_inventory.tb_transferencia_bodega WHERE id=$1",
+      [id],
+    );
+    return row?.version || '';
+  }
+
+  private async assertTransferEditable(
+    manager: EntityManager,
+    transfer: TransferenciaBodega,
+    actor: DocumentAnnulmentActor | null | undefined,
+    expectedVersion: string,
+  ) {
+    const allowed = await this.transferEditWarehouseIds(manager, actor);
+    if (allowed !== null && !allowed.includes(transfer.bodega_origen_id)) {
+      throw new ForbiddenException(
+        'Se requiere el permiso Editar de Transferencias de bodega y un rol autorizado: Administrador, Super Administrador, Gerente General o Bodega asignada al origen. Las TB de matriz son administrativas.',
+      );
+    }
+    // Cualquier guia generada bloquea, incluso anulada o eliminada logicamente.
+    const guide = await manager.findOne(GuiaRemisionElectronica, {
+      where: { transferencia_bodega_id: transfer.id },
+    });
+    if (guide)
+      throw new BadRequestException(
+        'La transferencia ya tiene una guia de remision generada y no se puede editar.',
+      );
+    const receptions = await manager.find(RecepcionBodega, {
+      where: { transferencia_bodega_id: transfer.id, is_deleted: false },
+    });
+    if (
+      !transfer.recepcion_requerida ||
+      transfer.estado !== 'PENDIENTE_RECEPCION' ||
+      receptions.some((row) => row.estado !== 'CANCELADA')
+    ) {
+      throw new BadRequestException(
+        'Solo se puede editar una TB pendiente y sin recepciones activas.',
+      );
+    }
+    if (
+      !expectedVersion ||
+      expectedVersion !== (await this.transferEditVersion(manager, transfer.id))
+    ) {
+      throw new ConflictException(
+        'La transferencia cambio desde que la abriste. Vuelve a abrirla antes de guardar.',
+      );
+    }
+    return allowed;
   }
 
   async findReceptions(
@@ -1291,6 +1428,7 @@ export class TransferenciaBodegaService {
     query: TransferenciaBodegaQueryDto,
     sucursalId?: string | null,
     includeAnnulled = false,
+    actor?: DocumentAnnulmentActor | null,
   ) {
     const page = Number(query.page || 1);
     const limit = Math.min(1000, Math.max(1, Number(query.limit || 10)));
@@ -1382,7 +1520,10 @@ export class TransferenciaBodegaService {
       .getManyAndCount();
 
     return {
-      data: await this.hydrateTransfers(rows, false),
+      data: await this.withTransferEditPermissions(
+        await this.hydrateTransfers(rows, false),
+        actor,
+      ),
       pagination: {
         page,
         limit,
@@ -1431,8 +1572,12 @@ export class TransferenciaBodegaService {
         );
       }
     }
+    const [editable] = await this.withTransferEditPermissions(
+      [hydrated],
+      actor,
+    );
     return {
-      ...hydrated,
+      ...editable,
       historial_recepcion_permitido: allowedHistory,
       recepciones: allowedHistory
         ? await this.getReceptionHistory(this.dataSource.manager, id)
@@ -1440,7 +1585,35 @@ export class TransferenciaBodegaService {
     };
   }
 
-  async create(dto: CreateTransferenciaBodegaDto) {
+  create(dto: CreateTransferenciaBodegaDto) {
+    return this.saveTransfer(dto);
+  }
+
+  update(
+    id: string,
+    dto: UpdateTransferenciaBodegaDto,
+    actor?: DocumentAnnulmentActor | null,
+  ) {
+    if (!dto.detalles?.length)
+      throw new BadRequestException('Debes agregar al menos un material.');
+    return this.saveTransfer(
+      {
+        ...dto,
+        updated_by: this.resolveAnnulmentActorName(actor),
+        created_by: this.resolveAnnulmentActorName(actor),
+      },
+      { id, actor, expectedVersion: dto.expected_version },
+    );
+  }
+
+  private async saveTransfer(
+    dto: CreateTransferenciaBodegaDto,
+    editing?: {
+      id: string;
+      actor?: DocumentAnnulmentActor | null;
+      expectedVersion: string;
+    },
+  ) {
     const traceId = randomUUID();
     const createdBy = this.resolveUserName(dto);
     const changedStockIds = new Set<string>();
@@ -1448,7 +1621,9 @@ export class TransferenciaBodegaService {
     this.queueTransactionLog({
       traceId,
       createdBy,
-      description: 'Inicio de registro de transferencia de bodega.',
+      description: editing
+        ? `Inicio de edicion de transferencia ${editing.id}.`
+        : 'Inicio de registro de transferencia de bodega.',
     });
     try {
       const result = await this.dataSource.transaction(async (manager) => {
@@ -1456,7 +1631,29 @@ export class TransferenciaBodegaService {
           "SELECT pg_advisory_xact_lock(hashtext('warehouse-transfer-flow'))",
         );
         const userName = this.resolveUserName(dto);
+        const existing = editing
+          ? await manager.findOne(TransferenciaBodega, {
+              where: { id: editing.id, is_deleted: false },
+              lock: { mode: 'pessimistic_write' },
+            })
+          : null;
+        if (editing && !existing)
+          throw new NotFoundException('La transferencia no existe.');
+        const editWarehouses =
+          existing && editing
+            ? await this.assertTransferEditable(
+                manager,
+                existing,
+                editing.actor,
+                editing.expectedVersion,
+              )
+            : null;
         const orderId = this.toText(dto.orden_compra_id) || null;
+        if (existing && (existing.orden_compra_id || null) !== orderId) {
+          throw new BadRequestException(
+            'La orden de compra vinculada no se puede cambiar al editar la transferencia.',
+          );
+        }
         const order = orderId
           ? await manager.findOne(OrdenCompra, {
               where: { id: orderId, is_deleted: false },
@@ -1521,6 +1718,52 @@ export class TransferenciaBodegaService {
             'No se pudo resolver la bodega origen o destino de la transferencia.',
           );
         }
+        if (
+          editing &&
+          editWarehouses !== null &&
+          !editWarehouses.includes(sourceWarehouseId)
+        ) {
+          throw new ForbiddenException(
+            'La nueva bodega origen debe estar asignada al usuario y no puede ser matriz.',
+          );
+        }
+
+        if (existing) {
+          const previousDetails = await manager.find(TransferenciaBodegaDet, {
+            where: { transferencia_bodega_id: existing.id, is_deleted: false },
+          });
+          if (
+            previousDetails.some(
+              (line) => this.toNumber(line.cantidad_recibida) > 0,
+            )
+          ) {
+            throw new BadRequestException(
+              'La transferencia ya tiene cantidades recibidas.',
+            );
+          }
+          for (const detail of previousDetails) {
+            const stock = await manager.findOne(StockBodega, {
+              where: {
+                bodega_id: detail.bodega_origen_id,
+                producto_id: detail.producto_id,
+                is_deleted: false,
+              },
+            });
+            if (stock) changedStockIds.add(stock.id);
+          }
+          // Libera solamente la reserva anterior dentro de la misma transaccion.
+          // Los ingresos de compra ya realizados permanecen en la bodega origen.
+          await manager.update(
+            TransferenciaBodegaDet,
+            { transferencia_bodega_id: existing.id, is_deleted: false },
+            {
+              is_deleted: true,
+              deleted_at: new Date(),
+              deleted_by: userName,
+              updated_by: userName,
+            },
+          );
+        }
 
         const orderDetails = order
           ? await manager.find(OrdenCompraDet, {
@@ -1549,39 +1792,51 @@ export class TransferenciaBodegaService {
           createdBy: userName,
           description: `Validacion completada para transferencia. Materiales=${requestedDetails.length}.`,
         });
-        const code = await this.generateCode(manager, 'TB');
-        const egressCode = await this.generateMovementDocumentCode(
-          manager,
-          'EB',
-        );
+        const code =
+          existing?.codigo || (await this.generateCode(manager, 'TB'));
         const fechaTransferencia = this.parseTransferDate(
           dto.fecha_transferencia,
         );
         const baseObservation =
           this.toText(dto.observacion) || `Transferencia ${code}`;
 
-        const movementReceipt = order
-          ? await manager.save(
-              MovimientoInventario,
-              manager.create(MovimientoInventario, {
-                tipo_movimiento: 'INGRESO',
-                fecha_movimiento: fechaTransferencia,
-                tipo_documento: 'INGRESO_BODEGA',
-                numero_documento: await this.generateMovementDocumentCode(
-                  manager,
-                  'IB',
-                ),
-                referencia: order.codigo || order.referencia || code,
-                observacion: `Ingreso preaprobado por ${order.codigo || 'orden de compra'} para transferencia ${code}`,
-                bodega_destino_id: sourceWarehouse.id,
-                tipo_cambio: '1',
-                total_costos: '0.0000',
-                estado: 'CONFIRMADO',
-                created_by: userName,
-                updated_by: userName,
-              }),
-            )
+        const previousReceipt = existing?.movimiento_recepcion_id
+          ? await manager.findOne(MovimientoInventario, {
+              where: {
+                id: existing.movimiento_recepcion_id,
+                is_deleted: false,
+              },
+            })
           : null;
+        if (existing?.movimiento_recepcion_id && !previousReceipt) {
+          throw new BadRequestException(
+            'No se pudo resolver el ingreso original de la compra.',
+          );
+        }
+        const movementReceipt =
+          previousReceipt ||
+          (order
+            ? await manager.save(
+                MovimientoInventario,
+                manager.create(MovimientoInventario, {
+                  tipo_movimiento: 'INGRESO',
+                  fecha_movimiento: fechaTransferencia,
+                  tipo_documento: 'INGRESO_BODEGA',
+                  numero_documento: await this.generateMovementDocumentCode(
+                    manager,
+                    'IB',
+                  ),
+                  referencia: order.codigo || order.referencia || code,
+                  observacion: `Ingreso preaprobado por ${order.codigo || 'orden de compra'} para transferencia ${code}`,
+                  bodega_destino_id: sourceWarehouse.id,
+                  tipo_cambio: '1',
+                  total_costos: '0.0000',
+                  estado: 'CONFIRMADO',
+                  created_by: userName,
+                  updated_by: userName,
+                }),
+              )
+            : null);
         this.queueTransactionLog({
           traceId,
           createdBy: userName,
@@ -1591,6 +1846,8 @@ export class TransferenciaBodegaService {
         const transfer = await manager.save(
           TransferenciaBodega,
           manager.create(TransferenciaBodega, {
+            ...(existing || {}),
+            ...(existing ? { updated_at: new Date() } : {}),
             codigo: code,
             orden_compra_id: order?.id ?? null,
             bodega_origen_id: sourceWarehouse.id,
@@ -1609,7 +1866,7 @@ export class TransferenciaBodegaService {
             ),
             movimiento_salida_id: null,
             movimiento_ingreso_id: null,
-            created_by: userName,
+            created_by: existing?.created_by || userName,
             updated_by: userName,
           }),
         );
@@ -1620,7 +1877,7 @@ export class TransferenciaBodegaService {
         });
 
         let totalCost = 0;
-        let receiptTotal = 0;
+        let receiptTotal = this.toNumber(previousReceipt?.total_costos, 0);
         const transferDetailEntities: TransferenciaBodegaDet[] = [];
 
         for (const detail of requestedDetails) {
@@ -1898,12 +2155,20 @@ export class TransferenciaBodegaService {
           [transfer],
           true,
         );
-        return hydrated;
+        return {
+          ...hydrated,
+          version_edicion: await this.transferEditVersion(manager, transfer.id),
+        };
       });
       this.queueTransactionLog({
         traceId,
         createdBy,
-        description: `Transferencia ${this.toText((result as any)?.codigo) || 'sin-codigo'} registrada correctamente.`,
+        description: `Transferencia ${this.toText((result as any)?.codigo) || 'sin-codigo'} ${editing ? 'editada' : 'registrada'} correctamente.`,
+        requestMethod: editing ? 'PATCH' : 'POST',
+        requestUrl: editing
+          ? `${this.logEndpoint}/${editing.id}`
+          : this.logEndpoint,
+        requestPayload: dto,
       });
       await this.notifyDestinationWarehouse((result as any)?.id);
       await this.notifyMaintenanceRecalculationForStocks(
@@ -1917,8 +2182,10 @@ export class TransferenciaBodegaService {
         traceId,
         createdBy,
         status: 'ERROR',
-        requestMethod: 'POST',
-        requestUrl: this.logEndpoint,
+        requestMethod: editing ? 'PATCH' : 'POST',
+        requestUrl: editing
+          ? `${this.logEndpoint}/${editing.id}`
+          : this.logEndpoint,
         requestPayload: dto,
         description: `Fallo al registrar transferencia de bodega: ${error?.message ?? 'desconocido'}`,
       });
@@ -3698,14 +3965,17 @@ export class TransferenciaBodegaService {
     return primary > 0.000001 ? primary : this.getStockCriticoAmount(stockRow);
   }
 
-  private normalizeRequestedStockCondition(value: unknown): 'NUEVO' | 'USADO' {
+  private normalizeRequestedStockCondition(
+    value: unknown,
+  ): 'NUEVO' | 'USADO' | 'CRITICO' {
     const normalized = String(value || '')
       .trim()
       .toUpperCase();
     if (normalized === 'NUEVO') return 'NUEVO';
     if (normalized === 'USADO') return 'USADO';
+    if (normalized === 'CRITICO') return 'CRITICO';
     throw new BadRequestException(
-      'La condicion del material para una transferencia manual debe ser NUEVO o USADO.',
+      'La condicion del material debe ser NUEVO, USADO o CRITICO.',
     );
   }
 
@@ -3723,9 +3993,10 @@ export class TransferenciaBodegaService {
   private resolveTransferStockCondition(
     stockRow: StockBodega,
     isPurchaseOrderTransfer: boolean,
-    requestedCondition?: 'NUEVO' | 'USADO' | null,
+    requestedCondition?: 'NUEVO' | 'USADO' | 'CRITICO' | null,
   ): 'NUEVO' | 'USADO' | 'CRITICO' {
     if (isPurchaseOrderTransfer) return 'NUEVO';
+    if (requestedCondition === 'CRITICO') return 'CRITICO';
 
     const nuevo = this.getStockNuevoAmount(stockRow);
     const usado = this.getStockUsadoAmount(stockRow);

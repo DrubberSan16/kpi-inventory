@@ -24,6 +24,7 @@ import { getSucursalScopeId } from '../../common/http/sucursal-scope.util';
 import {
   AnnulTransferenciaBodegaQueryDto,
   CreateTransferenciaBodegaDto,
+  UpdateTransferenciaBodegaDto,
   CreateRecepcionBodegaDto,
   TransferenciaBodegaQueryDto,
 } from './transferencia-bodega.dto';
@@ -142,6 +143,7 @@ export class TransferenciaBodegaController {
       query,
       getSucursalScopeId(req),
       shouldIncludeAnnulledRecords(req, query.include_annulled),
+      getRequestActor(req),
     );
   }
 
@@ -179,6 +181,18 @@ export class TransferenciaBodegaController {
       created_by: actor.username || undefined,
       updated_by: actor.username || undefined,
     });
+  }
+
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Editar una transferencia pendiente sin guia de remision',
+  })
+  update(
+    @Param('id') id: string,
+    @Body() payload: UpdateTransferenciaBodegaDto,
+    @Req() req?: any,
+  ) {
+    return this.service.update(id, payload, getRequestActor(req));
   }
 
   @Patch(':id/anular')

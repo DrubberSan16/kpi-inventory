@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, OmitType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
@@ -74,12 +74,12 @@ export class TransferenciaBodegaDetalleDto {
   @ApiPropertyOptional({
     description:
       'Condicion del stock a transferir. En transferencias de orden de compra se fuerza NUEVO.',
-    enum: ['NUEVO', 'USADO'],
+    enum: ['NUEVO', 'USADO', 'CRITICO'],
   })
   @IsOptional()
   @IsString()
-  @IsIn(['NUEVO', 'USADO'])
-  condicion_material?: 'NUEVO' | 'USADO';
+  @IsIn(['NUEVO', 'USADO', 'CRITICO'])
+  condicion_material?: 'NUEVO' | 'USADO' | 'CRITICO';
 
   @ApiPropertyOptional({ description: 'observacion' })
   @IsOptional()
@@ -128,6 +128,26 @@ export class CreateTransferenciaBodegaDto {
   @ValidateNested({ each: true })
   @Type(() => TransferenciaBodegaDetalleDto)
   detalles?: TransferenciaBodegaDetalleDto[];
+}
+
+export class UpdateTransferenciaBodegaDto extends OmitType(
+  CreateTransferenciaBodegaDto,
+  ['detalles'] as const,
+) {
+  @ApiProperty({
+    description: 'Version de la transferencia abierta para editar',
+  })
+  @IsString()
+  @MaxLength(40)
+  expected_version: string;
+
+  @ApiProperty({ type: () => [TransferenciaBodegaDetalleDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => TransferenciaBodegaDetalleDto)
+  detalles: TransferenciaBodegaDetalleDto[];
 }
 
 export class TransferenciaBodegaQueryDto extends PaginationQueryDto {
