@@ -19,6 +19,7 @@ import {
 import {
   Bodega,
   Categoria,
+  Marca,
   OrdenCompra,
   OrdenCompraDet,
   Producto,
@@ -42,6 +43,13 @@ type Totals = {
   descuentoTotal: number;
   ivaTotal: number;
   total: number;
+};
+
+type PurchaseProductClassification = {
+  categoria_id: string | null;
+  categoria_nombre: string;
+  marca_id: string | null;
+  marca_nombre: string | null;
 };
 
 type DocumentAnnulmentActor = {
@@ -839,18 +847,15 @@ export class OrdenCompraService {
     );
   }
 
-  private async buildDetailCategoryMap(details: OrdenCompraDet[]) {
+  private async buildDetailClassificationMap(details: OrdenCompraDet[]) {
     const productIds = [
       ...new Set(details.map((item) => item.producto_id).filter(Boolean)),
     ];
     if (!productIds.length)
-      return new Map<
-        string,
-        { categoria_id: string | null; categoria_nombre: string }
-      >();
+      return new Map<string, PurchaseProductClassification>();
     const products = await this.productoRepo.find({
       where: { id: In(productIds), is_deleted: false },
-      select: { id: true, categoria_id: true },
+      select: { id: true, categoria_id: true, marca_id: true },
     });
     const categoryIds = [
       ...new Set(
@@ -859,20 +864,42 @@ export class OrdenCompraService {
           .filter((id): id is string => Boolean(id)),
       ),
     ];
-    const categories = categoryIds.length
-      ? await this.dataSource.getRepository(Categoria).find({
-          where: { id: In(categoryIds), is_deleted: false },
-          select: { id: true, nombre: true },
-        })
-      : [];
-    const names = new Map(categories.map((item) => [item.id, item.nombre]));
-    return new Map(
+    const brandIds = [
+      ...new Set(
+        products
+          .map((item) => item.marca_id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const [categories, brands]: [Categoria[], Marca[]] = await Promise.all([
+      categoryIds.length
+        ? this.dataSource.getRepository(Categoria).find({
+            where: { id: In(categoryIds), is_deleted: false },
+            select: { id: true, nombre: true },
+          })
+        : [],
+      brandIds.length
+        ? this.dataSource.getRepository(Marca).find({
+            where: { id: In(brandIds), is_deleted: false },
+            select: { id: true, nombre: true },
+          })
+        : [],
+    ]);
+    const categoryNames = new Map<string, string>(
+      categories.map((item) => [item.id, item.nombre]),
+    );
+    const brandNames = new Map<string, string>(
+      brands.map((item) => [item.id, item.nombre]),
+    );
+    return new Map<string, PurchaseProductClassification>(
       products.map((item) => [
         item.id,
         {
           categoria_id: item.categoria_id ?? null,
           categoria_nombre:
-            names.get(item.categoria_id || '') || 'Sin categoría',
+            categoryNames.get(item.categoria_id || '') || 'Sin categoría',
+          marca_id: item.marca_id ?? null,
+          marca_nombre: brandNames.get(item.marca_id || '') ?? null,
         },
       ]),
     );
@@ -910,12 +937,9 @@ export class OrdenCompraService {
 
     // Clasificación actual del catálogo; las cantidades e importes conservan
     // la fotografía de la línea original de la orden.
-    const categoryMap = includeDetails
-      ? await this.buildDetailCategoryMap(details)
-      : new Map<
-          string,
-          { categoria_id: string | null; categoria_nombre: string }
-        >();
+    const classificationMap = includeDetails
+      ? await this.buildDetailClassificationMap(details)
+      : new Map<string, PurchaseProductClassification>();
 
     const comprometido = await this.pendingOrderTransferQuantities(
       this.dataSource.manager,
@@ -937,7 +961,7 @@ export class OrdenCompraService {
         (acc[item.orden_compra_id] ??= []).push({
           ...item,
           descripcion_producto: descriptionMap.get(item.producto_id) ?? null,
-          ...categoryMap.get(item.producto_id),
+          ...classificationMap.get(item.producto_id),
           cantidad_preaprobada: this.toFixedText(cantidadPreaprobada, 6),
           cantidad_transferida: this.toFixedText(cantidadTransferida, 6),
           cantidad_comprometida_transferencia: this.toFixedText(

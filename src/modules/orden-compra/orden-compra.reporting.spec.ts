@@ -1,10 +1,19 @@
 import { OrdenCompraService } from './orden-compra.service';
-import { Categoria, OrdenCompra, OrdenCompraDet } from '../entities';
+import { Categoria, Marca, OrdenCompra, OrdenCompraDet } from '../entities';
 
 type Order = Pick<OrdenCompra, 'id' | 'estado'>;
-type Category = { categoria_id: string | null; categoria_nombre: string };
-type Product = { id: string; categoria_id: string | null };
-type CategoryRow = { id: string; nombre: string };
+type Classification = {
+  categoria_id: string | null;
+  categoria_nombre: string;
+  marca_id: string | null;
+  marca_nombre: string | null;
+};
+type Product = {
+  id: string;
+  categoria_id: string | null;
+  marca_id: string | null;
+};
+type CatalogRow = { id: string; nombre: string };
 type Detail = Pick<OrdenCompraDet, 'producto_id' | 'total'>;
 
 function queryBuilder(orders: Order[]) {
@@ -30,13 +39,15 @@ type ListHarness = {
   hydrateOrders: jest.Mock<Promise<Order[]>, [Order[], boolean]>;
 };
 
-type CategoryHarness = {
-  buildDetailCategoryMap: (details: Detail[]) => Promise<Map<string, Category>>;
+type ClassificationHarness = {
+  buildDetailClassificationMap: (
+    details: Detail[],
+  ) => Promise<Map<string, Classification>>;
   productoRepo: { find: jest.Mock<Promise<Product[]>, [unknown]> };
   dataSource: {
     getRepository: jest.Mock<
-      { find: jest.Mock<Promise<CategoryRow[]>, [unknown]> },
-      [typeof Categoria]
+      { find: jest.Mock<Promise<CatalogRow[]>, [unknown]> },
+      [typeof Categoria | typeof Marca]
     >;
   };
 };
@@ -59,22 +70,27 @@ function fixture() {
   return { service, orders, qb };
 }
 
-function categoryFixture(products: Product[] = []) {
+function classificationFixture(products: Product[] = []) {
   const service = Object.create(
     OrdenCompraService.prototype,
-  ) as CategoryHarness;
+  ) as ClassificationHarness;
   const findCategories = jest
-    .fn<Promise<CategoryRow[]>, [unknown]>()
-    .mockResolvedValue([{ id: 'spares', nombre: 'Repuestos' }]);
+    .fn<Promise<CatalogRow[]>, [unknown]>()
+    .mockResolvedValue([{ id: 'spares', nombre: 'REPUESTO' }]);
+  const findBrands = jest
+    .fn<Promise<CatalogRow[]>, [unknown]>()
+    .mockResolvedValue([{ id: 'mtu', nombre: 'MTU' }]);
   service.productoRepo = {
     find: jest.fn<Promise<Product[]>, [unknown]>().mockResolvedValue(products),
   };
   service.dataSource = {
     getRepository: jest
-      .fn<{ find: typeof findCategories }, [typeof Categoria]>()
-      .mockReturnValue({ find: findCategories }),
+      .fn<{ find: typeof findCategories }, [typeof Categoria | typeof Marca]>()
+      .mockImplementation((entity) => ({
+        find: entity === Marca ? findBrands : findCategories,
+      })),
   };
-  return { service, findCategories };
+  return { service, findCategories, findBrands };
 }
 
 describe('Reportería de compras compatible con listado operativo', () => {
@@ -110,24 +126,31 @@ describe('Reportería de compras compatible con listado operativo', () => {
       expect.stringContaining('ANULADA'),
     );
   });
-  it('resuelve categorías por lote y filtra catálogos borrados sin modificar importes', async () => {
-    const { service, findCategories } = categoryFixture([
-      { id: 'filter', categoria_id: 'spares' },
-      { id: 'uncategorized', categoria_id: null },
+  it('resuelve categorías y marcas por lote sin modificar importes', async () => {
+    const { service, findCategories, findBrands } = classificationFixture([
+      { id: 'filter', categoria_id: 'spares', marca_id: 'mtu' },
+      { id: 'uncategorized', categoria_id: null, marca_id: null },
+      { id: 'archived-brand', categoria_id: 'spares', marca_id: 'archived' },
     ]);
     const details: Detail[] = [
       { producto_id: 'filter', total: '23' },
       { producto_id: 'uncategorized', total: '0' },
+      { producto_id: 'archived-brand', total: '4' },
     ];
-    const categories = await service.buildDetailCategoryMap(details);
-    expect(categories.get('filter')).toEqual({
+    const classification = await service.buildDetailClassificationMap(details);
+    expect(classification.get('filter')).toEqual({
       categoria_id: 'spares',
-      categoria_nombre: 'Repuestos',
+      categoria_nombre: 'REPUESTO',
+      marca_id: 'mtu',
+      marca_nombre: 'MTU',
     });
-    expect(categories.get('uncategorized')).toEqual({
+    expect(classification.get('uncategorized')).toEqual({
       categoria_id: null,
       categoria_nombre: 'Sin categoría',
+      marca_id: null,
+      marca_nombre: null,
     });
+    expect(classification.get('archived-brand')?.marca_nombre).toBeNull();
     expect(service.dataSource.getRepository).toHaveBeenCalledWith(Categoria);
     expect(service.productoRepo.find.mock.calls[0]?.[0]).toMatchObject({
       where: { is_deleted: false },
@@ -135,11 +158,15 @@ describe('Reportería de compras compatible con listado operativo', () => {
     expect(findCategories.mock.calls[0]?.[0]).toMatchObject({
       where: { is_deleted: false },
     });
+    expect(findBrands).toHaveBeenCalledTimes(1);
+    expect(findBrands.mock.calls[0]?.[0]).toMatchObject({
+      where: { is_deleted: false },
+    });
     expect(details[0].total).toBe('23');
   });
   it('no consulta el catálogo cuando no hay líneas', async () => {
-    const { service } = categoryFixture();
-    expect((await service.buildDetailCategoryMap([])).size).toBe(0);
+    const { service } = classificationFixture();
+    expect((await service.buildDetailClassificationMap([])).size).toBe(0);
     expect(service.productoRepo.find).not.toHaveBeenCalled();
   });
 });
