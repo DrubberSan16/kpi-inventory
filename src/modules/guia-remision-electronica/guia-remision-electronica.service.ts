@@ -1687,6 +1687,14 @@ export class GuiaRemisionElectronicaService
     if (!transfer) {
       throw new NotFoundException('La transferencia no existe.');
     }
+    if (
+      transfer.bodega_origen_id &&
+      transfer.bodega_origen_id === transfer.bodega_destino_id
+    ) {
+      throw new BadRequestException(
+        'La guía de remisión solo aplica a traslados entre bodegas distintas.',
+      );
+    }
     const transferStatus = String(transfer.estado || '').toUpperCase();
     const eligibleStates = new Set([
       'PENDIENTE_RECEPCION',

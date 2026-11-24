@@ -9,7 +9,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { Brackets, DataSource, EntityManager, Repository } from 'typeorm';
+import { Brackets, DataSource, EntityManager, Raw, Repository } from 'typeorm';
 import {
   Bodega,
   RecepcionBodega,
@@ -808,6 +808,33 @@ export class TransferenciaBodegaService {
     return attachment;
   }
 
+  private async createPurchaseReceiptMovement(
+    manager: EntityManager,
+    order: OrdenCompra,
+    warehouseId: string,
+    code: string,
+    date: Date,
+    userName: string,
+  ) {
+    return manager.save(
+      MovimientoInventario,
+      manager.create(MovimientoInventario, {
+        tipo_movimiento: 'INGRESO',
+        fecha_movimiento: date,
+        tipo_documento: 'INGRESO_BODEGA',
+        numero_documento: await this.generateMovementDocumentCode(manager, 'IB'),
+        referencia: order.codigo || order.referencia || code,
+        observacion: `Ingreso preaprobado por ${order.codigo || 'orden de compra'} para transferencia ${code}`,
+        bodega_destino_id: warehouseId,
+        tipo_cambio: '1',
+        total_costos: '0.0000',
+        estado: 'CONFIRMADO',
+        created_by: userName,
+        updated_by: userName,
+      }),
+    );
+  }
+
   private async createReceptionMovement(
     manager: EntityManager,
     transfer: TransferenciaBodega,
@@ -1174,12 +1201,42 @@ export class TransferenciaBodegaService {
     changed?: Set<string>,
     decreased?: Set<string>,
   ) {
+    const matrixReceipt =
+      transfer.bodega_origen_id === transfer.bodega_destino_id;
     const restoredPendingByProduct = new Map<string, number>();
     const restoredPendingByCondition = new Map<string, number>();
     for (const detail of [...details].sort((a, b) =>
       a.producto_id.localeCompare(b.producto_id),
     )) {
       const received = this.toNumber(detail.cantidad_recibida);
+      if (detail.orden_compra_det_id && received > 0) {
+        const orderLine = await manager.findOne(OrdenCompraDet, {
+          where: { id: detail.orden_compra_det_id, is_deleted: false },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (matrixReceipt && reverse) {
+          if (!orderLine) {
+            throw new BadRequestException(
+              'El material de la orden de compra ya no está vigente.',
+            );
+          }
+          await this.assertOrderTransferBalance(manager, orderLine, received);
+        }
+        if (orderLine) {
+          orderLine.cantidad_transferida = this.toFixedText(
+            Math.max(
+              0,
+              this.toNumber(orderLine.cantidad_transferida) +
+                (reverse ? received : -received),
+            ),
+            6,
+          );
+          orderLine.updated_by = user;
+          await manager.save(OrdenCompraDet, orderLine);
+        }
+      }
+      // El ingreso de la compra sigue vigente, como en una transferencia anulada con recepción.
+      if (matrixReceipt) continue;
       const pending = Math.max(0, this.toNumber(detail.cantidad) - received);
       const condition = this.normalizePersistedStockCondition(
         detail.condicion_material,
@@ -1319,24 +1376,6 @@ export class TransferenciaBodegaService {
         changed?.add(source.id);
         changed?.add(destination.id);
         decreased?.add(reverse ? source.id : destination.id);
-      }
-      if (detail.orden_compra_det_id && received > 0) {
-        const orderLine = await manager.findOne(OrdenCompraDet, {
-          where: { id: detail.orden_compra_det_id, is_deleted: false },
-          lock: { mode: 'pessimistic_write' },
-        });
-        if (orderLine) {
-          orderLine.cantidad_transferida = this.toFixedText(
-            Math.max(
-              0,
-              this.toNumber(orderLine.cantidad_transferida) +
-                (reverse ? received : -received),
-            ),
-            6,
-          );
-          orderLine.updated_by = user;
-          await manager.save(OrdenCompraDet, orderLine);
-        }
       }
     }
     const receptions = await manager.find(RecepcionBodega, {
@@ -1585,8 +1624,55 @@ export class TransferenciaBodegaService {
     };
   }
 
-  create(dto: CreateTransferenciaBodegaDto) {
-    return this.saveTransfer(dto);
+  async listMatrixReceiptWarehouses(
+    actor?: DocumentAnnulmentActor | null,
+    manager = this.dataSource.manager,
+  ): Promise<string[]> {
+    if (!actor?.userId) return [];
+    const rows: Array<{ id: string }> = await manager.query(
+      `SELECT b.id
+       FROM kpi_inventory.tb_bodega b
+       JOIN kpi_inventory.tb_sucursal s ON s.id=b.sucursal_id
+       WHERE NOT b.is_deleted AND NOT s.is_deleted
+         AND (UPPER(TRIM(s.nombre))='MATRIZ' OR UPPER(TRIM(s.codigo))='MATRIZ')
+         AND ($2::uuid IS NULL OR s.id=$2)
+         AND EXISTS (
+           SELECT 1 FROM kpi_security.tb_user_sucursal us
+           WHERE us.sucursal_id=s.id AND us.user_id=$1 AND NOT us.is_deleted
+         )
+         AND EXISTS (
+           SELECT 1 FROM kpi_security.tb_menu_user mu
+           JOIN kpi_security.tb_menu m ON m.id=mu.menu_id
+           JOIN kpi_security.tb_user u ON u.id=mu.user_id
+           WHERE mu.user_id=$1 AND NOT mu.is_delete AND mu.status='ACTIVE'
+             AND NOT u.is_deleted AND u.status='ACTIVE'
+             AND NOT m.is_deleted AND m.status='ACTIVE'
+             AND m.url_component='transferencias-bodega'
+             AND mu.is_readed AND mu.is_created
+         )`,
+      [actor.userId, actor.sucursalId || null],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  private async assertMatrixReceiptAccess(
+    manager: EntityManager,
+    warehouseId: string,
+    actor?: DocumentAnnulmentActor | null,
+  ) {
+    const allowed = await this.listMatrixReceiptWarehouses(actor, manager);
+    if (!allowed.includes(warehouseId)) {
+      throw new ForbiddenException(
+        'Para registrar el ingreso en Matriz debes tener esa sucursal asignada y el permiso Crear de Transferencias de bodega.',
+      );
+    }
+  }
+
+  create(
+    dto: CreateTransferenciaBodegaDto,
+    actor?: DocumentAnnulmentActor | null,
+  ) {
+    return this.saveTransfer(dto, actor);
   }
 
   update(
@@ -1602,15 +1688,16 @@ export class TransferenciaBodegaService {
         updated_by: this.resolveAnnulmentActorName(actor),
         created_by: this.resolveAnnulmentActorName(actor),
       },
-      { id, actor, expectedVersion: dto.expected_version },
+      actor,
+      { id, expectedVersion: dto.expected_version },
     );
   }
 
   private async saveTransfer(
     dto: CreateTransferenciaBodegaDto,
+    actor?: DocumentAnnulmentActor | null,
     editing?: {
       id: string;
-      actor?: DocumentAnnulmentActor | null;
       expectedVersion: string;
     },
   ) {
@@ -1644,7 +1731,7 @@ export class TransferenciaBodegaService {
             ? await this.assertTransferEditable(
                 manager,
                 existing,
-                editing.actor,
+                actor,
                 editing.expectedVersion,
               )
             : null;
@@ -1699,12 +1786,6 @@ export class TransferenciaBodegaService {
         if (!destinationWarehouseId) {
           throw new BadRequestException('La bodega destino es obligatoria.');
         }
-        if (sourceWarehouseId === destinationWarehouseId) {
-          throw new BadRequestException(
-            'La bodega destino debe ser distinta a la bodega origen.',
-          );
-        }
-
         const [sourceWarehouse, destinationWarehouse] = await Promise.all([
           manager.findOne(Bodega, {
             where: { id: sourceWarehouseId, is_deleted: false },
@@ -1716,6 +1797,19 @@ export class TransferenciaBodegaService {
         if (!sourceWarehouse || !destinationWarehouse) {
           throw new BadRequestException(
             'No se pudo resolver la bodega origen o destino de la transferencia.',
+          );
+        }
+        const matrixReceipt = sourceWarehouse.id === destinationWarehouse.id;
+        if (matrixReceipt) {
+          if (order?.bodega_destino_id !== sourceWarehouse.id) {
+            throw new BadRequestException(
+              'Para usar la misma bodega debes seleccionar una orden de compra emitida para Matriz.',
+            );
+          }
+          await this.assertMatrixReceiptAccess(
+            manager,
+            sourceWarehouse.id,
+            actor,
           );
         }
         if (
@@ -1813,28 +1907,16 @@ export class TransferenciaBodegaService {
             'No se pudo resolver el ingreso original de la compra.',
           );
         }
-        const movementReceipt =
+        let movementReceipt =
           previousReceipt ||
-          (order
-            ? await manager.save(
-                MovimientoInventario,
-                manager.create(MovimientoInventario, {
-                  tipo_movimiento: 'INGRESO',
-                  fecha_movimiento: fechaTransferencia,
-                  tipo_documento: 'INGRESO_BODEGA',
-                  numero_documento: await this.generateMovementDocumentCode(
-                    manager,
-                    'IB',
-                  ),
-                  referencia: order.codigo || order.referencia || code,
-                  observacion: `Ingreso preaprobado por ${order.codigo || 'orden de compra'} para transferencia ${code}`,
-                  bodega_destino_id: sourceWarehouse.id,
-                  tipo_cambio: '1',
-                  total_costos: '0.0000',
-                  estado: 'CONFIRMADO',
-                  created_by: userName,
-                  updated_by: userName,
-                }),
+          (order && !matrixReceipt
+            ? await this.createPurchaseReceiptMovement(
+                manager,
+                order,
+                sourceWarehouse.id,
+                code,
+                fechaTransferencia,
+                userName,
               )
             : null);
         this.queueTransactionLog({
@@ -1854,8 +1936,8 @@ export class TransferenciaBodegaService {
             bodega_destino_id: destinationWarehouse.id,
             fecha_transferencia: fechaTransferencia,
             observacion: this.toText(dto.observacion) || null,
-            estado: 'PENDIENTE_RECEPCION',
-            recepcion_requerida: true,
+            estado: matrixReceipt ? 'COMPLETADA' : 'PENDIENTE_RECEPCION',
+            recepcion_requerida: !matrixReceipt,
             total_items: requestedDetails.length,
             total_cantidad: this.toFixedText(
               requestedDetails.reduce(
@@ -1876,7 +1958,6 @@ export class TransferenciaBodegaService {
           description: `Cabecera de transferencia ${transfer.codigo} persistida.`,
         });
 
-        let totalCost = 0;
         let receiptTotal = this.toNumber(previousReceipt?.total_costos, 0);
         const transferDetailEntities: TransferenciaBodegaDet[] = [];
 
@@ -1905,15 +1986,25 @@ export class TransferenciaBodegaService {
           // mercaderia llega de verdad -- y saca solo lo que se transfiere; el
           // resto queda ahi como existencia real. Las siguientes ya no reciben
           // nada: mueven lo que quedo.
-          const pendingReceipt = this.getPendingReceiptQuantity(orderDetail);
-          const approvedAvailable =
-            this.getApprovedAvailableQuantity(orderDetail);
-          if (order && approvedAvailable < quantity) {
-            throw new BadRequestException(
-              `La cantidad solicitada de ${product.nombre} supera el saldo preaprobado de la orden de compra. Disponible ${approvedAvailable.toFixed(
-                2,
-              )}, requerido ${quantity.toFixed(2)}.`,
+          let pendingReceipt = this.getPendingReceiptQuantity(orderDetail);
+          if (orderDetail) {
+            const committedForOrder = await this.assertOrderTransferBalance(
+              manager,
+              orderDetail,
+              quantity,
             );
+            if (matrixReceipt) {
+              const alreadyInMatrix = Math.max(
+                0,
+                this.toNumber(orderDetail.cantidad_recibida) -
+                  this.toNumber(orderDetail.cantidad_transferida) -
+                  committedForOrder,
+              );
+              pendingReceipt = Math.min(
+                pendingReceipt,
+                Math.max(0, quantity - alreadyInMatrix),
+              );
+            }
           }
 
           const materialCondition = this.resolveTransferStockCondition(
@@ -1926,15 +2017,23 @@ export class TransferenciaBodegaService {
             product,
             sourceStock,
           );
-          const subtotal = quantity * unitCost;
           // La mercaderia de la orden entra a lo que se pago por ella: neto de
           // descuento y sin IVA. El costo que ya tenia la bodega de compras no es
           // el de esta compra; con FIFO, esta recepcion abre su propia capa.
           const receiptUnitCost =
             this.resolveOrderReceiptUnitCost(orderDetail) ?? unitCost;
-          totalCost += subtotal;
+          const detailUnitCost = matrixReceipt ? receiptUnitCost : unitCost;
+          const subtotal = quantity * detailUnitCost;
 
-          if (order && movementReceipt && pendingReceipt > 0) {
+          if (order && pendingReceipt > 0) {
+            movementReceipt ??= await this.createPurchaseReceiptMovement(
+              manager,
+              order,
+              sourceWarehouse.id,
+              code,
+              fechaTransferencia,
+              userName,
+            );
             currentSourceStock = this.applyNewStockDelta(
               sourceStock,
               pendingReceipt,
@@ -2003,61 +2102,46 @@ export class TransferenciaBodegaService {
             );
           }
 
-          const reservedQuantity = await this.getActiveReservedQuantity(
-            manager,
-            sourceWarehouse.id,
-            product.id,
-          );
-          const committed = await getPendingTransferStock(
-            manager,
-            sourceWarehouse.id,
-            product.id,
-          );
-          const committedCondition =
-            materialCondition === 'USADO'
-              ? committed.usado
-              : materialCondition === 'CRITICO'
-                ? committed.critico
-                : committed.nuevo;
-          const available = Math.min(
-            this.getTransferableStockByCondition(
-              sourceStock,
-              materialCondition,
-              this.getWorkOrderReservationForCondition(
+          if (!matrixReceipt) {
+            const reservedQuantity = await this.getActiveReservedQuantity(
+              manager,
+              sourceWarehouse.id,
+              product.id,
+            );
+            const committed = await getPendingTransferStock(
+              manager,
+              sourceWarehouse.id,
+              product.id,
+            );
+            const committedCondition =
+              materialCondition === 'USADO'
+                ? committed.usado
+                : materialCondition === 'CRITICO'
+                  ? committed.critico
+                  : committed.nuevo;
+            const available = Math.min(
+              this.getTransferableStockByCondition(
                 sourceStock,
                 materialCondition,
-                reservedQuantity,
-                committed,
-              ) + this.getOperationalCommitment(committed, materialCondition),
-            ),
-            this.getTransferableStockByCondition(
-              sourceStock,
-              materialCondition,
-              0,
-            ) - committedCondition,
-          );
-          if (available + 0.000001 < quantity) {
-            throw new BadRequestException(
-              `Stock ${materialCondition.toLowerCase()} insuficiente para ${product.nombre}. Disponible ${Math.max(0, available).toFixed(2)}, comprometido en transferencias ${committed.total.toFixed(2)}.`,
+                this.getWorkOrderReservationForCondition(
+                  sourceStock,
+                  materialCondition,
+                  reservedQuantity,
+                  committed,
+                ) + this.getOperationalCommitment(committed, materialCondition),
+              ),
+              this.getTransferableStockByCondition(
+                sourceStock,
+                materialCondition,
+                0,
+              ) - committedCondition,
             );
-          }
-          if (orderDetail) {
-            const pendingOrder = await manager.query(
-              `SELECT COALESCE(SUM(d.cantidad-d.cantidad_recibida),0) cantidad
-            FROM kpi_inventory.tb_transferencia_bodega_det d JOIN kpi_inventory.tb_transferencia_bodega t ON t.id=d.transferencia_bodega_id
-            WHERE d.orden_compra_det_id=$1 AND NOT d.is_deleted AND NOT t.is_deleted AND t.recepcion_requerida
-              AND t.estado IN ('PENDIENTE_RECEPCION','PARCIALMENTE_RECIBIDA')`,
-              [orderDetail.id],
-            );
-            if (
-              approvedAvailable -
-                Number(pendingOrder[0]?.cantidad || 0) +
-                0.000001 <
-              quantity
-            )
+            if (available + 0.000001 < quantity) {
               throw new BadRequestException(
-                `El saldo de ${product.nombre} ya esta comprometido en otra transferencia pendiente.`,
+                `Stock ${materialCondition.toLowerCase()} insuficiente para ${product.nombre}. Disponible ${Math.max(0, available).toFixed(2)}, comprometido en transferencias ${committed.total.toFixed(2)}.`,
               );
+            }
+            decreasedStockIds.add(sourceStock.id);
           }
 
           if (orderDetail) {
@@ -2065,6 +2149,12 @@ export class TransferenciaBodegaService {
               orderDetail.cantidad_recibida = this.toFixedText(
                 this.toNumber(orderDetail.cantidad_recibida, 0) +
                   pendingReceipt,
+                6,
+              );
+            }
+            if (matrixReceipt) {
+              orderDetail.cantidad_transferida = this.toFixedText(
+                this.toNumber(orderDetail.cantidad_transferida) + quantity,
                 6,
               );
             }
@@ -2080,11 +2170,14 @@ export class TransferenciaBodegaService {
               codigo_producto: detail.codigoProducto,
               nombre_producto: detail.nombreProducto,
               cantidad: this.toFixedText(quantity, 6),
-              costo_unitario: this.toFixedText(unitCost, 4),
+              costo_unitario: this.toFixedText(detailUnitCost, 4),
               subtotal: this.toFixedText(subtotal, 4),
               bodega_origen_id: sourceWarehouse.id,
               bodega_destino_id: destinationWarehouse.id,
-              cantidad_recibida: '0.000000',
+              cantidad_recibida: this.toFixedText(
+                matrixReceipt ? quantity : 0,
+                6,
+              ),
               condicion_material: materialCondition,
               kardex_salida_id: null,
               kardex_ingreso_id: null,
@@ -2100,7 +2193,6 @@ export class TransferenciaBodegaService {
             transferDetailEntities[transferDetailEntities.length - 1],
           );
           changedStockIds.add(sourceStock.id);
-          decreasedStockIds.add(sourceStock.id);
         }
 
         if (movementReceipt) {
@@ -2170,7 +2262,9 @@ export class TransferenciaBodegaService {
           : this.logEndpoint,
         requestPayload: dto,
       });
-      await this.notifyDestinationWarehouse((result as any)?.id);
+      if (result.recepcion_requerida) {
+        await this.notifyDestinationWarehouse(result.id);
+      }
       await this.notifyMaintenanceRecalculationForStocks(
         changedStockIds,
         'transfer',
@@ -2266,7 +2360,9 @@ export class TransferenciaBodegaService {
           );
         }
 
-        if (transfer.recepcion_requerida) {
+        const matrixReceipt =
+          transfer.bodega_origen_id === transfer.bodega_destino_id;
+        if (transfer.recepcion_requerida || matrixReceipt) {
           await this.changeReceptionAnnulment(
             manager,
             transfer,
@@ -3011,7 +3107,16 @@ export class TransferenciaBodegaService {
           );
         }
 
-        if (transfer.recepcion_requerida) {
+        const matrixReceipt =
+          transfer.bodega_origen_id === transfer.bodega_destino_id;
+        if (matrixReceipt) {
+          await this.assertMatrixReceiptAccess(
+            manager,
+            transfer.bodega_origen_id,
+            actor,
+          );
+        }
+        if (transfer.recepcion_requerida || matrixReceipt) {
           await this.changeReceptionAnnulment(
             manager,
             transfer,
@@ -3352,7 +3457,10 @@ export class TransferenciaBodegaService {
         "SELECT pg_advisory_xact_lock(hashtext('warehouse-transfer-flow'))",
       );
       const receptionTransfer = await manager.findOne(TransferenciaBodega, {
-        where: { recepcion_requerida: true },
+        where: [
+          { recepcion_requerida: true },
+          { bodega_origen_id: Raw((column) => `${column} = bodega_destino_id`) },
+        ],
         select: { id: true },
       });
       if (receptionTransfer) {
@@ -3390,6 +3498,12 @@ export class TransferenciaBodegaService {
     };
   }
 
+  private getTransferDisplayIncomeId(transfer: TransferenciaBodega) {
+    return transfer.bodega_origen_id === transfer.bodega_destino_id
+      ? transfer.movimiento_recepcion_id
+      : transfer.movimiento_ingreso_id;
+  }
+
   private async hydrateTransfers(
     rows: TransferenciaBodega[],
     includeDetails: boolean,
@@ -3406,7 +3520,7 @@ export class TransferenciaBodegaService {
     const movementIds = rows
       .flatMap((item) => [
         item.movimiento_salida_id,
-        item.movimiento_ingreso_id,
+        this.getTransferDisplayIncomeId(item),
       ])
       .filter((value): value is string => Boolean(value));
     const [details, orders, warehouses, movements, guides] = await Promise.all([
@@ -3481,9 +3595,8 @@ export class TransferenciaBodegaService {
       const movementOut = item.movimiento_salida_id
         ? movementMap.get(item.movimiento_salida_id)
         : null;
-      const movementIn = item.movimiento_ingreso_id
-        ? movementMap.get(item.movimiento_ingreso_id)
-        : null;
+      const incomeId = this.getTransferDisplayIncomeId(item);
+      const movementIn = incomeId ? movementMap.get(incomeId) : null;
       const guide = guideMap.get(item.id) || null;
       return {
         ...item,
@@ -3559,7 +3672,7 @@ export class TransferenciaBodegaService {
     const movementIds = rows
       .flatMap((item) => [
         item.movimiento_salida_id,
-        item.movimiento_ingreso_id,
+        this.getTransferDisplayIncomeId(item),
       ])
       .filter((value): value is string => Boolean(value));
     const [details, orders, warehouses, movements, guides] = await Promise.all([
@@ -3635,9 +3748,8 @@ export class TransferenciaBodegaService {
       const movementOut = item.movimiento_salida_id
         ? movementMap.get(item.movimiento_salida_id)
         : null;
-      const movementIn = item.movimiento_ingreso_id
-        ? movementMap.get(item.movimiento_ingreso_id)
-        : null;
+      const incomeId = this.getTransferDisplayIncomeId(item);
+      const movementIn = incomeId ? movementMap.get(incomeId) : null;
       const guide = guideMap.get(item.id) || null;
       return {
         ...item,
@@ -3848,6 +3960,35 @@ export class TransferenciaBodegaService {
     );
     const received = this.toNumber(orderDetail.cantidad_recibida, 0);
     return Math.max(0, approved - received);
+  }
+
+  private async assertOrderTransferBalance(
+    manager: EntityManager,
+    orderDetail: OrdenCompraDet,
+    quantity: number,
+  ) {
+    const available = this.getApprovedAvailableQuantity(orderDetail);
+    if (available < quantity) {
+      throw new BadRequestException(
+        `La cantidad solicitada de ${orderDetail.nombre_producto} supera el saldo preaprobado de la orden de compra. Disponible ${available.toFixed(2)}, requerido ${quantity.toFixed(2)}.`,
+      );
+    }
+    const rows = await manager.query(
+      `SELECT COALESCE(SUM(d.cantidad-d.cantidad_recibida),0) cantidad
+       FROM kpi_inventory.tb_transferencia_bodega_det d
+       JOIN kpi_inventory.tb_transferencia_bodega t ON t.id=d.transferencia_bodega_id
+       WHERE d.orden_compra_det_id=$1 AND NOT d.is_deleted AND NOT t.is_deleted
+         AND t.recepcion_requerida
+         AND t.estado IN ('PENDIENTE_RECEPCION','PARCIALMENTE_RECIBIDA')`,
+      [orderDetail.id],
+    );
+    const committed = Number(rows[0]?.cantidad || 0);
+    if (available - committed + 0.000001 < quantity) {
+      throw new BadRequestException(
+        `El saldo de ${orderDetail.nombre_producto} ya esta comprometido en otra transferencia pendiente.`,
+      );
+    }
+    return committed;
   }
 
   private getApprovedAvailableQuantity(orderDetail: OrdenCompraDet | null) {
