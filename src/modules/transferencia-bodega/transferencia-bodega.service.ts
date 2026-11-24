@@ -1629,6 +1629,7 @@ export class TransferenciaBodegaService {
     manager = this.dataSource.manager,
   ): Promise<string[]> {
     if (!actor?.userId) return [];
+    // Seguridad concede todas las sucursales cuando no hay asignaciones vigentes.
     const rows: Array<{ id: string }> = await manager.query(
       `SELECT b.id
        FROM kpi_inventory.tb_bodega b
@@ -1636,9 +1637,15 @@ export class TransferenciaBodegaService {
        WHERE NOT b.is_deleted AND NOT s.is_deleted
          AND (UPPER(TRIM(s.nombre))='MATRIZ' OR UPPER(TRIM(s.codigo))='MATRIZ')
          AND ($2::uuid IS NULL OR s.id=$2)
-         AND EXISTS (
-           SELECT 1 FROM kpi_security.tb_user_sucursal us
-           WHERE us.sucursal_id=s.id AND us.user_id=$1 AND NOT us.is_deleted
+         AND (
+           EXISTS (
+             SELECT 1 FROM kpi_security.tb_user_sucursal us
+             WHERE us.sucursal_id=s.id AND us.user_id=$1 AND NOT us.is_deleted
+           )
+           OR NOT EXISTS (
+             SELECT 1 FROM kpi_security.tb_user_sucursal us
+             WHERE us.user_id=$1 AND NOT us.is_deleted
+           )
          )
          AND EXISTS (
            SELECT 1 FROM kpi_security.tb_menu_user mu
@@ -1663,7 +1670,7 @@ export class TransferenciaBodegaService {
     const allowed = await this.listMatrixReceiptWarehouses(actor, manager);
     if (!allowed.includes(warehouseId)) {
       throw new ForbiddenException(
-        'Para registrar el ingreso en Matriz debes tener esa sucursal asignada y el permiso Crear de Transferencias de bodega.',
+        'Para registrar el ingreso en Matriz debes tener acceso a esa sucursal y el permiso Crear de Transferencias de bodega.',
       );
     }
   }

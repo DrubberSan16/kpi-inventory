@@ -19,7 +19,13 @@ async function insert(table, value) {
 let admin;
 async function api(method, suffix, body, actor = admin, expected = 200) {
   const response = await fetch(base + suffix, {
-    method, headers: { 'Content-Type': 'application/json', 'X-User-Id': actor.id, 'X-User-Name': actor.name_user, 'X-Role-Name': actor.roleName },
+    method, headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': actor.id,
+      'X-User-Name': actor.name_user,
+      'X-Role-Name': actor.roleName,
+      ...(actor.sucursalId ? { 'X-Sucursal-Id': actor.sucursalId } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const value = await response.json();
@@ -191,18 +197,21 @@ async function run() {
   const matrixOrderState = async () =>
     (await sql('SELECT estado FROM kpi_inventory.tb_orden_compra WHERE id=$1', [matrixOrder.id]))[0].estado;
 
-  await check('Ingreso local exige OC de Matriz, asignación de sucursal y permiso Crear', async () => {
+  await check('Ingreso local exige OC de Matriz, acceso efectivo a Matriz y permiso Crear', async () => {
     const routes = '/transferencias-bodega/bodegas-recepcion-matriz';
     assert((await api('GET', routes, undefined, keeper)).includes(matrix.id));
-    for (const user of [admin, destinationKeeper]) {
+    assert((await api('GET', routes, undefined, admin)).includes(matrix.id));
+    for (const user of [destinationKeeper, { ...admin, sucursalId: branches[0].id }]) {
       assert(!(await api('GET', routes, undefined, user)).includes(matrix.id));
       await api('POST', '/transferencias-bodega', matrixBody, user, 403);
     }
     await api('POST', '/transferencias-bodega', { ...matrixBody, bodega_destino_id: matrix.id.toUpperCase() }, destinationKeeper, 403);
-    await sql('UPDATE kpi_security.tb_menu_user SET is_created=false WHERE user_id=$1 AND menu_id=$2', [keeper.id, menu.id]);
-    assert(!(await api('GET', routes, undefined, keeper)).includes(matrix.id));
-    await api('POST', '/transferencias-bodega', matrixBody, keeper, 403);
-    await sql('UPDATE kpi_security.tb_menu_user SET is_created=true WHERE user_id=$1 AND menu_id=$2', [keeper.id, menu.id]);
+    for (const user of [admin, keeper]) {
+      await sql('UPDATE kpi_security.tb_menu_user SET is_created=false WHERE user_id=$1 AND menu_id=$2', [user.id, menu.id]);
+      assert(!(await api('GET', routes, undefined, user)).includes(matrix.id));
+      await api('POST', '/transferencias-bodega', matrixBody, user, 403);
+      await sql('UPDATE kpi_security.tb_menu_user SET is_created=true WHERE user_id=$1 AND menu_id=$2', [user.id, menu.id]);
+    }
     await api('POST', '/transferencias-bodega', { bodega_origen_id: matrix.id, bodega_destino_id: matrix.id, detalles: [line(1)] }, keeper, 400);
   });
   let matrixTransfer;
@@ -217,7 +226,7 @@ async function run() {
     }, admin, 201);
     await api('PATCH', `/transferencias-bodega/${dispatched.id}/recepciones/${receipt.id}/aprobar`);
     const before = await matrixBalance();
-    matrixTransfer = await api('POST', '/transferencias-bodega', matrixBody, keeper, 201);
+    matrixTransfer = await api('POST', '/transferencias-bodega', matrixBody, admin, 201);
     assert.equal(matrixTransfer.estado, 'COMPLETADA');
     assert.equal(matrixTransfer.recepcion_requerida, false);
     assert.equal(matrixTransfer.movimiento_salida_id, null);
@@ -239,8 +248,10 @@ async function run() {
     assert.equal(await matrixOrderState(), 'EMITIDA');
     assert.deepEqual(await matrixBalance(), before);
     const reverse = `/transferencias-bodega/${matrixTransfer.id}/reversar-anulacion`;
+    const restriction = await insert('kpi_security.tb_user_sucursal', { user_id: admin.id, sucursal_id: branches[0].id });
+    await api('POST', '/transferencias-bodega', matrixBody, admin, 403);
     await api('PATCH', reverse, undefined, admin, 403);
-    await insert('kpi_security.tb_user_sucursal', { user_id: admin.id, sucursal_id: branches[2].id });
+    await sql('UPDATE kpi_security.tb_user_sucursal SET is_deleted=true WHERE id=$1', [restriction.id]);
     assert.equal((await api('PATCH', reverse)).estado, 'COMPLETADA');
     assert.equal(await matrixOrderState(), 'TRANSFERIDA');
     assert.deepEqual(await matrixBalance(), before);
