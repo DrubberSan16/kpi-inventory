@@ -65,6 +65,11 @@ function getRequestActor(req?: any) {
 export class TransferenciaBodegaController {
   constructor(private readonly service: TransferenciaBodegaService) {}
 
+  @Get('bodegas-recepcion-matriz')
+  listMatrixReceiptWarehouses(@Req() req?: any) {
+    return this.service.listMatrixReceiptWarehouses(getRequestActor(req));
+  }
+
   @Get('recepciones')
   @ApiOperation({
     summary:
@@ -176,11 +181,14 @@ export class TransferenciaBodegaController {
   })
   create(@Body() payload: CreateTransferenciaBodegaDto, @Req() req?: any) {
     const actor = getRequestActor(req);
-    return this.service.create({
-      ...payload,
-      created_by: actor.username || undefined,
-      updated_by: actor.username || undefined,
-    });
+    return this.service.create(
+      {
+        ...payload,
+        created_by: actor.username || undefined,
+        updated_by: actor.username || undefined,
+      },
+      actor,
+    );
   }
 
   @Patch(':id')

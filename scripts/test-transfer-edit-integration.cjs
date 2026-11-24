@@ -168,6 +168,83 @@ async function run() {
     await edit(updated, payload(updated, { detalles: [{ producto_id: products[2].id, orden_compra_det_id: od.id, cantidad: 8 }] }), admin, 400);
     assert(other.id !== updated.id);
   });
+  const matrixOrder = await insert('kpi_inventory.tb_orden_compra', { codigo: prefix + '-OC-M', bodega_destino_id: matrix.id, estado: 'EMITIDA' });
+  const quantities = [10, 5, 8];
+  const matrixOrderLines = [];
+  for (const [i, product] of products.entries()) {
+    const quantity = quantities[i];
+    matrixOrderLines.push(await insert('kpi_inventory.tb_orden_compra_det', { orden_compra_id: matrixOrder.id, producto_id: product.id, nombre_producto: product.nombre, cantidad: quantity, cantidad_preaprobada: quantity, costo_unitario: 5, subtotal: quantity * 5 }));
+  }
+  const orderLine = (index, cantidad) => ({ producto_id: products[index].id, orden_compra_det_id: matrixOrderLines[index].id, cantidad });
+  const matrixBody = {
+    orden_compra_id: matrixOrder.id,
+    bodega_destino_id: matrix.id,
+    detalles: [orderLine(0, 6), orderLine(1, 5), orderLine(2, 8)],
+  };
+  const matrixBalance = async () => {
+    const rows = await sql('SELECT producto_id, stock_actual, stock_fisico FROM kpi_inventory.tb_stock_bodega WHERE bodega_id=$1 AND producto_id=ANY($2::uuid[])', [matrix.id, products.map(p => p.id)]);
+    return products.map(p => {
+      const row = rows.find(r => r.producto_id === p.id);
+      return [Number(row.stock_actual), Number(row.stock_fisico)];
+    });
+  };
+  const matrixOrderState = async () =>
+    (await sql('SELECT estado FROM kpi_inventory.tb_orden_compra WHERE id=$1', [matrixOrder.id]))[0].estado;
+
+  await check('Ingreso local exige OC de Matriz, asignación de sucursal y permiso Crear', async () => {
+    const routes = '/transferencias-bodega/bodegas-recepcion-matriz';
+    assert((await api('GET', routes, undefined, keeper)).includes(matrix.id));
+    for (const user of [admin, destinationKeeper]) {
+      assert(!(await api('GET', routes, undefined, user)).includes(matrix.id));
+      await api('POST', '/transferencias-bodega', matrixBody, user, 403);
+    }
+    await api('POST', '/transferencias-bodega', { ...matrixBody, bodega_destino_id: matrix.id.toUpperCase() }, destinationKeeper, 403);
+    await sql('UPDATE kpi_security.tb_menu_user SET is_created=false WHERE user_id=$1 AND menu_id=$2', [keeper.id, menu.id]);
+    assert(!(await api('GET', routes, undefined, keeper)).includes(matrix.id));
+    await api('POST', '/transferencias-bodega', matrixBody, keeper, 403);
+    await sql('UPDATE kpi_security.tb_menu_user SET is_created=true WHERE user_id=$1 AND menu_id=$2', [keeper.id, menu.id]);
+    await api('POST', '/transferencias-bodega', { bodega_origen_id: matrix.id, bodega_destino_id: matrix.id, detalles: [line(1)] }, keeper, 400);
+  });
+  let matrixTransfer;
+  await check('La OC parcial conserva lo despachado y registra solo los dos ingresos pendientes en Matriz', async () => {
+    const dispatched = await api('POST', '/transferencias-bodega', {
+      ...matrixBody, bodega_destino_id: destination.id, detalles: [orderLine(0, 4)],
+    }, admin, 201);
+    await api('POST', '/transferencias-bodega', { ...matrixBody, detalles: [orderLine(0, 7)] }, keeper, 400);
+    const receipt = await api('POST', `/transferencias-bodega/${dispatched.id}/recepciones`, {
+      idempotency_key: randomUUID(),
+      detalles: [{ transferencia_detalle_id: dispatched.detalles[0].id, llego: true, cantidad_recibida: 4 }],
+    }, admin, 201);
+    await api('PATCH', `/transferencias-bodega/${dispatched.id}/recepciones/${receipt.id}/aprobar`);
+    const before = await matrixBalance();
+    matrixTransfer = await api('POST', '/transferencias-bodega', matrixBody, keeper, 201);
+    assert.equal(matrixTransfer.estado, 'COMPLETADA');
+    assert.equal(matrixTransfer.recepcion_requerida, false);
+    assert.equal(matrixTransfer.movimiento_salida_id, null);
+    assert.equal(matrixTransfer.movimiento_ingreso_id, null);
+    assert(matrixTransfer.ingreso_bodega_codigo);
+    assert.equal(await matrixOrderState(), 'TRANSFERIDA');
+    assert.deepEqual(await matrixBalance(), before.map((row, i) => row.map(n => n + [0, 5, 8][i])));
+    const entries = await sql('SELECT producto_id,entrada_cantidad,salida_cantidad FROM kpi_inventory.tb_kardex WHERE movimiento_id=$1 AND NOT is_deleted', [matrixTransfer.movimiento_recepcion_id]);
+    assert.deepEqual(entries.map(row => [Number(row.entrada_cantidad), Number(row.salida_cantidad)]).sort(), [[5, 0], [8, 0]]);
+    const detail = await get(matrixTransfer.id, keeper);
+    assert.equal(detail.puede_editar, false);
+    assert.equal(detail.ingreso_bodega_codigo, matrixTransfer.ingreso_bodega_codigo);
+    await api('GET', `/guias-remision-sri/prepare/${matrixTransfer.id}`, undefined, keeper, 400);
+    await api('POST', '/transferencias-bodega', matrixBody, keeper, 400);
+  });
+  await check('Anulación y reverso del ingreso local conservan el stock y ajustan el saldo de la OC', async () => {
+    const before = await matrixBalance();
+    await api('PATCH', `/transferencias-bodega/${matrixTransfer.id}/anular`);
+    assert.equal(await matrixOrderState(), 'EMITIDA');
+    assert.deepEqual(await matrixBalance(), before);
+    const reverse = `/transferencias-bodega/${matrixTransfer.id}/reversar-anulacion`;
+    await api('PATCH', reverse, undefined, admin, 403);
+    await insert('kpi_security.tb_user_sucursal', { user_id: admin.id, sucursal_id: branches[2].id });
+    assert.equal((await api('PATCH', reverse)).estado, 'COMPLETADA');
+    assert.equal(await matrixOrderState(), 'TRANSFERIDA');
+    assert.deepEqual(await matrixBalance(), before);
+  });
   console.log(JSON.stringify({ passed: checks.length, checks }, null, 2));
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => db.end());
